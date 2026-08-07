@@ -210,6 +210,97 @@ pub(crate) struct Dependency {
     pub(crate) blocker: BlockerIdentity,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(from = "DependencyEdgeKeyWire")]
+pub(crate) struct DependencyEdgeKey {
+    blocked_repository: String,
+    blocked_number: u64,
+    blocker_repository: String,
+    blocker_number: u64,
+}
+
+impl DependencyEdgeKey {
+    pub(crate) fn new(
+        blocked_repository: impl Into<String>,
+        blocked_number: u64,
+        blocker_repository: impl Into<String>,
+        blocker_number: u64,
+    ) -> Self {
+        Self {
+            blocked_repository: blocked_repository.into().to_ascii_lowercase(),
+            blocked_number,
+            blocker_repository: blocker_repository.into().to_ascii_lowercase(),
+            blocker_number,
+        }
+    }
+
+    pub(crate) fn from_dependency(dependency: &Dependency) -> Self {
+        Self::new(
+            &dependency.blocked.repository,
+            dependency.blocked.number,
+            &dependency.blocker.repository,
+            dependency.blocker.number,
+        )
+    }
+
+    pub(crate) fn blocked_repository(&self) -> &str {
+        &self.blocked_repository
+    }
+
+    pub(crate) fn blocked_number(&self) -> u64 {
+        self.blocked_number
+    }
+
+    pub(crate) fn blocker_repository(&self) -> &str {
+        &self.blocker_repository
+    }
+
+    pub(crate) fn blocker_number(&self) -> u64 {
+        self.blocker_number
+    }
+
+    pub(crate) fn is_internal(&self) -> bool {
+        self.blocked_repository
+            .eq_ignore_ascii_case(&self.blocker_repository)
+    }
+}
+
+#[derive(Deserialize)]
+struct DependencyEdgeKeyWire {
+    blocked_repository: String,
+    blocked_number: u64,
+    blocker_repository: String,
+    blocker_number: u64,
+}
+
+impl From<DependencyEdgeKeyWire> for DependencyEdgeKey {
+    fn from(wire: DependencyEdgeKeyWire) -> Self {
+        Self::new(
+            wire.blocked_repository,
+            wire.blocked_number,
+            wire.blocker_repository,
+            wire.blocker_number,
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DependencyPresence {
+    Present,
+    Absent,
+}
+
+impl DependencyPresence {
+    pub(crate) fn from_present(present: bool) -> Self {
+        if present { Self::Present } else { Self::Absent }
+    }
+
+    pub(crate) fn is_present(self) -> bool {
+        matches!(self, Self::Present)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct IssueIdentity {
     pub(crate) repository: String,
@@ -235,4 +326,25 @@ pub(crate) struct BlockerIdentity {
 pub(crate) enum BlockerScope {
     Internal,
     External,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DependencyEdgeKey;
+
+    #[test]
+    fn dependency_edge_keys_canonicalize_construction_and_deserialization() {
+        let constructed = DependencyEdgeKey::new("Owner/Repo", 2, "OWNER/Other", 7);
+        let decoded: DependencyEdgeKey = serde_json::from_value(serde_json::json!({
+            "blocked_repository": "OWNER/REPO",
+            "blocked_number": 2,
+            "blocker_repository": "owner/OTHER",
+            "blocker_number": 7
+        }))
+        .expect("edge key decodes");
+
+        assert_eq!(constructed, decoded);
+        assert_eq!(decoded.blocked_repository(), "owner/repo");
+        assert_eq!(decoded.blocker_repository(), "owner/other");
+    }
 }

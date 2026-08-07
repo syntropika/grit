@@ -12,7 +12,8 @@ use url::Url;
 use crate::{
     auth::AuthToken,
     model::{
-        Actor, BlockerIdentity, BlockerScope, Comment, Dependency, Issue, IssueIdentity, Label,
+        Actor, BlockerIdentity, BlockerScope, Comment, Dependency, DependencyEdgeKey, Issue,
+        IssueIdentity, Label,
     },
     repository::{IssueReference, Repository},
 };
@@ -139,7 +140,7 @@ impl GitHubClient {
             for blocker in blockers {
                 let dependency = normalize_dependency(repository.full_name(), issue, blocker)?;
                 dependencies
-                    .entry(DependencyKey::from(&dependency))
+                    .entry(DependencyEdgeKey::from_dependency(&dependency))
                     .or_insert(dependency);
             }
         }
@@ -500,23 +501,6 @@ impl GitHubClient {
             return Err(GitHubError::CrossOriginPagination);
         }
         Ok(())
-    }
-}
-
-#[derive(Eq, Ord, PartialEq, PartialOrd)]
-struct DependencyKey {
-    blocked_number: u64,
-    blocker_repository: String,
-    blocker_number: u64,
-}
-
-impl From<&Dependency> for DependencyKey {
-    fn from(dependency: &Dependency) -> Self {
-        Self {
-            blocked_number: dependency.blocked.number,
-            blocker_repository: dependency.blocker.repository.to_ascii_lowercase(),
-            blocker_number: dependency.blocker.number,
-        }
     }
 }
 

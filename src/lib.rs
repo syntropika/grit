@@ -1,6 +1,7 @@
 mod atomic_file;
 mod auth;
 mod cli;
+mod dependency_update;
 mod github;
 mod model;
 mod operational;

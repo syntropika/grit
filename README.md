@@ -14,6 +14,10 @@ updates from [Issue #9](https://github.com/syntropika/grit/issues/9), and exact
 horizon-one recommendations from
 [Issue #11](https://github.com/syntropika/grit/issues/11), and offline Priority
 intent projection from [Issue #15](https://github.com/syntropika/grit/issues/15).
+It also reconciles ordered Pending mutations from
+[Issue #20](https://github.com/syntropika/grit/issues/20) and projects offline
+native-Dependency changes from
+[Issue #24](https://github.com/syntropika/grit/issues/24).
 
 ## Build and test
 
@@ -102,11 +106,11 @@ Issue's priority as `declared`, `unspecified`, or `conflict`. A conflict remains
 eligible and does not change readiness; it compares as neutral in later ranking
 commands. Missing canonical Repository labels and conflicts appear as warnings.
 
-Pending Priority mutations are applied in order over the Local replica to
-form the Working graph used by `ready` and `next`. Their JSON identifies every
-affected Issue and result with `pending: true` and the responsible operation
-IDs. Analysis may pull newer GitHub state, but it never replays or writes the
-outbox; reconciliation is a separate explicit operation.
+Pending Priority and native-Dependency mutations are applied in order over the
+Local replica to form the Working graph used by `ready` and `next`. Their JSON
+identifies every affected Issue and result with `pending: true` and the
+responsible operation IDs. Analysis may pull newer GitHub state, but it never
+replays or writes the outbox; reconciliation is a separate explicit operation.
 
 If GitHub cannot be reached, `ready` uses the latest valid Local replica and
 reports its unchanged `synced_at`. A replica is accepted only when its schema,
@@ -149,8 +153,25 @@ The first command means “Issue #42 is blocked by Issue #7.” Grit writes the
 native GitHub `blocked_by` relationship, then performs a complete synchronized
 readback before atomically replacing the Local replica. Repeating either
 operation uses set semantics: an existing edge can be added again and an absent
-edge can be removed again without error. If the write outcome or readback is
-uncertain, the previous Local replica remains unchanged.
+edge can be removed again without error. If GitHub is unavailable or the write
+outcome is ambiguous and a valid Local replica exists, Grit queues the intent,
+leaves that replica unchanged, and immediately projects the edge into offline
+readiness and ranking. A blocker from another Repository is preserved as an
+opaque External blocker with unknown state until GitHub can synchronize it.
+
+Apply queued work explicitly after connectivity returns:
+
+```bash
+grit reconcile --repo OWNER/REPO
+grit reconcile --repo OWNER/REPO --json
+```
+
+Reconciliation refreshes GitHub first, applies each independent mutation
+branch, checkpoints attempted writes, and finishes with a complete synchronized
+readback before publishing the Local replica. Dependency changes use idempotent
+set semantics, so a retry after an ambiguous response observes the desired edge
+instead of duplicating or conflicting with it. A failed operation blocks only
+mutations that declare it as a prerequisite.
 
 ## Product decisions
 

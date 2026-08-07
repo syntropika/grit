@@ -94,7 +94,7 @@ pub(super) fn evidence(
         DecisiveComparison::PageRankBucket { left, right } => (json!(left), json!(right)),
         DecisiveComparison::StableNodeKey { left, right } => (json!(left), json!(right)),
     };
-    let provenance = working.provenance_for_issues(
+    let provenance = working.ranking_provenance_for_issues(
         std::iter::once(winner.issue.number)
             .chain(winner.unlocks.iter().map(|issue| issue.number))
             .chain(std::iter::once(runner_up.issue.number))

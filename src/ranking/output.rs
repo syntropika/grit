@@ -312,7 +312,7 @@ pub(super) fn candidate_output(
     reasons: Vec<Reason>,
 ) -> CandidateResult {
     let first_issue = issue_reference(working, candidate.issue);
-    let provenance = working.provenance_for_issues(
+    let provenance = working.ranking_provenance_for_issues(
         std::iter::once(candidate.issue.number)
             .chain(candidate.unlocks.iter().map(|issue| issue.number))
             .chain(ranking_provenance_context.iter().copied()),

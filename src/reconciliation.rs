@@ -3,13 +3,22 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
 use thiserror::Error;
 
+mod dependency;
+mod priority;
+
+#[cfg(test)]
+use priority::{PendingClassification, classify_priority};
+
 use crate::{
-    github::GitHubClient,
-    model::{Issue, LocalReplica},
-    outbox::{MutationState, OutboxError, OutboxStore, PendingMutation, PriorityWrite},
+    github::{DependencyIntent, GitHubClient},
+    model::{DependencyEdgeKey, DependencyPresence, Issue, LocalReplica},
+    outbox::{
+        DependencyMutationState, MutationStateUpdate, OutboxError, OutboxStore, PendingMutation,
+        PriorityMutationState, PriorityWrite,
+    },
     priority::{DeclaredPriority, LogicalPriority, PrioritySelection, PriorityState},
     replica_sync::{self, ReplicaSyncError},
-    repository::Repository,
+    repository::{IssueReference, Repository},
     store::{ReplicaStore, StoreError},
 };
 
@@ -40,20 +49,41 @@ pub(crate) struct ReconciliationResult {
 #[derive(Clone, Serialize)]
 pub(crate) struct OperationResult {
     pub(crate) id: String,
-    pub(crate) kind: &'static str,
     pub(crate) issue_number: u64,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) depends_on: Vec<String>,
     pub(crate) classification: Classification,
     pub(crate) outcome: Outcome,
-    pub(crate) base: LogicalPriority,
-    pub(crate) local: LogicalPriority,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) remote: Option<LogicalPriority>,
+    #[serde(flatten)]
+    pub(crate) details: OperationDetails,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) blocked_by: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum OperationDetails {
+    PriorityUpdate {
+        base: LogicalPriority,
+        local: LogicalPriority,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        remote: Option<LogicalPriority>,
+    },
+    DependencyUpdate {
+        edge: DependencyEdgeResult,
+        desired_present: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        remote_present: Option<bool>,
+    },
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) struct DependencyEdgeResult {
+    pub(crate) blocked_number: u64,
+    pub(crate) blocker_repository: String,
+    pub(crate) blocker_number: u64,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq, Serialize)]
@@ -133,7 +163,8 @@ pub(crate) fn reconcile(
         client,
         repository,
         transaction: &mut transaction,
-        remote: remote_priorities(&preflight),
+        remote: priority::remote_priorities(&preflight),
+        remote_dependencies: dependency::remote_dependencies(&preflight),
         results: Vec::new(),
         requires_final_refresh: false,
     }
@@ -167,6 +198,7 @@ struct ReconciliationPass<'client, 'transaction, 'store> {
     repository: &'client Repository,
     transaction: &'transaction mut crate::outbox::OutboxTransaction<'store>,
     remote: BTreeMap<u64, RemotePriority>,
+    remote_dependencies: BTreeSet<DependencyEdgeKey>,
     results: Vec<OperationResult>,
     requires_final_refresh: bool,
 }
@@ -196,280 +228,11 @@ impl ReconciliationPass<'_, '_, '_> {
             .expect("operation ID came from this transaction")
             .clone();
         let blocked_by = self.blocking_dependencies(&operation);
-        if !blocked_by.is_empty() {
-            self.stage_state(
-                operation_id,
-                MutationState::TransitivelyBlocked {
-                    blocked_by: blocked_by.clone(),
-                },
-            )?;
-            self.record(
-                &operation,
-                Classification::TransitivelyBlocked,
-                Outcome::TransitivelyBlocked,
-                self.observed_priority(operation.issue_number()),
-                blocked_by,
-                None,
-            );
-            return Ok(());
+        if let Some((edge, desired)) = operation.dependency_values() {
+            self.reconcile_dependency_operation(&operation, edge.clone(), desired, blocked_by)
+        } else {
+            self.reconcile_priority_operation(&operation, blocked_by)
         }
-
-        let Some(remote) = self.remote.get(&operation.issue_number()).cloned() else {
-            return self.record_missing_issue(&operation);
-        };
-        let state = self
-            .transaction
-            .operation(operation_id)
-            .expect("known operation")
-            .state()
-            .clone();
-        self.reconcile_state(&operation, state, remote)
-    }
-
-    fn reconcile_state(
-        &mut self,
-        operation: &PendingMutation,
-        state: MutationState,
-        mut remote: RemotePriority,
-    ) -> Result<(), ReconciliationError> {
-        match state {
-            MutationState::Conflicting { .. } => self.classify_pending(operation, &mut remote),
-            MutationState::Applied => {
-                self.record_terminal(operation, Classification::Applicable, remote.logical)
-            }
-            MutationState::AlreadySatisfied => {
-                self.record_terminal(operation, Classification::AlreadySatisfied, remote.logical)
-            }
-            MutationState::ResolvedRemote { .. } => {
-                self.record(
-                    operation,
-                    Classification::AlreadySatisfied,
-                    Outcome::ResolvedRemote,
-                    Some(remote.logical),
-                    Vec::new(),
-                    None,
-                );
-                Ok(())
-            }
-            MutationState::Applying {
-                expected_labels,
-                remaining_writes,
-                ..
-            } => {
-                if remote.canonical_labels != expected_labels {
-                    if remote.logical == *operation.desired() {
-                        self.checkpoint_state(operation.id(), MutationState::Applied)?;
-                        self.record(
-                            operation,
-                            Classification::Applicable,
-                            Outcome::Applied,
-                            Some(remote.logical),
-                            Vec::new(),
-                            None,
-                        );
-                        Ok(())
-                    } else {
-                        self.record_conflict(operation, remote.logical)
-                    }
-                } else {
-                    self.execute_plan(operation, expected_labels, remaining_writes, &mut remote)
-                }
-            }
-            MutationState::Pending
-            | MutationState::Failed { .. }
-            | MutationState::TransitivelyBlocked { .. } => {
-                self.classify_pending(operation, &mut remote)
-            }
-        }
-    }
-
-    fn classify_pending(
-        &mut self,
-        operation: &PendingMutation,
-        remote: &mut RemotePriority,
-    ) -> Result<(), ReconciliationError> {
-        match classify_priority(operation.base(), operation.desired(), &remote.logical) {
-            PendingClassification::AlreadySatisfied => {
-                self.stage_state(operation.id(), MutationState::AlreadySatisfied)?;
-                self.record(
-                    operation,
-                    Classification::AlreadySatisfied,
-                    Outcome::AlreadySatisfied,
-                    Some(remote.logical.clone()),
-                    Vec::new(),
-                    None,
-                );
-                Ok(())
-            }
-            PendingClassification::Conflicting => {
-                self.record_conflict(operation, remote.logical.clone())
-            }
-            PendingClassification::Applicable => {
-                let writes =
-                    PriorityWrite::canonical_plan(&remote.canonical_labels, operation.desired())
-                        .expect("remote Priority labels and desired outbox value are valid");
-                self.checkpoint_state(
-                    operation.id(),
-                    MutationState::Applying {
-                        expected_labels: remote.canonical_labels.clone(),
-                        remaining_writes: writes.clone(),
-                        last_error: None,
-                    },
-                )?;
-                self.execute_plan(operation, remote.canonical_labels.clone(), writes, remote)
-            }
-        }
-    }
-
-    fn execute_plan(
-        &mut self,
-        operation: &PendingMutation,
-        expected_labels: Vec<String>,
-        remaining_writes: Vec<PriorityWrite>,
-        remote: &mut RemotePriority,
-    ) -> Result<(), ReconciliationError> {
-        let (outcome, error) =
-            self.execute_writes(operation, expected_labels, remaining_writes, remote)?;
-        self.remote.insert(operation.issue_number(), remote.clone());
-        self.record(
-            operation,
-            Classification::Applicable,
-            outcome,
-            Some(remote.logical.clone()),
-            Vec::new(),
-            error,
-        );
-        Ok(())
-    }
-
-    fn execute_writes(
-        &mut self,
-        operation: &PendingMutation,
-        mut expected_labels: Vec<String>,
-        mut remaining_writes: Vec<PriorityWrite>,
-        remote: &mut RemotePriority,
-    ) -> Result<(Outcome, Option<String>), ReconciliationError> {
-        while let Some(write) = remaining_writes.first().cloned() {
-            self.requires_final_refresh = true;
-            let result = match &write {
-                PriorityWrite::Add { label } => {
-                    self.client
-                        .add_issue_label(self.repository, operation.issue_number(), label)
-                }
-                PriorityWrite::Remove { label } => {
-                    self.client
-                        .remove_issue_label(self.repository, operation.issue_number(), label)
-                }
-            };
-            if let Err(error) = result {
-                let message = error.to_string();
-                self.checkpoint_state(
-                    operation.id(),
-                    MutationState::Applying {
-                        expected_labels,
-                        remaining_writes,
-                        last_error: Some(message.clone()),
-                    },
-                )?;
-                return Ok((Outcome::Failed, Some(message)));
-            }
-            write.apply_to(&mut expected_labels);
-            remaining_writes.remove(0);
-            let state = if remaining_writes.is_empty() {
-                MutationState::Applied
-            } else {
-                MutationState::Applying {
-                    expected_labels: expected_labels.clone(),
-                    remaining_writes: remaining_writes.clone(),
-                    last_error: None,
-                }
-            };
-            self.checkpoint_state(operation.id(), state)?;
-        }
-        remote.canonical_labels = expected_labels;
-        remote.logical = LogicalPriority::from_canonical_labels(&remote.canonical_labels)
-            .expect("write plans retain canonical Priority labels");
-        Ok((Outcome::Applied, None))
-    }
-
-    fn record_conflict(
-        &mut self,
-        operation: &PendingMutation,
-        observed: LogicalPriority,
-    ) -> Result<(), ReconciliationError> {
-        self.stage_state(
-            operation.id(),
-            MutationState::Conflicting {
-                remote: observed.clone(),
-            },
-        )?;
-        self.record(
-            operation,
-            Classification::Conflicting,
-            Outcome::Conflicting,
-            Some(observed),
-            Vec::new(),
-            None,
-        );
-        Ok(())
-    }
-
-    fn record_terminal(
-        &mut self,
-        operation: &PendingMutation,
-        classification: Classification,
-        observed: LogicalPriority,
-    ) -> Result<(), ReconciliationError> {
-        self.record(
-            operation,
-            classification,
-            Outcome::Checkpointed,
-            Some(observed),
-            Vec::new(),
-            None,
-        );
-        Ok(())
-    }
-
-    fn record_missing_issue(
-        &mut self,
-        operation: &PendingMutation,
-    ) -> Result<(), ReconciliationError> {
-        let error = format!("Issue #{} is absent from GitHub", operation.issue_number());
-        self.stage_state(
-            operation.id(),
-            MutationState::Failed {
-                error: error.clone(),
-            },
-        )?;
-        self.record(
-            operation,
-            Classification::Applicable,
-            Outcome::Failed,
-            None,
-            Vec::new(),
-            Some(error),
-        );
-        Ok(())
-    }
-
-    fn checkpoint_state(
-        &mut self,
-        operation_id: &str,
-        state: MutationState,
-    ) -> Result<(), ReconciliationError> {
-        self.transaction
-            .checkpoint_state(self.repository, operation_id, state)?;
-        Ok(())
-    }
-
-    fn stage_state(
-        &mut self,
-        operation_id: &str,
-        state: MutationState,
-    ) -> Result<(), ReconciliationError> {
-        self.transaction.stage_state(operation_id, state)?;
-        Ok(())
     }
 
     fn blocking_dependencies(&self, operation: &PendingMutation) -> Vec<String> {
@@ -479,62 +242,15 @@ impl ReconciliationPass<'_, '_, '_> {
             .filter(|dependency| {
                 self.transaction
                     .operation(dependency)
-                    .is_some_and(|dependency| !dependency.state().permits_dependents())
+                    .is_some_and(|dependency| !dependency.permits_dependents())
             })
             .cloned()
             .collect()
     }
-
-    fn observed_priority(&self, issue_number: u64) -> Option<LogicalPriority> {
-        self.remote
-            .get(&issue_number)
-            .map(|priority| priority.logical.clone())
-    }
-
-    fn record(
-        &mut self,
-        operation: &PendingMutation,
-        classification: Classification,
-        outcome: Outcome,
-        remote: Option<LogicalPriority>,
-        blocked_by: Vec<String>,
-        error: Option<String>,
-    ) {
-        self.results.push(result_for(
-            operation,
-            classification,
-            outcome,
-            remote,
-            blocked_by,
-            error,
-        ));
-    }
 }
-
 struct PassResult {
     operations: Vec<OperationResult>,
     requires_final_refresh: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PendingClassification {
-    Applicable,
-    AlreadySatisfied,
-    Conflicting,
-}
-
-fn classify_priority(
-    base: &LogicalPriority,
-    desired: &LogicalPriority,
-    remote: &LogicalPriority,
-) -> PendingClassification {
-    if remote == desired {
-        PendingClassification::AlreadySatisfied
-    } else if remote == base {
-        PendingClassification::Applicable
-    } else {
-        PendingClassification::Conflicting
-    }
 }
 
 fn retire_verified_operations(
@@ -543,11 +259,12 @@ fn retire_verified_operations(
     final_replica: &LocalReplica,
     results: &mut [OperationResult],
 ) -> Result<(), ReconciliationError> {
-    let final_priorities = remote_priorities(final_replica);
+    let final_priorities = priority::remote_priorities(final_replica);
+    let final_dependencies = dependency::remote_dependencies(final_replica);
     let terminal_ids: Vec<_> = transaction
         .operations()
         .iter()
-        .filter(|operation| operation.state().is_successfully_terminal())
+        .filter(|operation| operation.is_successfully_terminal())
         .map(|operation| operation.id().to_owned())
         .collect();
     let terminal_set: BTreeSet<_> = terminal_ids.iter().cloned().collect();
@@ -560,18 +277,26 @@ fn retire_verified_operations(
             .expect("known terminal operation")
             .clone();
         if superseded.contains(&operation_id)
-            || matches!(operation.state(), MutationState::ResolvedRemote { .. })
+            || matches!(
+                operation.priority_state(),
+                Some(PriorityMutationState::ResolvedRemote { .. })
+            )
         {
             retired.insert(operation_id);
             continue;
         }
-        let observed = final_priorities
-            .get(&operation.issue_number())
-            .map(|priority| priority.logical.clone());
-        if observed.as_ref() == Some(operation.desired()) {
-            retired.insert(operation_id);
+        let verified = if operation.dependency_values().is_some() {
+            dependency::verify_terminal(
+                &operation,
+                &final_dependencies,
+                results,
+                &mut state_updates,
+            )
         } else {
-            convert_to_late_conflict(results, &operation_id, observed, &mut state_updates);
+            priority::verify_terminal(&operation, &final_priorities, results, &mut state_updates)
+        };
+        if verified {
+            retired.insert(operation_id);
         }
     }
     transaction.finalize(repository, &retired, state_updates)?;
@@ -582,43 +307,35 @@ fn superseded_terminal_ids(
     operations: &[PendingMutation],
     terminal: &BTreeSet<String>,
 ) -> BTreeSet<String> {
-    let issue_by_id: BTreeMap<_, _> = operations
+    let target_by_id: BTreeMap<_, _> = operations
         .iter()
-        .map(|operation| (operation.id(), operation.issue_number()))
+        .map(|operation| (operation.id(), mutation_target(operation)))
         .collect();
     operations
         .iter()
         .filter(|operation| terminal.contains(operation.id()))
         .flat_map(|operation| {
             operation.depends_on().iter().filter(|dependency| {
-                issue_by_id
+                target_by_id
                     .get(dependency.as_str())
-                    .is_some_and(|issue| *issue == operation.issue_number())
+                    .is_some_and(|target| *target == mutation_target(operation))
             })
         })
         .cloned()
         .collect()
 }
 
-fn convert_to_late_conflict(
-    results: &mut [OperationResult],
-    operation_id: &str,
-    observed: Option<LogicalPriority>,
-    state_updates: &mut BTreeMap<String, MutationState>,
-) {
-    let observed = observed.unwrap_or(LogicalPriority::Unspecified);
-    state_updates.insert(
-        operation_id.to_owned(),
-        MutationState::Conflicting {
-            remote: observed.clone(),
-        },
-    );
-    if let Some(result) = results.iter_mut().find(|result| result.id == operation_id) {
-        result.classification = Classification::Conflicting;
-        result.outcome = Outcome::Conflicting;
-        result.remote = Some(observed);
-        result.error = None;
-    }
+#[derive(Clone, Eq, PartialEq)]
+enum MutationTarget {
+    Priority(u64),
+    Dependency(DependencyEdgeKey),
+}
+
+fn mutation_target(operation: &PendingMutation) -> MutationTarget {
+    operation
+        .dependency_values()
+        .map(|(edge, _)| MutationTarget::Dependency(edge.clone()))
+        .unwrap_or_else(|| MutationTarget::Priority(operation.issue_number()))
 }
 
 pub(crate) fn resolve(
@@ -632,7 +349,8 @@ pub(crate) fn resolve(
     let operation = transaction
         .operation(operation_id)
         .ok_or_else(|| ReconciliationError::UnknownOperation(operation_id.to_owned()))?;
-    let MutationState::Conflicting { remote } = operation.state().clone() else {
+    let Some(PriorityMutationState::Conflicting { remote }) = operation.priority_state().cloned()
+    else {
         return Err(ReconciliationError::OperationNotConflicting(
             operation_id.to_owned(),
         ));
@@ -663,54 +381,6 @@ pub(crate) fn resolve(
         choice: choice_name,
         reconciliation: reconcile(client, repository)?,
     })
-}
-
-fn remote_priorities(replica: &LocalReplica) -> BTreeMap<u64, RemotePriority> {
-    replica
-        .issues
-        .iter()
-        .map(|issue| (issue.number, remote_priority(issue)))
-        .collect()
-}
-
-fn remote_priority(issue: &Issue) -> RemotePriority {
-    let mut canonical_labels: Vec<_> = issue
-        .labels
-        .iter()
-        .filter_map(|label| {
-            DeclaredPriority::parse(&label.name)
-                .map(|priority| priority.canonical_label().to_owned())
-        })
-        .collect();
-    canonical_labels.sort();
-    canonical_labels.dedup();
-    RemotePriority {
-        logical: LogicalPriority::from_state(&PriorityState::from_issue_labels(&issue.labels)),
-        canonical_labels,
-    }
-}
-
-fn result_for(
-    operation: &PendingMutation,
-    classification: Classification,
-    outcome: Outcome,
-    remote: Option<LogicalPriority>,
-    blocked_by: Vec<String>,
-    error: Option<String>,
-) -> OperationResult {
-    OperationResult {
-        id: operation.id().to_owned(),
-        kind: "priority_update",
-        issue_number: operation.issue_number(),
-        depends_on: operation.depends_on().to_vec(),
-        classification,
-        outcome,
-        base: operation.base().clone(),
-        local: operation.desired().clone(),
-        remote,
-        blocked_by,
-        error,
-    }
 }
 
 #[derive(Debug, Error)]
