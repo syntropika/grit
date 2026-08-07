@@ -9,7 +9,8 @@ frontier enumeration from
 [Issue #2](https://github.com/syntropika/grit/issues/2) and
 [Issue #3](https://github.com/syntropika/grit/issues/3), plus canonical
 Declared priority support from
-[Issue #6](https://github.com/syntropika/grit/issues/6).
+[Issue #6](https://github.com/syntropika/grit/issues/6) and
+[Issue #9](https://github.com/syntropika/grit/issues/9).
 
 ## Build and test
 
@@ -63,6 +64,19 @@ grit init --repo OWNER/REPO --json
 Initialization creates only missing canonical names. It never renames,
 recolors, redescribes, deletes, or assigns an existing label, so repeated runs
 converge without further changes. Read commands never create labels.
+
+Update one Issue's logical Priority online with a full Issue reference:
+
+```bash
+grit update OWNER/REPO#NUMBER --priority p0
+grit update OWNER/REPO#NUMBER --priority none --json
+```
+
+A concrete value removes every other canonical Priority label and leaves
+exactly the requested one; `none` removes all canonical Priority labels. Grit
+preserves non-Priority labels and every other Issue field. It writes GitHub
+first, then synchronizes and verifies the logical result before publishing the
+Local replica. The output reports both the previous and resulting Priority.
 
 ## Enumerate Executable work
 
