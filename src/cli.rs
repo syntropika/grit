@@ -11,6 +11,7 @@ use crate::{
     auth::{AuthError, AuthToken},
     github::{GitHubClient, GitHubError, HashInput},
     model::{LocalReplica, REPLICA_SCHEMA_VERSION},
+    repository::{Repository, RepositoryError},
     store::{ReplicaStore, StoreError},
 };
 
@@ -48,30 +49,29 @@ fn sync(repository: &Repository, json: bool) -> Result<(), CliError> {
     let hostname = env::var("GRIT_GITHUB_HOST")
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .or_else(|| base_url.host_str().map(str::to_owned))
-        .ok_or(CliError::InvalidApiBase)?;
+        .unwrap_or_else(|| authentication_hostname(&base_url));
     let token = AuthToken::discover(&hostname)?;
     let client = GitHubClient::new(base_url, &token)?;
-    let data = client.fetch_repository(&repository.owner, &repository.name)?;
+    let data = client.fetch_repository(repository)?;
 
     let hash_input = HashInput {
         schema_version: REPLICA_SCHEMA_VERSION,
-        repository: &repository.full_name,
+        repository: repository.full_name(),
         issues: &data.issues,
         dependencies: &data.dependencies,
     };
     let canonical = serde_json::to_vec(&hash_input).map_err(CliError::EncodeHashInput)?;
     let input_hash = hex::encode(Sha256::digest(canonical));
     let replica = LocalReplica {
-        schema_version: REPLICA_SCHEMA_VERSION,
-        repository: repository.full_name.clone(),
+        schema_version: REPLICA_SCHEMA_VERSION.to_owned(),
+        repository: repository.full_name().to_owned(),
         synced_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
         input_hash,
         issues: data.issues,
         dependencies: data.dependencies,
     };
 
-    ReplicaStore::discover(&repository.full_name)?.publish(&replica)?;
+    ReplicaStore::discover(repository)?.publish(&replica)?;
     print_result(&replica, json)?;
     Ok(())
 }
@@ -83,7 +83,7 @@ fn print_result(replica: &LocalReplica, json: bool) -> Result<(), CliError> {
         .map(|issue| issue.comments.len())
         .sum();
     let snapshot = SnapshotSummary {
-        schema_version: replica.schema_version,
+        schema_version: &replica.schema_version,
         synced_at: &replica.synced_at,
         input_hash: &replica.input_hash,
         issue_count: replica.issues.len(),
@@ -133,36 +133,14 @@ fn api_base_url() -> Result<Url, CliError> {
     Ok(parsed)
 }
 
-struct Repository {
-    owner: String,
-    name: String,
-    full_name: String,
-}
-
-impl Repository {
-    fn parse(value: &str) -> Result<Self, CliError> {
-        let Some((owner, name)) = value.split_once('/') else {
-            return Err(CliError::InvalidRepository);
-        };
-        if name.contains('/') || !valid_repository_part(owner) || !valid_repository_part(name) {
-            return Err(CliError::InvalidRepository);
-        }
-        Ok(Self {
-            owner: owner.to_owned(),
-            name: name.to_owned(),
-            full_name: format!("{owner}/{name}"),
-        })
+fn authentication_hostname(base_url: &Url) -> String {
+    match base_url
+        .host_str()
+        .expect("validated API base URL has a host")
+    {
+        host if host.eq_ignore_ascii_case("api.github.com") => "github.com".to_owned(),
+        host => host.to_owned(),
     }
-}
-
-fn valid_repository_part(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 100
-        && value != "."
-        && value != ".."
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
 #[derive(Serialize)]
@@ -175,7 +153,7 @@ struct SyncOutput<'a> {
 
 #[derive(Serialize)]
 struct SnapshotSummary<'a> {
-    schema_version: &'static str,
+    schema_version: &'a str,
     synced_at: &'a str,
     input_hash: &'a str,
     issue_count: usize,
@@ -185,8 +163,8 @@ struct SnapshotSummary<'a> {
 
 #[derive(Debug, Error)]
 pub(crate) enum CliError {
-    #[error("repository must use a safe OWNER/REPO form")]
-    InvalidRepository,
+    #[error(transparent)]
+    Repository(#[from] RepositoryError),
     #[error("GRIT_GITHUB_API_URL is invalid: {0}")]
     ParseApiBase(url::ParseError),
     #[error("GRIT_GITHUB_API_URL must be a safe absolute HTTP(S) base URL")]
@@ -201,4 +179,20 @@ pub(crate) enum CliError {
     EncodeHashInput(serde_json::Error),
     #[error("could not encode sync JSON output: {0}")]
     EncodeOutput(serde_json::Error),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::authentication_hostname;
+    use url::Url;
+
+    #[test]
+    fn public_github_api_uses_the_github_dot_com_authentication_host() {
+        let public_api = Url::parse("https://api.github.com/").expect("public API URL");
+        let enterprise_api =
+            Url::parse("https://github.example/api/v3/").expect("enterprise API URL");
+
+        assert_eq!(authentication_hostname(&public_api), "github.com");
+        assert_eq!(authentication_hostname(&enterprise_api), "github.example");
+    }
 }

@@ -14,6 +14,7 @@ use crate::{
     model::{
         Actor, BlockerIdentity, BlockerScope, Comment, Dependency, Issue, IssueIdentity, Label,
     },
+    repository::Repository,
 };
 
 const API_VERSION: &str = "2026-03-10";
@@ -56,10 +57,10 @@ impl GitHubClient {
 
     pub(crate) fn fetch_repository(
         &self,
-        owner: &str,
-        repo: &str,
+        repository: &Repository,
     ) -> Result<RepositoryData, GitHubError> {
-        let repository = format!("{owner}/{repo}");
+        let owner = repository.owner();
+        let repo = repository.name();
         let issue_url = self.endpoint(&format!("repos/{owner}/{repo}/issues"))?;
         let raw_issues: Vec<GitHubIssue> = self.paginate(
             issue_url,
@@ -83,7 +84,7 @@ impl GitHubClient {
             self.paginate(comments_url, &[("per_page", "100")])?;
         attach_comments(&mut issues, raw_comments);
 
-        let mut dependencies = Vec::new();
+        let mut dependencies = BTreeMap::new();
         for issue in &issues {
             let dependency_url = self.endpoint(&format!(
                 "repos/{owner}/{repo}/issues/{}/dependencies/blocked_by",
@@ -92,33 +93,16 @@ impl GitHubClient {
             let blockers: Vec<GitHubBlocker> =
                 self.paginate(dependency_url, &[("per_page", "100")])?;
             for blocker in blockers {
-                dependencies.push(normalize_dependency(&repository, issue, blocker)?);
+                let dependency = normalize_dependency(repository.full_name(), issue, blocker)?;
+                dependencies
+                    .entry(DependencyKey::from(&dependency))
+                    .or_insert(dependency);
             }
         }
-        dependencies.sort_by(|left, right| {
-            (
-                left.blocked.number,
-                left.blocker.repository.to_ascii_lowercase(),
-                left.blocker.number,
-            )
-                .cmp(&(
-                    right.blocked.number,
-                    right.blocker.repository.to_ascii_lowercase(),
-                    right.blocker.number,
-                ))
-        });
-        dependencies.dedup_by(|left, right| {
-            left.blocked.number == right.blocked.number
-                && left.blocker.number == right.blocker.number
-                && left
-                    .blocker
-                    .repository
-                    .eq_ignore_ascii_case(&right.blocker.repository)
-        });
 
         Ok(RepositoryData {
             issues,
-            dependencies,
+            dependencies: dependencies.into_values().collect(),
         })
     }
 
@@ -183,6 +167,23 @@ impl GitHubClient {
             return Err(GitHubError::CrossOriginPagination);
         }
         Ok(())
+    }
+}
+
+#[derive(Eq, Ord, PartialEq, PartialOrd)]
+struct DependencyKey {
+    blocked_number: u64,
+    blocker_repository: String,
+    blocker_number: u64,
+}
+
+impl From<&Dependency> for DependencyKey {
+    fn from(dependency: &Dependency) -> Self {
+        Self {
+            blocked_number: dependency.blocked.number,
+            blocker_repository: dependency.blocker.repository.to_ascii_lowercase(),
+            blocker_number: dependency.blocker.number,
+        }
     }
 }
 
@@ -295,7 +296,7 @@ fn api_status_error(status: StatusCode, headers: &HeaderMap) -> GitHubError {
         .and_then(|value| value.to_str().ok());
 
     if status == StatusCode::TOO_MANY_REQUESTS
-        || status == StatusCode::FORBIDDEN && remaining == Some("0")
+        || status == StatusCode::FORBIDDEN && (remaining == Some("0") || retry_after.is_some())
     {
         return GitHubError::RateLimited {
             reset: reset.map(str::to_owned),

@@ -7,14 +7,14 @@ use std::{
 use directories::ProjectDirs;
 use thiserror::Error;
 
-use crate::model::LocalReplica;
+use crate::{model::LocalReplica, repository::Repository};
 
 pub(crate) struct ReplicaStore {
     replica_path: PathBuf,
 }
 
 impl ReplicaStore {
-    pub(crate) fn discover(repository: &str) -> Result<Self, StoreError> {
+    pub(crate) fn discover(repository: &Repository) -> Result<Self, StoreError> {
         let root = match std::env::var_os("GRIT_STATE_DIR") {
             Some(path) if !path.is_empty() => PathBuf::from(path),
             _ => ProjectDirs::from("", "", "grit")
@@ -22,13 +22,10 @@ impl ReplicaStore {
                 .data_local_dir()
                 .to_owned(),
         };
-        let (owner, repo) = repository
-            .split_once('/')
-            .ok_or(StoreError::InvalidRepository)?;
         let replica_path = root
             .join("repositories")
-            .join(owner.to_ascii_lowercase())
-            .join(repo.to_ascii_lowercase())
+            .join(repository.owner().to_ascii_lowercase())
+            .join(repository.name().to_ascii_lowercase())
             .join("replica.json");
         Ok(Self { replica_path })
     }
@@ -37,7 +34,7 @@ impl ReplicaStore {
         let parent = self
             .replica_path
             .parent()
-            .ok_or(StoreError::InvalidRepository)?;
+            .expect("replica path always has a parent");
         fs::create_dir_all(parent).map_err(StoreError::CreateDirectory)?;
 
         let mut bytes = serde_json::to_vec_pretty(replica).map_err(StoreError::Encode)?;
@@ -99,8 +96,6 @@ fn sync_directory(_directory: &Path) -> io::Result<()> {
 pub(crate) enum StoreError {
     #[error("could not determine a local state directory")]
     NoStateDirectory,
-    #[error("repository scope is invalid")]
-    InvalidRepository,
     #[error("could not create the Local replica directory: {0}")]
     CreateDirectory(io::Error),
     #[error("could not create an atomic Local replica candidate: {0}")]

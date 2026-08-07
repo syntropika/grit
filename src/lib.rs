@@ -2,6 +2,7 @@ mod auth;
 mod cli;
 mod github;
 mod model;
+mod repository;
 mod store;
 
 use std::process::ExitCode;

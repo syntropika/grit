@@ -4,7 +4,7 @@ pub(crate) const REPLICA_SCHEMA_VERSION: &str = "grit.local-replica/v1";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct LocalReplica {
-    pub(crate) schema_version: &'static str,
+    pub(crate) schema_version: String,
     pub(crate) repository: String,
     pub(crate) synced_at: String,
     pub(crate) input_hash: String,

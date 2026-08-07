@@ -45,12 +45,7 @@ fn sync_uses_gh_token_and_reports_a_versioned_snapshot() {
         .create();
 
     let state = TempDir::new().expect("temporary state directory");
-    let output = Command::new(env!("CARGO_BIN_EXE_grit"))
-        .args(["sync", "--repo", "acme/widgets", "--json"])
-        .env("GH_TOKEN", "automation-token")
-        .env("GRIT_GITHUB_API_URL", github.url())
-        .env("GRIT_STATE_DIR", state.path())
-        .env("PATH", "")
+    let output = sync_command(&state, &github.url(), "acme/widgets", true)
         .output()
         .expect("run grit");
 
@@ -117,11 +112,8 @@ fn sync_falls_back_to_gh_token_when_gh_session_output_is_invalid() {
         .expect("fake gh executable");
     fs::set_permissions(&gh, fs::Permissions::from_mode(0o700)).expect("executable fake gh");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_grit"))
-        .args(["sync", "--repo", "acme/empty", "--json"])
+    let output = sync_command(&state, &github.url(), "acme/empty", true)
         .env("GH_TOKEN", "fallback-token")
-        .env("GRIT_GITHUB_API_URL", github.url())
-        .env("GRIT_STATE_DIR", state.path())
         .env("PATH", bin.path())
         .output()
         .expect("run grit");
@@ -218,12 +210,7 @@ fn sync_paginates_and_persists_only_normalized_issue_data() {
         .create();
 
     let state = TempDir::new().expect("temporary state directory");
-    let output = Command::new(env!("CARGO_BIN_EXE_grit"))
-        .args(["sync", "--repo", "acme/widgets", "--json"])
-        .env("GH_TOKEN", "automation-token")
-        .env("GRIT_GITHUB_API_URL", github.url())
-        .env("GRIT_STATE_DIR", state.path())
-        .env("PATH", "")
+    let output = sync_command(&state, &github.url(), "acme/widgets", true)
         .output()
         .expect("run grit");
 
@@ -330,12 +317,7 @@ fn pagination_failure_preserves_the_previous_complete_replica() {
         .with_body("[]")
         .create();
 
-    let initial = Command::new(env!("CARGO_BIN_EXE_grit"))
-        .args(["sync", "--repo", "acme/widgets", "--json"])
-        .env("GH_TOKEN", "automation-token")
-        .env("GRIT_GITHUB_API_URL", initial_github.url())
-        .env("GRIT_STATE_DIR", state.path())
-        .env("PATH", "")
+    let initial = sync_command(&state, &initial_github.url(), "acme/widgets", true)
         .output()
         .expect("initial sync");
     assert!(initial.status.success());
@@ -371,12 +353,7 @@ fn pagination_failure_preserves_the_previous_complete_replica() {
         .with_body("{\"message\":\"temporary failure\"}")
         .create();
 
-    let failed = Command::new(env!("CARGO_BIN_EXE_grit"))
-        .args(["sync", "--repo", "acme/widgets", "--json"])
-        .env("GH_TOKEN", "automation-token")
-        .env("GRIT_GITHUB_API_URL", failing_github.url())
-        .env("GRIT_STATE_DIR", state.path())
-        .env("PATH", "")
+    let failed = sync_command(&state, &failing_github.url(), "acme/widgets", true)
         .output()
         .expect("failed sync");
 
@@ -426,16 +403,14 @@ fn sync_reuses_an_available_gh_session_for_human_output() {
     let gh = bin.path().join("gh");
     fs::write(
         &gh,
-        "#!/bin/sh\n[ \"$1\" = auth ] && [ \"$2\" = token ] || exit 2\nprintf 'gh-session-token\\n'\n",
+        "#!/bin/sh\n[ \"$1\" = auth ] && [ \"$2\" = token ] && [ \"$3\" = --hostname ] && [ \"$4\" = github.com ] || exit 2\nprintf 'gh-session-token\\n'\n",
     )
     .expect("fake gh executable");
     fs::set_permissions(&gh, fs::Permissions::from_mode(0o700)).expect("executable fake gh");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_grit"))
-        .args(["sync", "--repo", "acme/empty"])
+    let output = sync_command(&state, &github.url(), "acme/empty", false)
         .env_remove("GH_TOKEN")
-        .env("GRIT_GITHUB_API_URL", github.url())
-        .env("GRIT_STATE_DIR", state.path())
+        .env("GRIT_GITHUB_HOST", "github.com")
         .env("PATH", bin.path())
         .output()
         .expect("run grit");
@@ -457,12 +432,8 @@ fn sync_reuses_an_available_gh_session_for_human_output() {
 #[test]
 fn authentication_failure_does_not_publish_a_replica() {
     let state = TempDir::new().expect("temporary state directory");
-    let output = Command::new(env!("CARGO_BIN_EXE_grit"))
-        .args(["sync", "--repo", "acme/widgets", "--json"])
+    let output = sync_command(&state, "http://127.0.0.1:1", "acme/widgets", true)
         .env_remove("GH_TOKEN")
-        .env("GRIT_GITHUB_API_URL", "http://127.0.0.1:1")
-        .env("GRIT_STATE_DIR", state.path())
-        .env("PATH", "")
         .output()
         .expect("run grit");
 
@@ -482,21 +453,16 @@ fn rate_limit_failure_is_actionable_and_does_not_publish_a_replica() {
             Matcher::UrlEncoded("direction".into(), "asc".into()),
             Matcher::UrlEncoded("per_page".into(), "100".into()),
         ]))
-        .with_status(429)
+        .with_status(403)
         .with_header("content-type", "application/json")
-        .with_header("x-ratelimit-remaining", "0")
+        .with_header("x-ratelimit-remaining", "75")
         .with_header("x-ratelimit-reset", "1786100000")
         .with_header("retry-after", "60")
         .with_body("{\"message\":\"API rate limit exceeded\"}")
         .create();
     let state = TempDir::new().expect("temporary state directory");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_grit"))
-        .args(["sync", "--repo", "acme/widgets", "--json"])
-        .env("GH_TOKEN", "automation-token")
-        .env("GRIT_GITHUB_API_URL", github.url())
-        .env("GRIT_STATE_DIR", state.path())
-        .env("PATH", "")
+    let output = sync_command(&state, &github.url(), "acme/widgets", true)
         .output()
         .expect("run grit");
 
@@ -527,12 +493,7 @@ fn interrupted_response_does_not_publish_a_replica() {
         .create();
     let state = TempDir::new().expect("temporary state directory");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_grit"))
-        .args(["sync", "--repo", "acme/widgets", "--json"])
-        .env("GH_TOKEN", "automation-token")
-        .env("GRIT_GITHUB_API_URL", github.url())
-        .env("GRIT_STATE_DIR", state.path())
-        .env("PATH", "")
+    let output = sync_command(&state, &github.url(), "acme/widgets", true)
         .output()
         .expect("run grit");
 
@@ -551,12 +512,7 @@ fn sync_rejects_an_unsafe_api_base_before_authentication() {
         "https://api.github.example/#fragment",
     ] {
         let state = TempDir::new().expect("temporary state directory");
-        let output = Command::new(env!("CARGO_BIN_EXE_grit"))
-            .args(["sync", "--repo", "acme/widgets", "--json"])
-            .env("GH_TOKEN", "automation-token")
-            .env("GRIT_GITHUB_API_URL", unsafe_base)
-            .env("GRIT_STATE_DIR", state.path())
-            .env("PATH", "")
+        let output = sync_command(&state, unsafe_base, "acme/widgets", true)
             .output()
             .expect("run grit");
 
@@ -571,6 +527,20 @@ fn sync_rejects_an_unsafe_api_base_before_authentication() {
         );
         assert!(!state.path().join("repositories").exists());
     }
+}
+
+fn sync_command(state: &TempDir, api_url: &str, repository: &str, json: bool) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_grit"));
+    command.args(["sync", "--repo", repository]);
+    if json {
+        command.arg("--json");
+    }
+    command
+        .env("GH_TOKEN", "automation-token")
+        .env("GRIT_GITHUB_API_URL", api_url)
+        .env("GRIT_STATE_DIR", state.path())
+        .env("PATH", "");
+    command
 }
 
 fn issue_inventory() -> &'static str {
