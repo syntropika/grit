@@ -7,7 +7,10 @@ use url::Url;
 
 use crate::{
     auth::{AuthError, AuthToken},
-    github::{CreateLabelRequest, GitHubClient, GitHubError, LabelCreation},
+    github::{
+        CreateLabelRequest, DependencyChange, DependencyIntent, GitHubClient, GitHubError,
+        LabelCreation,
+    },
     model::{LocalReplica, ReplicaError},
     operational::{ExecutionScope, analyze_ready},
     outbox::{OutboxError, OutboxStore, PendingMutation},
@@ -29,6 +32,7 @@ const READY_SCHEMA_VERSION: &str = "grit.ready/v1";
 const INIT_SCHEMA_VERSION: &str = "grit.init/v1";
 const PRIORITY_UPDATE_SCHEMA_VERSION: &str = "grit.priority-update/v1";
 const RESOLVE_SCHEMA_VERSION: &str = "grit.resolve/v1";
+const DEPENDENCY_MUTATION_SCHEMA_VERSION: &str = "grit.dependency-mutation/v1";
 
 #[derive(Parser)]
 #[command(name = "grit", version, about)]
@@ -61,6 +65,28 @@ enum Command {
         /// Desired logical Priority, or none to remove it.
         #[arg(long)]
         priority: PrioritySelection,
+        /// Emit versioned machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Make one Issue blocked by another native GitHub Issue.
+    Block {
+        /// Issue to block in OWNER/REPO#NUMBER form.
+        issue: String,
+        /// Blocking Issue in OWNER/REPO#NUMBER form.
+        #[arg(long)]
+        by: String,
+        /// Emit versioned machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a native blocked-by relationship between two Issues.
+    Unblock {
+        /// Issue that is currently blocked in OWNER/REPO#NUMBER form.
+        issue: String,
+        /// Blocking Issue in OWNER/REPO#NUMBER form.
+        #[arg(long)]
+        by: String,
         /// Emit versioned machine-readable output.
         #[arg(long)]
         json: bool,
@@ -152,6 +178,12 @@ pub(crate) fn execute() -> Result<(), CliError> {
             json,
         } => update_priority(&issue, priority, json),
         Command::Init { repo, json } => initialize(&Repository::parse(&repo)?, json),
+        Command::Block { issue, by, json } => {
+            mutate_dependency(&issue, &by, DependencyIntent::Block, json)
+        }
+        Command::Unblock { issue, by, json } => {
+            mutate_dependency(&issue, &by, DependencyIntent::Unblock, json)
+        }
         Command::Sync { repo, json } => sync(&Repository::parse(&repo)?, json),
         Command::Ready {
             repo,
@@ -493,6 +525,53 @@ fn github_client() -> Result<GitHubClient, CliError> {
     GitHubClient::new(base_url, &token).map_err(Into::into)
 }
 
+fn mutate_dependency(
+    blocked: &str,
+    blocker: &str,
+    intent: DependencyIntent,
+    json: bool,
+) -> Result<(), CliError> {
+    let blocked = IssueReference::parse(blocked)?;
+    let blocker = IssueReference::parse(blocker)?;
+    let client = github_client()?;
+    let result = client.mutate_dependency(&blocked, &blocker, intent)?;
+
+    let replica = replica_sync::fetch(&client, blocked.repository())
+        .map_err(|source| CliError::MutationSynchronization { source })?;
+    if replica.has_dependency(&blocked, &blocker) != intent.desired_present() {
+        return Err(CliError::MutationReadbackMismatch {
+            blocked: blocked.stable_key(),
+            blocker: blocker.stable_key(),
+            expected: dependency_expected_relationship(intent),
+        });
+    }
+    ReplicaStore::discover(blocked.repository())
+        .map_err(|source| CliError::MutationPublication { source })?
+        .publish(&replica)
+        .map_err(|source| CliError::MutationPublication { source })?;
+
+    let snapshot = snapshot_summary(&replica);
+    let output = DependencyMutationOutput {
+        schema_version: DEPENDENCY_MUTATION_SCHEMA_VERSION,
+        command: dependency_command_name(intent),
+        repository: blocked.repository().full_name(),
+        result,
+        edge: DependencyEdgeOutput {
+            blocked: blocked.stable_key(),
+            blocker: blocker.stable_key(),
+            kind: "blocked_by",
+        },
+        snapshot,
+    };
+    if json {
+        serde_json::to_writer(std::io::stdout().lock(), &output).map_err(CliError::EncodeOutput)?;
+        println!();
+    } else {
+        println!("{}", dependency_human_message(&output.edge, result));
+    }
+    Ok(())
+}
+
 fn print_sync_result(replica: &LocalReplica, json: bool) -> Result<(), CliError> {
     let snapshot = snapshot_summary(replica);
     if json {
@@ -725,6 +804,16 @@ struct SyncOutput<'a> {
 }
 
 #[derive(Serialize)]
+struct DependencyMutationOutput<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    repository: &'a str,
+    result: DependencyChange,
+    edge: DependencyEdgeOutput,
+    snapshot: SnapshotSummary<'a>,
+}
+
+#[derive(Serialize)]
 struct ReconcileOutput<'a> {
     schema_version: &'static str,
     command: &'static str,
@@ -834,6 +923,13 @@ struct PriorityIssueOutput<'a> {
 }
 
 #[derive(Serialize)]
+struct DependencyEdgeOutput {
+    blocked: String,
+    blocker: String,
+    kind: &'static str,
+}
+
+#[derive(Serialize)]
 struct SnapshotSummary<'a> {
     schema_version: &'a str,
     synced_at: &'a str,
@@ -907,6 +1003,38 @@ enum ReplicaSource {
     LocalFallback,
 }
 
+fn dependency_command_name(intent: DependencyIntent) -> &'static str {
+    match intent {
+        DependencyIntent::Block => "block",
+        DependencyIntent::Unblock => "unblock",
+    }
+}
+
+fn dependency_expected_relationship(intent: DependencyIntent) -> &'static str {
+    if intent.desired_present() {
+        "present"
+    } else {
+        "absent"
+    }
+}
+
+fn dependency_human_message(edge: &DependencyEdgeOutput, result: DependencyChange) -> String {
+    match result {
+        DependencyChange::Created => {
+            format!("{} is now blocked by {}", edge.blocked, edge.blocker)
+        }
+        DependencyChange::AlreadyPresent => {
+            format!("{} was already blocked by {}", edge.blocked, edge.blocker)
+        }
+        DependencyChange::Removed => {
+            format!("{} is no longer blocked by {}", edge.blocked, edge.blocker)
+        }
+        DependencyChange::AlreadyAbsent => {
+            format!("{} was not blocked by {}", edge.blocked, edge.blocker)
+        }
+    }
+}
+
 impl ReplicaSource {
     fn is_fallback(self) -> bool {
         matches!(self, Self::LocalFallback)
@@ -963,6 +1091,28 @@ pub(crate) enum CliError {
     UnsupportedNextHorizon(u8),
     #[error("GitHub refresh failed ({refresh}); no valid Local replica is available ({replica})")]
     RefreshAndReplicaUnavailable { refresh: String, replica: String },
+    #[error(
+        "GitHub dependency operation completed, but synchronized readback failed; Local replica was not changed: {source}"
+    )]
+    MutationSynchronization {
+        #[source]
+        source: ReplicaSyncError,
+    },
+    #[error(
+        "GitHub dependency operation completed and readback was verified, but Local replica publication failed: {source}"
+    )]
+    MutationPublication {
+        #[source]
+        source: StoreError,
+    },
+    #[error(
+        "GitHub dependency operation completed, but synchronized readback did not show {blocked} blocked by {blocker} as {expected}; Local replica was not changed"
+    )]
+    MutationReadbackMismatch {
+        blocked: String,
+        blocker: String,
+        expected: &'static str,
+    },
 }
 
 #[cfg(test)]

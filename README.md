@@ -136,6 +136,22 @@ the command succeeds with a null recommendation and categorized blocker
 counts. Like `ready`, it attempts a pull Synchronization and falls back to the
 latest valid Local replica without mutating GitHub.
 
+## Change native Dependencies
+
+Use full Issue references so the direction remains explicit:
+
+```bash
+grit block OWNER/REPO#42 --by OWNER/REPO#7
+grit unblock OWNER/REPO#42 --by OWNER/REPO#7 --json
+```
+
+The first command means “Issue #42 is blocked by Issue #7.” Grit writes the
+native GitHub `blocked_by` relationship, then performs a complete synchronized
+readback before atomically replacing the Local replica. Repeating either
+operation uses set semantics: an existing edge can be added again and an absent
+edge can be removed again without error. If the write outcome or readback is
+uncertain, the previous Local replica remains unchanged.
+
 ## Product decisions
 
 The canonical domain language and accepted decisions live in
