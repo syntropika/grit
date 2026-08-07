@@ -1,6 +1,6 @@
 use std::env;
 
-use clap::{Parser, Subcommand};
+use clap::{ArgGroup, Parser, Subcommand};
 use serde::Serialize;
 use thiserror::Error;
 use url::Url;
@@ -17,6 +17,7 @@ use crate::{
     },
     priority_update::{self, PendingPriorityUpdateError, PriorityUpdateError},
     ranking::{self, NextAnalysis},
+    reconciliation::{self, ReconciliationError, ResolutionChoice},
     replica_sync::{self, ReplicaSyncError},
     repository::{IssueReference, IssueReferenceError, Repository, RepositoryError},
     store::{ReplicaStore, StoreError},
@@ -27,6 +28,7 @@ const SYNC_SCHEMA_VERSION: &str = "grit.sync/v1";
 const READY_SCHEMA_VERSION: &str = "grit.ready/v1";
 const INIT_SCHEMA_VERSION: &str = "grit.init/v1";
 const PRIORITY_UPDATE_SCHEMA_VERSION: &str = "grit.priority-update/v1";
+const RESOLVE_SCHEMA_VERSION: &str = "grit.resolve/v1";
 
 #[derive(Parser)]
 #[command(name = "grit", version, about)]
@@ -93,6 +95,41 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Reconcile Pending mutations against current GitHub state.
+    Reconcile {
+        /// Repository in OWNER/REPO form.
+        #[arg(long)]
+        repo: String,
+        /// Emit versioned machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Resolve one Pending Priority conflict explicitly.
+    #[command(group(
+        ArgGroup::new("resolution")
+            .required(true)
+            .multiple(false)
+            .args(["remote", "local", "priority"])
+    ))]
+    Resolve {
+        /// Pending mutation operation ID.
+        operation: String,
+        /// Repository in OWNER/REPO form.
+        #[arg(long)]
+        repo: String,
+        /// Accept GitHub's current value and retire the local intent.
+        #[arg(long)]
+        remote: bool,
+        /// Reaffirm the local value against the last observed GitHub value.
+        #[arg(long)]
+        local: bool,
+        /// Replace the local value and rebase it on the last observed GitHub value.
+        #[arg(long)]
+        priority: Option<PrioritySelection>,
+        /// Emit versioned machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 pub(crate) fn execute() -> Result<(), CliError> {
@@ -121,7 +158,123 @@ pub(crate) fn execute() -> Result<(), CliError> {
             assignee,
             json,
         } => ready(&Repository::parse(&repo)?, assignee.as_deref(), json),
+        Command::Reconcile { repo, json } => reconcile(&Repository::parse(&repo)?, json),
+        Command::Resolve {
+            operation,
+            repo,
+            remote,
+            local,
+            priority,
+            json,
+        } => resolve_priority_conflict(
+            &Repository::parse(&repo)?,
+            &operation,
+            resolution_choice(remote, local, priority),
+            json,
+        ),
     }
+}
+
+fn resolution_choice(
+    remote: bool,
+    local: bool,
+    priority: Option<PrioritySelection>,
+) -> ResolutionChoice {
+    match (remote, local, priority) {
+        (true, false, None) => ResolutionChoice::Remote,
+        (false, true, None) => ResolutionChoice::Local,
+        (false, false, Some(priority)) => ResolutionChoice::Replacement(priority),
+        _ => unreachable!("clap requires exactly one resolution choice"),
+    }
+}
+
+fn reconcile(repository: &Repository, json: bool) -> Result<(), CliError> {
+    let client = github_client()?;
+    let result = reconciliation::reconcile(&client, repository)?;
+    print_reconciliation(&result, "reconcile", json)
+}
+
+fn resolve_priority_conflict(
+    repository: &Repository,
+    operation_id: &str,
+    choice: ResolutionChoice,
+    json: bool,
+) -> Result<(), CliError> {
+    let client = github_client()?;
+    let result = reconciliation::resolve(&client, repository, operation_id, choice)?;
+    if json {
+        let output = ResolveOutput {
+            schema_version: RESOLVE_SCHEMA_VERSION,
+            command: "resolve",
+            repository: &result.reconciliation.repository,
+            resolution: ResolutionOutput {
+                operation_id: &result.operation_id,
+                choice: result.choice,
+            },
+            operations: &result.reconciliation.operations,
+            summary: &result.reconciliation.summary,
+            snapshot: snapshot_summary(&result.reconciliation.replica),
+        };
+        serde_json::to_writer(std::io::stdout().lock(), &output).map_err(CliError::EncodeOutput)?;
+        println!();
+    } else {
+        println!(
+            "Resolved {} with --{}; reconciliation applied {}, found {} conflict(s), and left {} Pending operation(s)",
+            result.operation_id,
+            result.choice,
+            result.reconciliation.summary.applied,
+            result.reconciliation.summary.conflicting,
+            result.reconciliation.summary.remaining
+        );
+    }
+    Ok(())
+}
+
+fn print_reconciliation(
+    result: &reconciliation::ReconciliationResult,
+    command: &'static str,
+    json: bool,
+) -> Result<(), CliError> {
+    if json {
+        let output = ReconcileOutput {
+            schema_version: reconciliation::OUTPUT_SCHEMA_VERSION,
+            command,
+            repository: &result.repository,
+            operations: &result.operations,
+            summary: &result.summary,
+            snapshot: snapshot_summary(&result.replica),
+        };
+        serde_json::to_writer(std::io::stdout().lock(), &output).map_err(CliError::EncodeOutput)?;
+        println!();
+    } else {
+        println!(
+            "Reconciled {}: {} applied, {} already satisfied, {} conflict(s), {} transitively blocked, {} Pending",
+            result.repository,
+            result.summary.applied,
+            result.summary.already_satisfied,
+            result.summary.conflicting,
+            result.summary.transitively_blocked,
+            result.summary.remaining
+        );
+        for operation in &result.operations {
+            if operation.classification == reconciliation::Classification::Conflicting {
+                println!(
+                    "{} Issue #{} conflict: base {}, local {}, remote {}",
+                    operation.id,
+                    operation.issue_number,
+                    operation.base.to_state().display_name(),
+                    operation.local.to_state().display_name(),
+                    operation
+                        .remote
+                        .as_ref()
+                        .map(LogicalPriority::to_state)
+                        .map(|priority| priority.display_name())
+                        .unwrap_or("missing")
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn initialize(repository: &Repository, json: bool) -> Result<(), CliError> {
@@ -572,6 +725,33 @@ struct SyncOutput<'a> {
 }
 
 #[derive(Serialize)]
+struct ReconcileOutput<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    repository: &'a str,
+    operations: &'a [reconciliation::OperationResult],
+    summary: &'a reconciliation::ReconciliationSummary,
+    snapshot: SnapshotSummary<'a>,
+}
+
+#[derive(Serialize)]
+struct ResolveOutput<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    repository: &'a str,
+    resolution: ResolutionOutput<'a>,
+    operations: &'a [reconciliation::OperationResult],
+    summary: &'a reconciliation::ReconciliationSummary,
+    snapshot: SnapshotSummary<'a>,
+}
+
+#[derive(Serialize)]
+struct ResolutionOutput<'a> {
+    operation_id: &'a str,
+    choice: &'static str,
+}
+
+#[derive(Serialize)]
 struct InitOutput<'a> {
     schema_version: &'static str,
     command: &'static str,
@@ -625,6 +805,8 @@ struct PendingOperationOutput<'a> {
     kind: &'static str,
     base: &'a LogicalPriority,
     desired: &'a LogicalPriority,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    depends_on: Vec<String>,
 }
 
 impl<'a> From<&'a PendingMutation> for PendingOperationOutput<'a> {
@@ -634,6 +816,7 @@ impl<'a> From<&'a PendingMutation> for PendingOperationOutput<'a> {
             kind: "priority_update",
             base: operation.base(),
             desired: operation.desired(),
+            depends_on: operation.depends_on().to_vec(),
         }
     }
 }
@@ -761,6 +944,8 @@ pub(crate) enum CliError {
     ReplicaSync(#[from] ReplicaSyncError),
     #[error(transparent)]
     PriorityUpdate(#[from] PriorityUpdateError),
+    #[error(transparent)]
+    Reconciliation(#[from] ReconciliationError),
     #[error(transparent)]
     Outbox(#[from] OutboxError),
     #[error(transparent)]

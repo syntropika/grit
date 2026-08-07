@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     io,
     path::PathBuf,
@@ -53,11 +53,19 @@ impl PendingMutationOutbox {
             if operation.issue_number() == 0 {
                 return Err(OutboxError::InvalidIssueNumber);
             }
-            if !operation_ids.insert(operation.id()) {
+            if operation.depends_on().iter().any(|dependency| {
+                dependency == operation.id() || !operation_ids.contains(dependency.as_str())
+            }) {
+                return Err(OutboxError::InvalidDependency(operation.id().to_owned()));
+            }
+            if !operation_ids.insert(operation.id().to_owned()) {
                 return Err(OutboxError::DuplicateOperationId(operation.id().to_owned()));
             }
             if matches!(operation.desired(), LogicalPriority::Conflict { .. }) {
                 return Err(OutboxError::InvalidDesiredPriority);
+            }
+            if !operation.has_safe_write_plan() {
+                return Err(OutboxError::InvalidWritePlan(operation.id().to_owned()));
             }
         }
         Ok(())
@@ -65,6 +73,14 @@ impl PendingMutationOutbox {
 
     pub(crate) fn operations(&self) -> &[PendingMutation] {
         &self.operations
+    }
+
+    pub(crate) fn latest_operation_for_issue(&self, issue_number: u64) -> Option<&str> {
+        self.operations
+            .iter()
+            .rev()
+            .find(|operation| operation.issue_number() == issue_number)
+            .map(PendingMutation::id)
     }
 }
 
@@ -76,7 +92,108 @@ pub(crate) enum PendingMutation {
         issue_number: u64,
         base: LogicalPriority,
         desired: LogicalPriority,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        depends_on: Vec<String>,
+        #[serde(default, skip_serializing_if = "MutationState::is_pending")]
+        state: MutationState,
     },
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub(crate) enum MutationState {
+    #[default]
+    Pending,
+    Conflicting {
+        remote: LogicalPriority,
+    },
+    Applying {
+        expected_labels: Vec<String>,
+        remaining_writes: Vec<PriorityWrite>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        last_error: Option<String>,
+    },
+    Applied,
+    AlreadySatisfied,
+    ResolvedRemote {
+        remote: LogicalPriority,
+    },
+    Failed {
+        error: String,
+    },
+    TransitivelyBlocked {
+        blocked_by: Vec<String>,
+    },
+}
+
+impl MutationState {
+    fn is_pending(&self) -> bool {
+        matches!(self, Self::Pending)
+    }
+
+    pub(crate) fn permits_dependents(&self) -> bool {
+        self.is_successfully_terminal()
+    }
+
+    pub(crate) fn is_pending_intent(&self) -> bool {
+        !self.is_successfully_terminal()
+    }
+
+    pub(crate) fn is_successfully_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Applied | Self::AlreadySatisfied | Self::ResolvedRemote { .. }
+        )
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub(crate) enum PriorityWrite {
+    Add { label: String },
+    Remove { label: String },
+}
+
+impl PriorityWrite {
+    pub(crate) fn apply_to(&self, labels: &mut Vec<String>) {
+        match self {
+            Self::Add { label } => {
+                if !labels.iter().any(|candidate| candidate == label) {
+                    labels.push(label.clone());
+                    labels.sort();
+                }
+            }
+            Self::Remove { label } => labels.retain(|candidate| candidate != label),
+        }
+    }
+
+    pub(crate) fn canonical_plan(
+        current: &[String],
+        desired: &LogicalPriority,
+    ) -> Option<Vec<Self>> {
+        LogicalPriority::from_canonical_labels(current)?;
+        let desired_label = match desired {
+            LogicalPriority::Declared { value } => Some(value.canonical_label()),
+            LogicalPriority::Unspecified => None,
+            LogicalPriority::Conflict { .. } => return None,
+        };
+        let mut writes = Vec::new();
+        if let Some(desired_label) = desired_label
+            && !current.iter().any(|label| label == desired_label)
+        {
+            writes.push(Self::Add {
+                label: desired_label.to_owned(),
+            });
+        }
+        for label in current {
+            if Some(label.as_str()) != desired_label {
+                writes.push(Self::Remove {
+                    label: label.clone(),
+                });
+            }
+        }
+        Some(writes)
+    }
 }
 
 impl PendingMutation {
@@ -85,12 +202,15 @@ impl PendingMutation {
         issue_number: u64,
         base: LogicalPriority,
         desired: LogicalPriority,
+        depends_on: Vec<String>,
     ) -> Self {
         Self::PriorityUpdate {
             id: new_operation_id(repository, issue_number),
             issue_number,
             base,
             desired,
+            depends_on,
+            state: MutationState::Pending,
         }
     }
 
@@ -115,6 +235,62 @@ impl PendingMutation {
     pub(crate) fn desired(&self) -> &LogicalPriority {
         match self {
             Self::PriorityUpdate { desired, .. } => desired,
+        }
+    }
+
+    pub(crate) fn depends_on(&self) -> &[String] {
+        match self {
+            Self::PriorityUpdate { depends_on, .. } => depends_on,
+        }
+    }
+
+    pub(crate) fn state(&self) -> &MutationState {
+        match self {
+            Self::PriorityUpdate { state, .. } => state,
+        }
+    }
+
+    pub(crate) fn state_mut(&mut self) -> &mut MutationState {
+        match self {
+            Self::PriorityUpdate { state, .. } => state,
+        }
+    }
+
+    pub(crate) fn effective_priority(&self) -> &LogicalPriority {
+        match self.state() {
+            MutationState::ResolvedRemote { remote } => remote,
+            _ => self.desired(),
+        }
+    }
+
+    fn has_safe_write_plan(&self) -> bool {
+        let MutationState::Applying {
+            expected_labels,
+            remaining_writes,
+            ..
+        } = self.state()
+        else {
+            return true;
+        };
+        !remaining_writes.is_empty()
+            && PriorityWrite::canonical_plan(expected_labels, self.desired())
+                .is_some_and(|canonical| canonical == *remaining_writes)
+    }
+
+    pub(crate) fn rebase(&mut self, base: LogicalPriority, desired: Option<LogicalPriority>) {
+        match self {
+            Self::PriorityUpdate {
+                base: current_base,
+                desired: current_desired,
+                state,
+                ..
+            } => {
+                *current_base = base;
+                if let Some(desired) = desired {
+                    *current_desired = desired;
+                }
+                *state = MutationState::Pending;
+            }
         }
     }
 }
@@ -169,10 +345,12 @@ impl OutboxStore {
             .map_err(OutboxError::OpenLock)?;
         FileExt::lock_exclusive(&lock).map_err(OutboxError::Lock)?;
         let outbox = self.load(repository)?;
+        let operation_index = operation_index(&outbox);
         Ok(OutboxTransaction {
             store: self,
             _lock: lock,
             outbox,
+            operation_index,
         })
     }
 
@@ -187,6 +365,7 @@ pub(crate) struct OutboxTransaction<'a> {
     store: &'a OutboxStore,
     _lock: File,
     outbox: PendingMutationOutbox,
+    operation_index: BTreeMap<String, usize>,
 }
 
 impl OutboxTransaction<'_> {
@@ -204,6 +383,103 @@ impl OutboxTransaction<'_> {
         self.store.publish(&self.outbox)?;
         Ok(self.outbox)
     }
+
+    pub(crate) fn operations(&self) -> &[PendingMutation] {
+        self.outbox.operations()
+    }
+
+    pub(crate) fn operation(&self, id: &str) -> Option<&PendingMutation> {
+        self.operation_index
+            .get(id)
+            .map(|index| &self.outbox.operations[*index])
+    }
+
+    pub(crate) fn stage_state(
+        &mut self,
+        id: &str,
+        state: MutationState,
+    ) -> Result<(), OutboxError> {
+        let operation = self.operation_mut(id)?;
+        *operation.state_mut() = state;
+        Ok(())
+    }
+
+    pub(crate) fn checkpoint_state(
+        &mut self,
+        repository: &Repository,
+        id: &str,
+        state: MutationState,
+    ) -> Result<(), OutboxError> {
+        self.stage_state(id, state)?;
+        self.publish(repository)
+    }
+
+    pub(crate) fn resolve_remote(
+        &mut self,
+        repository: &Repository,
+        id: &str,
+        remote: LogicalPriority,
+    ) -> Result<(), OutboxError> {
+        *self.operation_mut(id)?.state_mut() = MutationState::ResolvedRemote { remote };
+        self.publish(repository)
+    }
+
+    pub(crate) fn rebase_priority(
+        &mut self,
+        repository: &Repository,
+        id: &str,
+        base: LogicalPriority,
+        desired: Option<LogicalPriority>,
+    ) -> Result<(), OutboxError> {
+        self.operation_mut(id)?.rebase(base, desired);
+        self.publish(repository)
+    }
+
+    fn publish(&self, repository: &Repository) -> Result<(), OutboxError> {
+        self.outbox.validate(repository)?;
+        self.store.publish(&self.outbox)
+    }
+
+    pub(crate) fn finalize(
+        &mut self,
+        repository: &Repository,
+        retired: &BTreeSet<String>,
+        state_updates: BTreeMap<String, MutationState>,
+    ) -> Result<(), OutboxError> {
+        for (operation_id, state) in state_updates {
+            self.stage_state(&operation_id, state)?;
+        }
+        self.outbox
+            .operations
+            .retain(|operation| !retired.contains(operation.id()));
+        for operation in &mut self.outbox.operations {
+            match operation {
+                PendingMutation::PriorityUpdate { depends_on, .. } => {
+                    depends_on.retain(|dependency| !retired.contains(dependency));
+                }
+            }
+        }
+        self.operation_index = operation_index(&self.outbox);
+        self.publish(repository)
+    }
+
+    fn operation_mut(&mut self, id: &str) -> Result<&mut PendingMutation, OutboxError> {
+        let index = self
+            .operation_index
+            .get(id)
+            .copied()
+            .ok_or_else(|| OutboxError::UnknownOperation(id.to_owned()))?;
+        Ok(&mut self.outbox.operations[index])
+    }
+}
+
+fn operation_index(outbox: &PendingMutationOutbox) -> BTreeMap<String, usize> {
+    outbox
+        .operations
+        .iter()
+        .enumerate()
+        .map(|(index, operation)| (operation.id().to_owned(), index))
+        .collect()
 }
 
 fn new_operation_id(repository: &Repository, issue_number: u64) -> String {
@@ -247,6 +523,52 @@ pub(crate) enum OutboxError {
     InvalidIssueNumber,
     #[error("Pending mutation operation ID {0:?} is duplicated")]
     DuplicateOperationId(String),
+    #[error("Pending mutation operation {0:?} has a missing, forward, or self dependency")]
+    InvalidDependency(String),
     #[error("a Pending Priority update cannot desire a Priority conflict")]
     InvalidDesiredPriority,
+    #[error("Pending mutation operation {0:?} contains an unsafe Priority write plan")]
+    InvalidWritePlan(String),
+    #[error("Pending mutation operation {0:?} does not exist")]
+    UnknownOperation(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{OutboxError, PendingMutationOutbox};
+    use crate::repository::Repository;
+
+    #[test]
+    fn applying_plan_must_exactly_match_the_canonical_safe_plan() {
+        let repository = Repository::parse("acme/reconcile").expect("repository");
+        let outbox: PendingMutationOutbox = serde_json::from_value(json!({
+            "schema_version": "grit.pending-mutations/v1",
+            "repository": "acme/reconcile",
+            "operations": [{
+                "kind": "priority_update",
+                "id": "op-unsafe",
+                "issue_number": 1,
+                "base": {"state": "declared", "value": "p1"},
+                "desired": {"state": "declared", "value": "p0"},
+                "state": {
+                    "status": "applying",
+                    "expected_labels": ["priority:p1"],
+                    "remaining_writes": [
+                        {"action": "add", "label": "priority:p4"},
+                        {"action": "remove", "label": "priority:p4"},
+                        {"action": "add", "label": "priority:p0"},
+                        {"action": "remove", "label": "priority:p1"}
+                    ]
+                }
+            }]
+        }))
+        .expect("syntactically valid outbox");
+
+        assert!(matches!(
+            outbox.validate(&repository),
+            Err(OutboxError::InvalidWritePlan(operation)) if operation == "op-unsafe"
+        ));
+    }
 }

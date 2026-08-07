@@ -33,7 +33,10 @@ impl<'a> WorkingGraph<'a> {
             if !issue_numbers.contains(&issue_number) {
                 return Err(WorkingGraphError::MissingIssue(issue_number));
             }
-            priority_overrides.insert(issue_number, operation.desired().clone());
+            priority_overrides.insert(issue_number, operation.effective_priority().clone());
+            if !operation.state().is_pending_intent() {
+                continue;
+            }
             let operation_id = operation.id().to_owned();
             operation_ids.push(operation_id.clone());
             operation_ids_by_issue
