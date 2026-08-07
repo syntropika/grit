@@ -8,7 +8,9 @@ The current executable tracer implements full synchronization and Executable
 frontier enumeration from
 [Issue #2](https://github.com/syntropika/grit/issues/2) and
 [Issue #3](https://github.com/syntropika/grit/issues/3), plus the static graph
-artifact from [Issue #8](https://github.com/syntropika/grit/issues/8).
+artifact and browser explorer from
+[Issue #8](https://github.com/syntropika/grit/issues/8) and
+[Issue #12](https://github.com/syntropika/grit/issues/12).
 
 ## Build and test
 
@@ -19,6 +21,18 @@ cargo build
 cargo test
 cargo clippy --all-targets --all-features -- -D warnings
 ```
+
+The browser acceptance test is intentionally gated because the ordinary Rust
+suite has no browser dependency. Run it explicitly with a Chrome-compatible
+binary (Google Chrome by default):
+
+```bash
+GRIT_BROWSER=google-chrome cargo test --test graph_cli \
+  generated_site_is_a_keyboard_accessible_offline_graph_explorer -- --ignored --exact
+```
+
+The test launches an ephemeral headless profile with background networking
+disabled and host resolution denied.
 
 ## Synchronize a Repository
 
@@ -78,12 +92,18 @@ grit graph --repo OWNER/REPO --output site/
 grit graph --repo OWNER/REPO --output site/ --json
 ```
 
-The target contains `index.html`, `graph.json`, and `graph.schema.json`. The
-versioned JSON uses explicit `blocked` and `blocker` edge roles, normalized
-Issue fields, precomputed layered positions, operational counts, hashes, and
-provenance. Bodies, comments, raw API records, and Operation markers are not
-part of the artifact. The HTML is an accessible, script-free table with no
-remote assets.
+The target contains `index.html`, `app.css`, `app.js`, `graph.json`, and
+`graph.schema.json`. The versioned JSON uses explicit `blocked` and `blocker`
+edge roles, normalized Issue fields, precomputed layered positions,
+operational counts, hashes, and provenance. Bodies, comments, raw API records,
+and Operation markers are not part of the artifact.
+
+The browser explorer searches by Issue number or title, renders the precomputed
+dependency layers, and keeps graph selection synchronized with an accessible
+Issue table. Its detail panel shows readiness, blockers, dependents, and the
+canonical GitHub link. Labels appear only on hover, focus, or selection, and
+the zoom controls never recalculate layout or ranking. All assets are local;
+the browser does not contact GitHub or any other network service.
 
 Generation validates the closed artifact model in a staging directory before
 replacing the target. Regenerating from the same effective Local replica is

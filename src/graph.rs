@@ -25,7 +25,7 @@ pub(crate) fn publish_site(
     let graph_bytes = render::graph_json(&artifact)?;
     artifact::validate_serialized(&graph_bytes)?;
     let schema_bytes = render::schema_json()?;
-    let html_bytes = render::html(&artifact).into_bytes();
+    let html_bytes = render::html(&artifact)?.into_bytes();
 
     publication::publish(
         output,
@@ -33,6 +33,8 @@ pub(crate) fn publish_site(
             ("graph.json", graph_bytes),
             ("graph.schema.json", schema_bytes),
             ("index.html", html_bytes),
+            ("app.css", render::stylesheet().to_vec()),
+            ("app.js", render::javascript().to_vec()),
         ],
     )?;
 
@@ -71,6 +73,8 @@ pub(crate) enum GraphError {
     ArtifactHashMismatch,
     #[error("could not encode the graph artifact: {0}")]
     EncodeArtifact(serde_json::Error),
+    #[error("graph explorer HTML template contains invalid placeholder {0}")]
+    InvalidHtmlTemplate(String),
     #[error("graph artifact failed closed-schema validation: {0}")]
     ValidateSchema(serde_json::Error),
     #[error("graph output must name a specific child directory")]
