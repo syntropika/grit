@@ -8,15 +8,19 @@ use url::Url;
 
 use crate::{
     auth::{AuthError, AuthToken},
-    github::{GitHubClient, GitHubError},
+    github::{CreateLabelRequest, GitHubClient, GitHubError, LabelCreation},
     model::{LocalReplica, ReplicaError},
     operational::{ExecutionScope, analyze_ready},
+    priority::{
+        DeclaredPriority, PriorityState, missing_canonical_labels, present_canonical_labels,
+    },
     repository::{Repository, RepositoryError},
     store::{ReplicaStore, StoreError},
 };
 
 const SYNC_SCHEMA_VERSION: &str = "grit.sync/v1";
 const READY_SCHEMA_VERSION: &str = "grit.ready/v1";
+const INIT_SCHEMA_VERSION: &str = "grit.init/v1";
 
 #[derive(Parser)]
 #[command(name = "grit", version, about)]
@@ -27,6 +31,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Create any missing canonical Priority labels.
+    Init {
+        /// Repository in OWNER/REPO form.
+        #[arg(long)]
+        repo: String,
+        /// Emit versioned machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
     /// Synchronize one GitHub Repository into the Local replica.
     Sync {
         /// Repository in OWNER/REPO form.
@@ -53,6 +66,7 @@ enum Command {
 pub(crate) fn execute() -> Result<(), CliError> {
     let cli = Cli::parse();
     match cli.command {
+        Command::Init { repo, json } => initialize(&Repository::parse(&repo)?, json),
         Command::Sync { repo, json } => sync(&Repository::parse(&repo)?, json),
         Command::Ready {
             repo,
@@ -62,6 +76,54 @@ pub(crate) fn execute() -> Result<(), CliError> {
     }
 }
 
+fn initialize(repository: &Repository, json: bool) -> Result<(), CliError> {
+    let client = github_client()?;
+    let labels = client.fetch_labels(repository)?;
+    let mut already_present: Vec<_> = present_canonical_labels(&labels)
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    let mut created_labels = Vec::new();
+    for priority in DeclaredPriority::ALL {
+        let spec = priority.spec();
+        if labels
+            .iter()
+            .any(|label| label.name.eq_ignore_ascii_case(spec.name))
+        {
+            continue;
+        }
+        let request = CreateLabelRequest::new(spec.name, spec.color, spec.description);
+        match client.create_label(repository, &request)? {
+            LabelCreation::Created => created_labels.push(spec.name.to_owned()),
+            LabelCreation::AlreadyPresent => already_present.push(spec.name.to_owned()),
+        }
+    }
+    already_present.sort();
+    let output = InitOutput {
+        schema_version: INIT_SCHEMA_VERSION,
+        command: "init",
+        repository: repository.full_name(),
+        created_labels,
+        already_present,
+    };
+    if json {
+        serde_json::to_writer(std::io::stdout().lock(), &output).map_err(CliError::EncodeOutput)?;
+        println!();
+    } else if output.created_labels.is_empty() {
+        println!(
+            "Priority labels are already initialized in {}",
+            repository.full_name()
+        );
+    } else {
+        println!(
+            "Created {} in {}",
+            output.created_labels.join(", "),
+            repository.full_name()
+        );
+    }
+    Ok(())
+}
+
 fn sync(repository: &Repository, json: bool) -> Result<(), CliError> {
     let replica = synchronize(repository)?;
     print_sync_result(&replica, json)?;
@@ -69,24 +131,29 @@ fn sync(repository: &Repository, json: bool) -> Result<(), CliError> {
 }
 
 fn synchronize(repository: &Repository) -> Result<LocalReplica, CliError> {
-    let base_url = api_base_url()?;
-    let hostname = env::var("GRIT_GITHUB_HOST")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| authentication_hostname(&base_url));
-    let token = AuthToken::discover(&hostname)?;
-    let client = GitHubClient::new(base_url, &token)?;
+    let client = github_client()?;
     let data = client.fetch_repository(repository)?;
 
     let replica = LocalReplica::build(
         repository.full_name().to_owned(),
         Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        data.labels,
         data.issues,
         data.dependencies,
     )?;
 
     ReplicaStore::discover(repository)?.publish(&replica)?;
     Ok(replica)
+}
+
+fn github_client() -> Result<GitHubClient, CliError> {
+    let base_url = api_base_url()?;
+    let hostname = env::var("GRIT_GITHUB_HOST")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| authentication_hostname(&base_url));
+    let token = AuthToken::discover(&hostname)?;
+    GitHubClient::new(base_url, &token).map_err(Into::into)
 }
 
 fn print_sync_result(replica: &LocalReplica, json: bool) -> Result<(), CliError> {
@@ -145,6 +212,42 @@ fn ready(repository: &Repository, assignee: Option<&str>, json: bool) -> Result<
         .map(ExecutionScope::Assignee)
         .unwrap_or(ExecutionScope::Available);
     let analysis = analyze_ready(&replica, scope);
+    let mut warnings = Vec::new();
+    if let Some(repository_labels) = replica.repository_labels.as_deref() {
+        let missing_labels: Vec<_> = missing_canonical_labels(repository_labels)
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        if !missing_labels.is_empty() {
+            warnings.push(ReadyWarning {
+                code: "missing_priority_labels",
+                message: "Repository is missing canonical Priority labels".to_owned(),
+                issue_number: None,
+                labels: missing_labels,
+            });
+        }
+    }
+    for issue in replica
+        .issues
+        .iter()
+        .filter(|issue| issue.state.eq_ignore_ascii_case("open"))
+    {
+        let priority = PriorityState::from_issue_labels(&issue.labels);
+        if let Some(labels) = priority.conflict_labels() {
+            warnings.push(ReadyWarning {
+                code: "priority_conflict",
+                message: format!(
+                    "Issue #{} has multiple canonical Priority labels",
+                    issue.number
+                ),
+                issue_number: Some(issue.number),
+                labels: labels.to_vec(),
+            });
+        }
+    }
+    if let Some(warning) = source.warning() {
+        warnings.push(warning);
+    }
     let issues: Vec<_> = analysis
         .executable
         .iter()
@@ -154,6 +257,7 @@ fn ready(repository: &Repository, assignee: Option<&str>, json: bool) -> Result<
             title: &issue.title,
             ready: true,
             available: issue.assignees.is_empty(),
+            priority: PriorityState::from_issue_labels(&issue.labels),
             assignees: issue
                 .assignees
                 .iter()
@@ -186,7 +290,7 @@ fn ready(repository: &Repository, assignee: Option<&str>, json: bool) -> Result<
             assigned_ready_count: analysis.assigned_ready_count,
             blocked_count: analysis.blocked_count,
         },
-        warnings: source.warning().into_iter().collect(),
+        warnings,
     };
     if json {
         serde_json::to_writer(std::io::stdout().lock(), &output).map_err(CliError::EncodeOutput)?;
@@ -197,13 +301,23 @@ fn ready(repository: &Repository, assignee: Option<&str>, json: bool) -> Result<
             replica.repository, replica.synced_at
         );
         for issue in &output.issues {
-            println!("#{} {}", issue.number, issue.title);
-        }
-        if source.is_fallback() {
-            eprintln!(
-                "warning: GitHub refresh failed; using Local replica from {}",
-                replica.synced_at
+            println!(
+                "#{} {} [{}]",
+                issue.number,
+                issue.title,
+                issue.priority.display_name()
             );
+        }
+        for warning in &output.warnings {
+            if warning.labels.is_empty() {
+                eprintln!("warning: {}", warning.message);
+            } else {
+                eprintln!(
+                    "warning: {} ({})",
+                    warning.message,
+                    warning.labels.join(", ")
+                );
+            }
         }
     }
     Ok(())
@@ -249,6 +363,15 @@ struct SyncOutput<'a> {
 }
 
 #[derive(Serialize)]
+struct InitOutput<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    repository: &'a str,
+    created_labels: Vec<String>,
+    already_present: Vec<String>,
+}
+
+#[derive(Serialize)]
 struct SnapshotSummary<'a> {
     schema_version: &'a str,
     synced_at: &'a str,
@@ -286,6 +409,7 @@ struct ReadyIssue<'a> {
     title: &'a str,
     ready: bool,
     available: bool,
+    priority: PriorityState,
     assignees: Vec<&'a str>,
 }
 
@@ -301,7 +425,11 @@ struct ReadySummary {
 #[derive(Serialize)]
 struct ReadyWarning {
     code: &'static str,
-    message: &'static str,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    issue_number: Option<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    labels: Vec<String>,
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -319,7 +447,9 @@ impl ReplicaSource {
     fn warning(self) -> Option<ReadyWarning> {
         self.is_fallback().then_some(ReadyWarning {
             code: "offline_fallback",
-            message: "GitHub refresh failed; using the latest valid Local replica",
+            message: "GitHub refresh failed; using the latest valid Local replica".to_owned(),
+            issue_number: None,
+            labels: Vec::new(),
         })
     }
 }

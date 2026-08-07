@@ -10,6 +10,8 @@ pub(crate) struct LocalReplica {
     pub(crate) repository: String,
     pub(crate) synced_at: String,
     pub(crate) input_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) repository_labels: Option<Vec<Label>>,
     pub(crate) issues: Vec<Issue>,
     pub(crate) dependencies: Vec<Dependency>,
 }
@@ -18,15 +20,22 @@ impl LocalReplica {
     pub(crate) fn build(
         repository: String,
         synced_at: String,
+        repository_labels: Vec<Label>,
         issues: Vec<Issue>,
         dependencies: Vec<Dependency>,
     ) -> Result<Self, ReplicaError> {
-        let input_hash = calculate_input_hash(&repository, &issues, &dependencies)?;
+        let input_hash = calculate_input_hash(
+            &repository,
+            Some(&repository_labels),
+            &issues,
+            &dependencies,
+        )?;
         Ok(Self {
             schema_version: REPLICA_SCHEMA_VERSION.to_owned(),
             repository,
             synced_at,
             input_hash,
+            repository_labels: Some(repository_labels),
             issues,
             dependencies,
         })
@@ -44,9 +53,20 @@ impl LocalReplica {
         }
         chrono::DateTime::parse_from_rfc3339(&self.synced_at)
             .map_err(|_| ReplicaError::InvalidSyncedAt)?;
-        let expected_hash =
-            calculate_input_hash(&self.repository, &self.issues, &self.dependencies)?;
-        if self.input_hash != expected_hash {
+        let expected_hash = calculate_input_hash(
+            &self.repository,
+            self.repository_labels.as_deref(),
+            &self.issues,
+            &self.dependencies,
+        )?;
+        let legacy_hash = self
+            .repository_labels
+            .is_none()
+            .then(|| {
+                calculate_legacy_input_hash(&self.repository, &self.issues, &self.dependencies)
+            })
+            .transpose()?;
+        if self.input_hash != expected_hash && legacy_hash.as_ref() != Some(&self.input_hash) {
             return Err(ReplicaError::HashMismatch);
         }
         Ok(())
@@ -55,10 +75,36 @@ impl LocalReplica {
 
 fn calculate_input_hash(
     repository: &str,
+    repository_labels: Option<&[Label]>,
     issues: &[Issue],
     dependencies: &[Dependency],
 ) -> Result<String, ReplicaError> {
     let input = HashInput {
+        schema_version: REPLICA_SCHEMA_VERSION,
+        repository,
+        repository_labels,
+        issues,
+        dependencies,
+    };
+    let canonical = serde_json::to_vec(&input).map_err(ReplicaError::EncodeHashInput)?;
+    Ok(hex::encode(Sha256::digest(canonical)))
+}
+
+#[derive(Serialize)]
+struct HashInput<'a> {
+    schema_version: &'static str,
+    repository: &'a str,
+    repository_labels: Option<&'a [Label]>,
+    issues: &'a [Issue],
+    dependencies: &'a [Dependency],
+}
+
+fn calculate_legacy_input_hash(
+    repository: &str,
+    issues: &[Issue],
+    dependencies: &[Dependency],
+) -> Result<String, ReplicaError> {
+    let input = LegacyHashInput {
         schema_version: REPLICA_SCHEMA_VERSION,
         repository,
         issues,
@@ -69,7 +115,7 @@ fn calculate_input_hash(
 }
 
 #[derive(Serialize)]
-struct HashInput<'a> {
+struct LegacyHashInput<'a> {
     schema_version: &'static str,
     repository: &'a str,
     issues: &'a [Issue],

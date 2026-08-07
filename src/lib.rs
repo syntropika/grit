@@ -3,6 +3,7 @@ mod cli;
 mod github;
 mod model;
 mod operational;
+mod priority;
 mod repository;
 mod store;
 

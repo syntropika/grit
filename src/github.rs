@@ -5,7 +5,7 @@ use reqwest::{
     blocking::{Client, Response},
     header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, LINK, USER_AGENT},
 };
-use serde::{Deserialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
 use url::Url;
 
@@ -25,8 +25,31 @@ pub(crate) struct GitHubClient {
 }
 
 pub(crate) struct RepositoryData {
+    pub(crate) labels: Vec<Label>,
     pub(crate) issues: Vec<Issue>,
     pub(crate) dependencies: Vec<Dependency>,
+}
+
+pub(crate) enum LabelCreation {
+    Created,
+    AlreadyPresent,
+}
+
+#[derive(Serialize)]
+pub(crate) struct CreateLabelRequest<'a> {
+    name: &'a str,
+    color: &'a str,
+    description: &'a str,
+}
+
+impl<'a> CreateLabelRequest<'a> {
+    pub(crate) fn new(name: &'a str, color: &'a str, description: &'a str) -> Self {
+        Self {
+            name,
+            color,
+            description,
+        }
+    }
 }
 
 impl GitHubClient {
@@ -61,6 +84,7 @@ impl GitHubClient {
     ) -> Result<RepositoryData, GitHubError> {
         let owner = repository.owner();
         let repo = repository.name();
+        let labels = self.fetch_labels(repository)?;
         let issue_url = self.endpoint(&format!("repos/{owner}/{repo}/issues"))?;
         let raw_issues: Vec<GitHubIssue> = self.paginate(
             issue_url,
@@ -101,9 +125,65 @@ impl GitHubClient {
         }
 
         Ok(RepositoryData {
+            labels,
             issues,
             dependencies: dependencies.into_values().collect(),
         })
+    }
+
+    pub(crate) fn fetch_labels(&self, repository: &Repository) -> Result<Vec<Label>, GitHubError> {
+        let url = self.endpoint(&format!(
+            "repos/{}/{}/labels",
+            repository.owner(),
+            repository.name()
+        ))?;
+        let labels: Vec<GitHubLabel> = self.paginate(url, &[("per_page", "100")])?;
+        let mut labels: Vec<_> = labels.into_iter().map(GitHubLabel::normalize).collect();
+        labels.sort_by(|left, right| {
+            left.name
+                .to_ascii_lowercase()
+                .cmp(&right.name.to_ascii_lowercase())
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        Ok(labels)
+    }
+
+    pub(crate) fn create_label(
+        &self,
+        repository: &Repository,
+        request: &CreateLabelRequest<'_>,
+    ) -> Result<LabelCreation, GitHubError> {
+        let url = self.endpoint(&format!(
+            "repos/{}/{}/labels",
+            repository.owner(),
+            repository.name()
+        ))?;
+        let response = self
+            .client
+            .post(url)
+            .json(request)
+            .send()
+            .map_err(GitHubError::Request)?;
+        let status = response.status();
+        if status == StatusCode::UNPROCESSABLE_ENTITY {
+            let headers = response.headers().clone();
+            let body = response.text().map_err(GitHubError::Decode)?;
+            let already_exists =
+                serde_json::from_str::<GitHubApiErrorResponse>(&body).is_ok_and(|error| {
+                    error.errors.iter().any(|detail| {
+                        detail.code == "already_exists" && detail.field.as_deref() == Some("name")
+                    })
+                });
+            if already_exists {
+                return Ok(LabelCreation::AlreadyPresent);
+            }
+            return Err(api_status_error(status, &headers));
+        }
+        if !status.is_success() {
+            return Err(api_status_error(status, response.headers()));
+        }
+        let _: GitHubLabel = response.json().map_err(GitHubError::Decode)?;
+        Ok(LabelCreation::Created)
     }
 
     fn paginate<T>(
@@ -395,6 +475,18 @@ enum GitHubLabel {
     Name(String),
 }
 
+#[derive(Deserialize)]
+struct GitHubApiErrorResponse {
+    #[serde(default)]
+    errors: Vec<GitHubValidationError>,
+}
+
+#[derive(Deserialize)]
+struct GitHubValidationError {
+    code: String,
+    field: Option<String>,
+}
+
 impl GitHubLabel {
     fn normalize(self) -> Label {
         match self {
@@ -477,7 +569,7 @@ pub(crate) enum GitHubError {
         reset: Option<String>,
         retry_after: Option<String>,
     },
-    #[error("GitHub returned invalid JSON for a paginated response: {0}")]
+    #[error("GitHub returned invalid JSON: {0}")]
     Decode(reqwest::Error),
     #[error("GitHub returned an invalid pagination Link header")]
     InvalidLink,

@@ -8,6 +8,7 @@ use tempfile::TempDir;
 fn sync_uses_gh_token_and_reports_a_versioned_snapshot() {
     let mut github = mockito::Server::new();
     let authorization = Matcher::Exact("Bearer automation-token".into());
+    let labels = mock_labels(&mut github, "acme/widgets", Some("Bearer automation-token"));
 
     let issues = github
         .mock("GET", "/repos/acme/widgets/issues")
@@ -78,11 +79,13 @@ fn sync_uses_gh_token_and_reports_a_versioned_snapshot() {
     issues.assert();
     comments.assert();
     dependencies.assert();
+    labels.assert();
 }
 
 #[test]
 fn sync_falls_back_to_gh_token_when_gh_session_output_is_invalid() {
     let mut github = mockito::Server::new();
+    let labels = mock_labels(&mut github, "acme/empty", Some("Bearer fallback-token"));
     let issues = github
         .mock("GET", "/repos/acme/empty/issues")
         .match_query(Matcher::AllOf(vec![
@@ -125,11 +128,13 @@ fn sync_falls_back_to_gh_token_when_gh_session_output_is_invalid() {
     );
     issues.assert();
     comments.assert();
+    labels.assert();
 }
 
 #[test]
 fn sync_paginates_and_persists_only_normalized_issue_data() {
     let mut github = mockito::Server::new();
+    let labels = mock_labels(&mut github, "acme/widgets", None);
     let issue_next = format!(
         "<{}/repos/acme/widgets/issues?state=all&sort=created&direction=asc&per_page=100&page=2>; rel=\"next\"",
         github.url()
@@ -281,12 +286,14 @@ fn sync_paginates_and_persists_only_normalized_issue_data() {
     dependency_page_one.assert();
     dependency_page_two.assert();
     issue_nine_dependencies.assert();
+    labels.assert();
 }
 
 #[test]
 fn pagination_failure_preserves_the_previous_complete_replica() {
     let state = TempDir::new().expect("temporary state directory");
     let mut initial_github = mockito::Server::new();
+    let initial_labels = mock_labels(&mut initial_github, "acme/widgets", None);
     let initial_issues = initial_github
         .mock("GET", "/repos/acme/widgets/issues")
         .match_query(Matcher::AllOf(vec![
@@ -324,11 +331,13 @@ fn pagination_failure_preserves_the_previous_complete_replica() {
     initial_issues.assert();
     initial_comments.assert();
     initial_dependencies.assert();
+    initial_labels.assert();
 
     let replica_path = state.path().join("repositories/acme/widgets/replica.json");
     let complete_replica = fs::read(&replica_path).expect("initial complete replica");
 
     let mut failing_github = mockito::Server::new();
+    let failing_labels = mock_labels(&mut failing_github, "acme/widgets", None);
     let next = format!(
         "<{}/repos/acme/widgets/issues?state=all&sort=created&direction=asc&per_page=100&page=2>; rel=\"next\"",
         failing_github.url()
@@ -371,11 +380,13 @@ fn pagination_failure_preserves_the_previous_complete_replica() {
     assert!(residue.is_empty(), "temporary residue: {residue:?}");
     first_page.assert();
     failed_page.assert();
+    failing_labels.assert();
 }
 
 #[test]
 fn sync_reuses_an_available_gh_session_for_human_output() {
     let mut github = mockito::Server::new();
+    let labels = mock_labels(&mut github, "acme/empty", Some("Bearer gh-session-token"));
     let issues = github
         .mock("GET", "/repos/acme/empty/issues")
         .match_query(Matcher::AllOf(vec![
@@ -427,6 +438,7 @@ fn sync_reuses_an_available_gh_session_for_human_output() {
     assert!(!stdout.contains("gh-session-token"));
     issues.assert();
     comments.assert();
+    labels.assert();
 }
 
 #[test]
@@ -445,6 +457,7 @@ fn authentication_failure_does_not_publish_a_replica() {
 #[test]
 fn rate_limit_failure_is_actionable_and_does_not_publish_a_replica() {
     let mut github = mockito::Server::new();
+    let labels = mock_labels(&mut github, "acme/widgets", None);
     let limited = github
         .mock("GET", "/repos/acme/widgets/issues")
         .match_query(Matcher::AllOf(vec![
@@ -474,11 +487,13 @@ fn rate_limit_failure_is_actionable_and_does_not_publish_a_replica() {
     assert!(!stderr.contains("automation-token"));
     assert!(!state.path().join("repositories").exists());
     limited.assert();
+    labels.assert();
 }
 
 #[test]
 fn interrupted_response_does_not_publish_a_replica() {
     let mut github = mockito::Server::new();
+    let labels = mock_labels(&mut github, "acme/widgets", None);
     let interrupted = github
         .mock("GET", "/repos/acme/widgets/issues")
         .match_query(Matcher::AllOf(vec![
@@ -501,6 +516,7 @@ fn interrupted_response_does_not_publish_a_replica() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("invalid JSON"));
     assert!(!state.path().join("repositories").exists());
     interrupted.assert();
+    labels.assert();
 }
 
 #[test]
@@ -527,6 +543,25 @@ fn sync_rejects_an_unsafe_api_base_before_authentication() {
         );
         assert!(!state.path().join("repositories").exists());
     }
+}
+
+fn mock_labels(
+    github: &mut mockito::Server,
+    repository: &str,
+    authorization: Option<&str>,
+) -> mockito::Mock {
+    let path = format!("/repos/{repository}/labels");
+    let mut labels = github
+        .mock("GET", path.as_str())
+        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()));
+    if let Some(authorization) = authorization {
+        labels = labels.match_header("authorization", authorization);
+    }
+    labels
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("[]")
+        .create()
 }
 
 fn sync_command(state: &TempDir, api_url: &str, repository: &str, json: bool) -> Command {

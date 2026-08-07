@@ -176,6 +176,7 @@ fn ready_command(state: &TempDir, api_url: &str, assignee: Option<&str>) -> Comm
 }
 
 struct RepositoryMocks {
+    labels: Mock,
     issues: Mock,
     comments: Mock,
     dependencies: Vec<Mock>,
@@ -183,6 +184,7 @@ struct RepositoryMocks {
 
 impl RepositoryMocks {
     fn assert(self) {
+        self.labels.assert();
         self.issues.assert();
         self.comments.assert();
         for dependency in self.dependencies {
@@ -198,6 +200,15 @@ fn mock_repository(
     dependencies: Vec<(u64, String)>,
     expected_calls: usize,
 ) -> RepositoryMocks {
+    let labels_path = format!("/repos/{repository}/labels");
+    let labels = github
+        .mock("GET", labels_path.as_str())
+        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(canonical_labels())
+        .expect(expected_calls)
+        .create();
     let issues_path = format!("/repos/{repository}/issues");
     let issues = github
         .mock("GET", issues_path.as_str())
@@ -239,10 +250,28 @@ fn mock_repository(
         .collect();
 
     RepositoryMocks {
+        labels,
         issues,
         comments,
         dependencies,
     }
+}
+
+fn canonical_labels() -> String {
+    serde_json::to_string(
+        &(0_u64..=4)
+            .map(|priority| {
+                serde_json::json!({
+                    "id": priority + 100,
+                    "node_id": format!("L_{priority}"),
+                    "name": format!("priority:p{priority}"),
+                    "color": "123456",
+                    "description": null
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
+    .expect("canonical labels")
 }
 
 fn ready_command_for(

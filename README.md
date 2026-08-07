@@ -7,7 +7,9 @@ replica so later analysis can be fast and work offline.
 The current executable tracer implements full synchronization and Executable
 frontier enumeration from
 [Issue #2](https://github.com/syntropika/grit/issues/2) and
-[Issue #3](https://github.com/syntropika/grit/issues/3).
+[Issue #3](https://github.com/syntropika/grit/issues/3), plus canonical
+Declared priority support from
+[Issue #6](https://github.com/syntropika/grit/issues/6).
 
 ## Build and test
 
@@ -48,6 +50,20 @@ The replica file format and location below `GRIT_STATE_DIR` are implementation
 details. Consumers should use Grit's versioned command output rather than read
 the replica directly.
 
+## Initialize Declared priority
+
+Grit v1 reads Declared priority only from `priority:p0` through `priority:p4`
+labels. Initialize missing labels explicitly:
+
+```bash
+grit init --repo OWNER/REPO
+grit init --repo OWNER/REPO --json
+```
+
+Initialization creates only missing canonical names. It never renames,
+recolors, redescribes, deletes, or assigns an existing label, so repeated runs
+converge without further changes. Read commands never create labels.
+
 ## Enumerate Executable work
 
 `grit ready` refreshes the Local replica and lists the complete Executable
@@ -60,7 +76,10 @@ grit ready --repo OWNER/REPO --assignee LOGIN --json
 
 Without `--assignee`, the Execution scope contains Ready unassigned Issues.
 With it, the scope contains Ready Issues assigned to that login. Assignment is
-reported separately from Dependency readiness.
+reported separately from Dependency readiness. JSON reports every returned
+Issue's priority as `declared`, `unspecified`, or `conflict`. A conflict remains
+eligible and does not change readiness; it compares as neutral in later ranking
+commands. Missing canonical Repository labels and conflicts appear as warnings.
 
 If GitHub cannot be reached, `ready` uses the latest valid Local replica and
 reports its unchanged `synced_at`. A replica is accepted only when its schema,
