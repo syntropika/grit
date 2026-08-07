@@ -6,6 +6,7 @@ use super::{
     decision::{DecisiveComparison, PriorityProfile, RankingMode},
     output::{IssueReference, issue_reference},
 };
+use crate::model::StableNodeKey;
 use crate::priority::PriorityComparison;
 use crate::working_graph::{PendingProvenance, WorkingGraph};
 
@@ -45,8 +46,8 @@ pub(super) enum Reason {
         runner_up_bucket: u64,
     },
     DeterministicTiebreak {
-        winner_key: [u64; 2],
-        runner_up_key: [u64; 2],
+        winner_key: StableNodeKey,
+        runner_up_key: StableNodeKey,
     },
 }
 
@@ -86,6 +87,8 @@ pub(super) fn evidence(
     working: &WorkingGraph<'_>,
     ranking_provenance_context: &[u64],
 ) -> ComparisonEvidence {
+    let reason_code = decision.reason_code();
+    let component = decision.component();
     let (winner_value, runner_up_value) = match decision {
         DecisiveComparison::P0Curve { left, right } => (json!([left]), json!([right])),
         DecisiveComparison::UnlockCount { left, right } => (json!(left), json!(right)),
@@ -103,8 +106,8 @@ pub(super) fn evidence(
     );
     ComparisonEvidence {
         provenance,
-        reason_code: decision.reason_code(),
-        component: decision.component(),
+        reason_code,
+        component,
         winner: issue_reference(working, winner.issue),
         runner_up: issue_reference(working, runner_up.issue),
         winner_value,

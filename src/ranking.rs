@@ -85,8 +85,13 @@ pub(crate) fn analyze(working: &WorkingGraph<'_>, scope: ExecutionScope<'_>) -> 
         .first()
         .zip(evaluated.get(1))
         .map(|(winner, runner_up)| decision::compare(winner, runner_up, mode).decisive);
-    let comparison = decisive.zip(evaluated.first().zip(evaluated.get(1))).map(
-        |(decision, (winner, runner_up))| {
+    let close_call = decisive
+        .as_ref()
+        .is_some_and(decision::DecisiveComparison::is_close_call);
+    let comparison = decisive
+        .clone()
+        .zip(evaluated.first().zip(evaluated.get(1)))
+        .map(|(decision, (winner, runner_up))| {
             explanation::evidence(
                 decision,
                 winner,
@@ -94,9 +99,7 @@ pub(crate) fn analyze(working: &WorkingGraph<'_>, scope: ExecutionScope<'_>) -> 
                 working,
                 &ranking_provenance_context,
             )
-        },
-    );
-    let close_call = decisive.is_some_and(decision::DecisiveComparison::is_close_call);
+        });
     let mut comparison_reason = decisive.map(explanation::reason);
     let executable_p0_count = ready
         .executable

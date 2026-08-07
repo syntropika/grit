@@ -7,7 +7,7 @@ pub(super) enum PendingClassification {
     Conflicting,
 }
 
-impl ReconciliationPass<'_, '_, '_> {
+impl ReconciliationPass<'_, '_, '_, '_> {
     pub(super) fn reconcile_priority_operation(
         &mut self,
         operation: &PendingMutation,
@@ -421,7 +421,8 @@ fn result_for(
         .expect("Priority result is built from a Priority mutation");
     OperationResult {
         id: operation.id().to_owned(),
-        issue_number: operation.issue_number(),
+        issue_number: Some(operation.issue_number()),
+        temporary_id: None,
         depends_on: operation.depends_on().to_vec(),
         classification,
         outcome,

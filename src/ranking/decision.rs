@@ -3,7 +3,7 @@ use std::cmp::Ordering;
 use serde::Serialize;
 
 use super::EvaluatedCandidate;
-use crate::priority::PriorityComparison;
+use crate::{model::StableNodeKey, priority::PriorityComparison};
 
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -44,7 +44,7 @@ impl PriorityProfile {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) enum DecisiveComparison {
     P0Curve {
         left: usize,
@@ -67,20 +67,20 @@ pub(super) enum DecisiveComparison {
         right: u64,
     },
     StableNodeKey {
-        left: [u64; 2],
-        right: [u64; 2],
+        left: StableNodeKey,
+        right: StableNodeKey,
     },
 }
 
 impl DecisiveComparison {
-    pub(super) fn is_close_call(self) -> bool {
+    pub(super) fn is_close_call(&self) -> bool {
         matches!(
             self,
             Self::PageRankBucket { .. } | Self::StableNodeKey { .. }
         )
     }
 
-    pub(super) fn reason_code(self) -> &'static str {
+    pub(super) fn reason_code(&self) -> &'static str {
         match self {
             Self::P0Curve { .. } => "unlocks_more_p0",
             Self::UnlockCount { .. } => "unlocks_more_work",
@@ -91,7 +91,7 @@ impl DecisiveComparison {
         }
     }
 
-    pub(super) fn component(self) -> &'static str {
+    pub(super) fn component(&self) -> &'static str {
         match self {
             Self::P0Curve { .. } => "p0_curve",
             Self::UnlockCount { .. } => "unlock_count",
@@ -161,11 +161,13 @@ pub(super) fn compare(
             },
         };
     }
+    let left_key = left.issue.stable_node_key();
+    let right_key = right.issue.stable_node_key();
     CandidateComparison {
-        ordering: right.issue.number.cmp(&left.issue.number),
+        ordering: right_key.cmp(&left_key),
         decisive: DecisiveComparison::StableNodeKey {
-            left: stable_key(left.issue.number),
-            right: stable_key(right.issue.number),
+            left: left_key,
+            right: right_key,
         },
     }
 }
@@ -178,8 +180,4 @@ fn priority_rank(priority: PriorityComparison) -> u8 {
         PriorityComparison::P3 => 2,
         PriorityComparison::P4 => 1,
     }
-}
-
-fn stable_key(issue_number: u64) -> [u64; 2] {
-    [0, issue_number]
 }

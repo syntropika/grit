@@ -17,7 +17,9 @@ intent projection from [Issue #15](https://github.com/syntropika/grit/issues/15)
 It also reconciles ordered Pending mutations from
 [Issue #20](https://github.com/syntropika/grit/issues/20) and projects offline
 native-Dependency changes from
-[Issue #24](https://github.com/syntropika/grit/issues/24).
+[Issue #24](https://github.com/syntropika/grit/issues/24), and creates safely
+recoverable Draft Issues from
+[Issue #26](https://github.com/syntropika/grit/issues/26).
 
 ## Build and test
 
@@ -139,6 +141,28 @@ evidence, and reasons carry operation provenance. If no Issue is Executable,
 the command succeeds with a null recommendation and categorized blocker
 counts. Like `ready`, it attempts a pull Synchronization and falls back to the
 latest valid Local replica without mutating GitHub.
+
+## Create Draft Issues
+
+Create a Draft Issue locally when authoring must continue without GitHub:
+
+```bash
+grit create --repo OWNER/REPO --title "Prepare the migration" --body "Acceptance notes"
+grit create --repo OWNER/REPO --title "Prepare the migration" --json
+```
+
+Creation returns a stable Temporary Issue ID and a key such as
+`OWNER/REPO#draft:TEMPORARY_ID`. The Draft participates provisionally in
+`ready` and `next`; that key can also be passed to `block` or `unblock` before
+GitHub assigns an Issue number. `grit reconcile` creates referenced Drafts
+before their dependent operations, stores the permanent number and node ID,
+and retains the temporary alias.
+
+Every non-idempotent create has a random, non-secret Operation marker persisted
+before the request. Grit embeds it in an invisible Markdown comment, removes it
+from normalized and user-facing data, and uses it only to recover an ambiguous
+response. Exactly one remote match is accepted; zero or multiple matches stay
+unresolved and are never retried blindly.
 
 ## Change native Dependencies
 

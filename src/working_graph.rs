@@ -13,7 +13,7 @@ use crate::{
         BlockerIdentity, BlockerScope, Dependency, DependencyEdgeKey, DependencyPresence, Issue,
         IssueIdentity, LocalReplica,
     },
-    outbox::PendingMutationOutbox,
+    outbox::{IssueCreateState, PendingMutation, PendingMutationOutbox},
     priority::{LogicalPriority, PriorityState},
 };
 
@@ -60,6 +60,21 @@ impl<'a> WorkingGraph<'a> {
                     .or_default()
                     .push((index, operation_id.clone()));
             }
+        }
+        let synchronized_numbers: BTreeSet<_> =
+            replica.issues.iter().map(|issue| issue.number).collect();
+        let draft_issues: Vec<_> = outbox
+            .operations()
+            .iter()
+            .filter_map(draft_issue)
+            .filter(|issue| !synchronized_numbers.contains(&issue.number))
+            .collect();
+        if !draft_issues.is_empty() {
+            effective_replica.to_mut().issues.extend(draft_issues);
+            effective_replica
+                .to_mut()
+                .issues
+                .sort_by_key(|issue| issue.stable_node_key());
         }
         if !dependency_intents.is_empty() {
             project_dependency_intents(effective_replica.to_mut(), dependency_intents)?;
@@ -142,7 +157,12 @@ fn validated_issue_numbers(
     replica: &LocalReplica,
     outbox: &PendingMutationOutbox,
 ) -> Result<BTreeSet<u64>, WorkingGraphError> {
-    let issue_numbers: BTreeSet<_> = replica.issues.iter().map(|issue| issue.number).collect();
+    let mut issue_numbers: BTreeSet<_> = replica.issues.iter().map(|issue| issue.number).collect();
+    issue_numbers.extend(outbox.operations().iter().filter_map(|operation| {
+        operation
+            .issue_create_view()
+            .map(|_| operation.issue_number())
+    }));
     for operation in outbox.operations() {
         for issue_number in operation.affected_issue_numbers() {
             if !issue_numbers.contains(&issue_number) {
@@ -151,6 +171,49 @@ fn validated_issue_numbers(
         }
     }
     Ok(issue_numbers)
+}
+
+fn draft_issue(operation: &PendingMutation) -> Option<Issue> {
+    let create = operation.issue_create_view()?;
+    let (id, node_id, number, url, identity) = match create.state {
+        IssueCreateState::Mapped {
+            issue_id,
+            issue_node_id,
+            issue_number,
+            issue_url,
+        } => (
+            *issue_id,
+            issue_node_id.clone(),
+            *issue_number,
+            issue_url.clone(),
+            crate::model::IssueIdentityState::MappedDraft(create.temporary_id),
+        ),
+        _ => (
+            0,
+            format!("draft:{}", create.temporary_id),
+            create.synthetic_number,
+            String::new(),
+            crate::model::IssueIdentityState::Draft(create.temporary_id),
+        ),
+    };
+    Some(Issue {
+        id,
+        node_id,
+        number,
+        url,
+        title: create.title.to_owned(),
+        body: create.body.to_owned(),
+        state: "open".to_owned(),
+        state_reason: None,
+        author: None,
+        assignees: Vec::new(),
+        labels: Vec::new(),
+        comments: Vec::new(),
+        created_at: create.created_at.to_owned(),
+        updated_at: create.created_at.to_owned(),
+        closed_at: None,
+        identity,
+    })
 }
 
 fn project_dependency_intents(

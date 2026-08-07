@@ -126,6 +126,7 @@ mod tests {
             created_at: "2026-08-07T00:00:00Z".to_owned(),
             updated_at: "2026-08-07T00:00:00Z".to_owned(),
             closed_at: None,
+            identity: crate::model::IssueIdentityState::GitHub,
         }
     }
 

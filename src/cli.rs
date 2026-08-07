@@ -12,7 +12,8 @@ use crate::{
         CreateLabelRequest, DependencyChange, DependencyIntent, GitHubClient, GitHubError,
         LabelCreation,
     },
-    model::{DependencyPresence, LocalReplica, ReplicaError},
+    issue_create::{self, PendingIssueCreateError},
+    model::{DependencyPresence, LocalReplica, ReplicaError, TemporaryIssueId},
     operational::{ExecutionScope, analyze_ready},
     outbox::{OutboxError, OutboxStore, PendingMutation},
     priority::{
@@ -23,7 +24,10 @@ use crate::{
     ranking::{self, NextAnalysis},
     reconciliation::{self, ReconciliationError, ResolutionChoice},
     replica_sync::{self, ReplicaSyncError},
-    repository::{IssueReference, IssueReferenceError, Repository, RepositoryError},
+    repository::{
+        IssueReference, IssueReferenceError, PendingIssueReference, PendingIssueReferenceError,
+        Repository, RepositoryError,
+    },
     store::{ReplicaStore, StoreError},
     working_graph::{PendingProvenance, WorkingGraph, WorkingGraphError},
 };
@@ -34,6 +38,7 @@ const INIT_SCHEMA_VERSION: &str = "grit.init/v1";
 const PRIORITY_UPDATE_SCHEMA_VERSION: &str = "grit.priority-update/v1";
 const RESOLVE_SCHEMA_VERSION: &str = "grit.resolve/v1";
 const DEPENDENCY_MUTATION_SCHEMA_VERSION: &str = "grit.dependency-mutation/v1";
+const ISSUE_CREATE_SCHEMA_VERSION: &str = "grit.issue-create/v1";
 
 #[derive(Parser)]
 #[command(name = "grit", version, about)]
@@ -44,6 +49,21 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Create a provisional Draft Issue for later reconciliation.
+    Create {
+        /// Repository in OWNER/REPO form.
+        #[arg(long)]
+        repo: String,
+        /// Draft Issue title.
+        #[arg(long)]
+        title: String,
+        /// Draft Issue body in Markdown.
+        #[arg(long, default_value = "")]
+        body: String,
+        /// Emit versioned machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
     /// Recommend the best executable first step under next/v1.
     Next {
         /// Repository in OWNER/REPO form.
@@ -162,6 +182,12 @@ enum Command {
 pub(crate) fn execute() -> Result<(), CliError> {
     let cli = Cli::parse();
     match cli.command {
+        Command::Create {
+            repo,
+            title,
+            body,
+            json,
+        } => create_issue(&Repository::parse(&repo)?, title, body, json),
         Command::Next {
             repo,
             assignee,
@@ -206,6 +232,44 @@ pub(crate) fn execute() -> Result<(), CliError> {
             json,
         ),
     }
+}
+
+fn create_issue(
+    repository: &Repository,
+    title: String,
+    body: String,
+    json: bool,
+) -> Result<(), CliError> {
+    let result = issue_create::queue(repository, title, body)?;
+    let output = IssueCreateOutput {
+        schema_version: ISSUE_CREATE_SCHEMA_VERSION,
+        command: "create",
+        repository: repository.full_name(),
+        pending: true,
+        draft: DraftIssueOutput {
+            temporary_id: result.temporary_id,
+            stable_node_key: &result.stable_node_key,
+            key: &result.key,
+        },
+        operation: DraftCreateOperationOutput {
+            id: result.operation.id(),
+            kind: "issue_create",
+        },
+        working_graph: WorkingGraphSummary {
+            input_hash: &result.working_input_hash,
+        },
+        snapshot: snapshot_summary(&result.replica),
+    };
+    if json {
+        serde_json::to_writer(std::io::stdout().lock(), &output).map_err(CliError::EncodeOutput)?;
+        println!();
+    } else {
+        println!(
+            "Queued Draft Issue {} as Pending mutation {}",
+            output.draft.key, output.operation.id
+        );
+    }
+    Ok(())
 }
 
 fn resolution_choice(
@@ -302,7 +366,9 @@ fn print_reconciliation(
                 println!(
                     "{} Issue #{} conflict: base {}, local {}, remote {}",
                     operation.id,
-                    operation.issue_number,
+                    operation
+                        .issue_number
+                        .expect("Priority conflicts have a GitHub Issue number"),
                     base.to_state().display_name(),
                     local.to_state().display_name(),
                     remote
@@ -539,8 +605,18 @@ fn mutate_dependency(
     intent: DependencyIntent,
     json: bool,
 ) -> Result<(), CliError> {
-    let blocked = IssueReference::parse(blocked)?;
-    let blocker = IssueReference::parse(blocker)?;
+    let blocked = PendingIssueReference::parse(blocked)?;
+    let blocker = PendingIssueReference::parse(blocker)?;
+    let (Some(github_blocked), Some(github_blocker)) = (blocked.as_github(), blocker.as_github())
+    else {
+        return queue_dependency_update(
+            &blocked,
+            &blocker,
+            intent,
+            "Draft Issue identity requires reconciliation".to_owned(),
+            json,
+        );
+    };
     let client = match github_client() {
         Ok(client) => client,
         Err(CliError::Auth(source)) => {
@@ -548,7 +624,7 @@ fn mutate_dependency(
         }
         Err(error) => return Err(error),
     };
-    let result = match client.mutate_dependency(&blocked, &blocker, intent) {
+    let result = match client.mutate_dependency(github_blocked, github_blocker, intent) {
         Ok(result) => result,
         Err(source) if source.permits_offline_queue() => {
             return queue_dependency_update(&blocked, &blocker, intent, source.to_string(), json);
@@ -556,16 +632,16 @@ fn mutate_dependency(
         Err(source) => return Err(source.into()),
     };
 
-    let replica = replica_sync::fetch(&client, blocked.repository())
+    let replica = replica_sync::fetch(&client, github_blocked.repository())
         .map_err(|source| CliError::MutationSynchronization { source })?;
-    if replica.has_dependency(&blocked, &blocker) != intent.desired_present() {
+    if replica.has_dependency(github_blocked, github_blocker) != intent.desired_present() {
         return Err(CliError::MutationReadbackMismatch {
             blocked: blocked.stable_key(),
             blocker: blocker.stable_key(),
             expected: dependency_expected_relationship(intent),
         });
     }
-    ReplicaStore::discover(blocked.repository())
+    ReplicaStore::discover(github_blocked.repository())
         .map_err(|source| CliError::MutationPublication { source })?
         .publish(&replica)
         .map_err(|source| CliError::MutationPublication { source })?;
@@ -574,7 +650,7 @@ fn mutate_dependency(
     let output = DependencyMutationOutput {
         schema_version: DEPENDENCY_MUTATION_SCHEMA_VERSION,
         command: dependency_command_name(intent),
-        repository: blocked.repository().full_name(),
+        repository: github_blocked.repository().full_name(),
         result: dependency_result_name(result),
         pending: false,
         edge: DependencyEdgeOutput {
@@ -596,8 +672,8 @@ fn mutate_dependency(
 }
 
 fn queue_dependency_update(
-    blocked: &IssueReference,
-    blocker: &IssueReference,
+    blocked: &PendingIssueReference,
+    blocker: &PendingIssueReference,
     intent: DependencyIntent,
     online_failure: String,
     json: bool,
@@ -698,7 +774,9 @@ fn ready(repository: &Repository, assignee: Option<&str>, json: bool) -> Result<
         .iter()
         .map(|issue| ReadyIssue {
             provenance: working.provenance_for_issue(issue.number),
-            number: issue.number,
+            key: issue.display_key(&replica.repository),
+            number: (!issue.is_draft()).then_some(issue.number),
+            temporary_id: issue.temporary_id(),
             url: &issue.url,
             title: &issue.title,
             ready: true,
@@ -742,8 +820,8 @@ fn ready(repository: &Repository, assignee: Option<&str>, json: bool) -> Result<
         );
         for issue in &output.issues {
             println!(
-                "#{} {} [{}]",
-                issue.number,
+                "{} {} [{}]",
+                issue.key,
                 issue.title,
                 issue.priority.display_name()
             );
@@ -1020,6 +1098,31 @@ struct WorkingGraphSummary<'a> {
 }
 
 #[derive(Serialize)]
+struct IssueCreateOutput<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    repository: &'a str,
+    pending: bool,
+    draft: DraftIssueOutput<'a>,
+    operation: DraftCreateOperationOutput<'a>,
+    working_graph: WorkingGraphSummary<'a>,
+    snapshot: SnapshotSummary<'a>,
+}
+
+#[derive(Serialize)]
+struct DraftIssueOutput<'a> {
+    temporary_id: TemporaryIssueId,
+    stable_node_key: &'a crate::model::StableNodeKey,
+    key: &'a str,
+}
+
+#[derive(Serialize)]
+struct DraftCreateOperationOutput<'a> {
+    id: &'a str,
+    kind: &'static str,
+}
+
+#[derive(Serialize)]
 struct PriorityIssueOutput<'a> {
     key: &'a str,
     number: u64,
@@ -1072,7 +1175,11 @@ struct ExecutionScopeOutput<'a> {
 struct ReadyIssue<'a> {
     #[serde(flatten)]
     provenance: PendingProvenance,
-    number: u64,
+    key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    number: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temporary_id: Option<TemporaryIssueId>,
     url: &'a str,
     title: &'a str,
     ready: bool,
@@ -1181,6 +1288,10 @@ pub(crate) enum CliError {
     Repository(#[from] RepositoryError),
     #[error(transparent)]
     IssueReference(#[from] IssueReferenceError),
+    #[error(transparent)]
+    PendingIssueReference(#[from] PendingIssueReferenceError),
+    #[error(transparent)]
+    PendingIssueCreate(#[from] PendingIssueCreateError),
     #[error("GRIT_GITHUB_API_URL is invalid: {0}")]
     ParseApiBase(url::ParseError),
     #[error("GRIT_GITHUB_API_URL must be a safe absolute HTTP(S) base URL")]

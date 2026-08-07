@@ -1,6 +1,6 @@
 use super::*;
 
-impl ReconciliationPass<'_, '_, '_> {
+impl ReconciliationPass<'_, '_, '_, '_> {
     pub(super) fn reconcile_dependency_operation(
         &mut self,
         operation: &PendingMutation,
@@ -284,15 +284,18 @@ fn result_for(
         .expect("Dependency result is built from a Dependency mutation");
     OperationResult {
         id: operation.id().to_owned(),
-        issue_number: edge.blocked_number(),
+        issue_number: Some(edge.blocked_number()),
+        temporary_id: edge.blocked_temporary_id(),
         depends_on: operation.depends_on().to_vec(),
         classification,
         outcome,
         details: OperationDetails::DependencyUpdate {
             edge: DependencyEdgeResult {
                 blocked_number: edge.blocked_number(),
+                blocked_temporary_id: edge.blocked_temporary_id(),
                 blocker_repository: edge.blocker_repository().to_owned(),
                 blocker_number: edge.blocker_number(),
+                blocker_temporary_id: edge.blocker_temporary_id(),
             },
             desired_present: desired.is_present(),
             remote_present,

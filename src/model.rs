@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use uuid::Uuid;
 
 use crate::repository::IssueReference;
 
@@ -174,6 +175,115 @@ pub(crate) struct Issue {
     pub(crate) created_at: String,
     pub(crate) updated_at: String,
     pub(crate) closed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "IssueIdentityState::is_github")]
+    pub(crate) identity: IssueIdentityState,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", content = "temporary_id", rename_all = "snake_case")]
+pub(crate) enum IssueIdentityState {
+    #[default]
+    GitHub,
+    Draft(TemporaryIssueId),
+    MappedDraft(TemporaryIssueId),
+}
+
+impl IssueIdentityState {
+    fn is_github(&self) -> bool {
+        matches!(self, Self::GitHub)
+    }
+
+    pub(crate) fn temporary_id(self) -> Option<TemporaryIssueId> {
+        match self {
+            Self::GitHub => None,
+            Self::Draft(temporary_id) | Self::MappedDraft(temporary_id) => Some(temporary_id),
+        }
+    }
+
+    pub(crate) fn is_draft(self) -> bool {
+        matches!(self, Self::Draft(_))
+    }
+}
+
+impl Issue {
+    pub(crate) fn stable_node_key(&self) -> StableNodeKey {
+        match self.identity {
+            IssueIdentityState::Draft(temporary_id) => StableNodeKey::Draft(temporary_id),
+            IssueIdentityState::GitHub | IssueIdentityState::MappedDraft(_) => {
+                StableNodeKey::GitHub(self.number)
+            }
+        }
+    }
+
+    pub(crate) fn display_key(&self, repository: &str) -> String {
+        match self.identity {
+            IssueIdentityState::Draft(temporary_id) => temporary_id.stable_node_key(repository),
+            IssueIdentityState::GitHub | IssueIdentityState::MappedDraft(_) => {
+                format!("{repository}#{}", self.number)
+            }
+        }
+    }
+
+    pub(crate) fn temporary_id(&self) -> Option<TemporaryIssueId> {
+        self.identity.temporary_id()
+    }
+
+    pub(crate) fn is_draft(&self) -> bool {
+        self.identity.is_draft()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub(crate) struct TemporaryIssueId(Uuid);
+
+impl TemporaryIssueId {
+    pub(crate) fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    pub(crate) fn synthetic_number(self) -> u64 {
+        let bytes = self.0.as_bytes();
+        let mut prefix = [0_u8; 8];
+        prefix.copy_from_slice(&bytes[..8]);
+        u64::from_be_bytes(prefix) | (1_u64 << 63)
+    }
+
+    pub(crate) fn stable_node_key(self, repository: &str) -> String {
+        format!("{repository}#draft:{self}")
+    }
+}
+
+impl std::str::FromStr for TemporaryIssueId {
+    type Err = uuid::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Uuid::parse_str(value).map(Self)
+    }
+}
+
+impl std::fmt::Display for TemporaryIssueId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) enum StableNodeKey {
+    GitHub(u64),
+    Draft(TemporaryIssueId),
+}
+
+impl Serialize for StableNodeKey {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::GitHub(number) => (0_u8, number).serialize(serializer),
+            Self::Draft(temporary_id) => (1_u8, temporary_id).serialize(serializer),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -210,13 +320,17 @@ pub(crate) struct Dependency {
     pub(crate) blocker: BlockerIdentity,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(from = "DependencyEdgeKeyWire")]
 pub(crate) struct DependencyEdgeKey {
     blocked_repository: String,
     blocked_number: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    blocked_temporary_id: Option<TemporaryIssueId>,
     blocker_repository: String,
     blocker_number: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    blocker_temporary_id: Option<TemporaryIssueId>,
 }
 
 impl DependencyEdgeKey {
@@ -229,8 +343,28 @@ impl DependencyEdgeKey {
         Self {
             blocked_repository: blocked_repository.into().to_ascii_lowercase(),
             blocked_number,
+            blocked_temporary_id: None,
             blocker_repository: blocker_repository.into().to_ascii_lowercase(),
             blocker_number,
+            blocker_temporary_id: None,
+        }
+    }
+
+    pub(crate) fn with_temporary_aliases(
+        blocked_repository: impl Into<String>,
+        blocked_number: u64,
+        blocked_temporary_id: Option<TemporaryIssueId>,
+        blocker_repository: impl Into<String>,
+        blocker_number: u64,
+        blocker_temporary_id: Option<TemporaryIssueId>,
+    ) -> Self {
+        Self {
+            blocked_repository: blocked_repository.into().to_ascii_lowercase(),
+            blocked_number,
+            blocked_temporary_id,
+            blocker_repository: blocker_repository.into().to_ascii_lowercase(),
+            blocker_number,
+            blocker_temporary_id,
         }
     }
 
@@ -259,9 +393,61 @@ impl DependencyEdgeKey {
         self.blocker_number
     }
 
+    pub(crate) fn blocked_temporary_id(&self) -> Option<TemporaryIssueId> {
+        self.blocked_temporary_id
+    }
+
+    pub(crate) fn blocker_temporary_id(&self) -> Option<TemporaryIssueId> {
+        self.blocker_temporary_id
+    }
+
+    pub(crate) fn resolve_temporary_id(
+        &mut self,
+        temporary_id: TemporaryIssueId,
+        issue_number: u64,
+    ) {
+        if self.blocked_temporary_id == Some(temporary_id) {
+            self.blocked_number = issue_number;
+        }
+        if self.blocker_temporary_id == Some(temporary_id) {
+            self.blocker_number = issue_number;
+        }
+    }
+
     pub(crate) fn is_internal(&self) -> bool {
         self.blocked_repository
             .eq_ignore_ascii_case(&self.blocker_repository)
+    }
+}
+
+impl PartialEq for DependencyEdgeKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.identity_tuple() == other.identity_tuple()
+    }
+}
+
+impl Eq for DependencyEdgeKey {}
+
+impl PartialOrd for DependencyEdgeKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for DependencyEdgeKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.identity_tuple().cmp(&other.identity_tuple())
+    }
+}
+
+impl DependencyEdgeKey {
+    fn identity_tuple(&self) -> (&str, u64, &str, u64) {
+        (
+            &self.blocked_repository,
+            self.blocked_number,
+            &self.blocker_repository,
+            self.blocker_number,
+        )
     }
 }
 
@@ -269,17 +455,23 @@ impl DependencyEdgeKey {
 struct DependencyEdgeKeyWire {
     blocked_repository: String,
     blocked_number: u64,
+    #[serde(default)]
+    blocked_temporary_id: Option<TemporaryIssueId>,
     blocker_repository: String,
     blocker_number: u64,
+    #[serde(default)]
+    blocker_temporary_id: Option<TemporaryIssueId>,
 }
 
 impl From<DependencyEdgeKeyWire> for DependencyEdgeKey {
     fn from(wire: DependencyEdgeKeyWire) -> Self {
-        Self::new(
+        Self::with_temporary_aliases(
             wire.blocked_repository,
             wire.blocked_number,
+            wire.blocked_temporary_id,
             wire.blocker_repository,
             wire.blocker_number,
+            wire.blocker_temporary_id,
         )
     }
 }
