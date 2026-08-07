@@ -14,6 +14,7 @@ pub(super) fn schema_json() -> Result<Vec<u8>, GraphError> {
 }
 
 pub(super) fn html(artifact: &GraphArtifact) -> Result<String, GraphError> {
+    let show_projects = artifact.nodes.iter().any(|node| node.projects.is_some());
     let mut blockers = BTreeMap::<String, Vec<String>>::new();
     let mut dependents = BTreeMap::<String, Vec<String>>::new();
     for edge in &artifact.edges {
@@ -46,8 +47,18 @@ pub(super) fn html(artifact: &GraphArtifact) -> Result<String, GraphError> {
                 )
             })
             .unwrap_or_default();
+        let project_cell = if show_projects {
+            let projects = node
+                .projects
+                .as_ref()
+                .map(|values| values.join(", "))
+                .unwrap_or_else(|| "—".to_owned());
+            format!("<td>{}</td>", escape_html(&projects))
+        } else {
+            String::new()
+        };
         rows.push_str(&format!(
-            "<tr data-node-key=\"{escaped_key}\"><td><button type=\"button\" class=\"table-node\" data-node-key=\"{escaped_key}\" aria-pressed=\"false\">{escaped_key}</button>{github_link}</td><td>{title}</td><td>{state}</td><td>{readiness}</td><td>{layer}</td><td>{assignees}</td><td>{labels}</td><td>{blockers}</td><td>{dependents}</td></tr>",
+            "<tr data-node-key=\"{escaped_key}\"><td><button type=\"button\" class=\"table-node\" data-node-key=\"{escaped_key}\" aria-pressed=\"false\">{escaped_key}</button>{github_link}</td><td>{title}</td><td>{state}</td><td>{readiness}</td><td>{layer}</td><td>{assignees}</td><td>{labels}</td>{project_cell}<td class=\"blockers-cell\">{blockers}</td><td class=\"dependents-cell\">{dependents}</td><td class=\"relationship-cell\">—</td></tr>",
             state = escape_html(&node.state),
             readiness = node.readiness.as_str(),
             assignees = escape_html(&node.assignees.join(", ")),
@@ -66,6 +77,14 @@ pub(super) fn html(artifact: &GraphArtifact) -> Result<String, GraphError> {
             ("synced_at", escape_html(&artifact.synced_at)),
             ("artifact_hash", escape_html(&artifact.artifact_hash)),
             ("graph_data", graph_data),
+            (
+                "project_header",
+                if show_projects {
+                    "<th scope=\"col\">Projects</th>".to_owned()
+                } else {
+                    String::new()
+                },
+            ),
             ("rows", rows),
         ],
     )
@@ -77,6 +96,10 @@ pub(super) fn stylesheet() -> &'static [u8] {
 
 pub(super) fn javascript() -> &'static [u8] {
     include_bytes!("render/app.js")
+}
+
+pub(super) fn graph_query_javascript() -> &'static [u8] {
+    include_bytes!("render/graph-query.js")
 }
 
 fn joined_relations(relations: &BTreeMap<String, Vec<String>>, key: &str) -> String {

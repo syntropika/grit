@@ -100,6 +100,8 @@ pub(super) struct ArtifactNode {
     pub(super) readiness: Readiness,
     pub(super) assignees: Vec<String>,
     pub(super) labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) projects: Option<Vec<String>>,
     pub(super) position: Position,
     provenance: ElementProvenance,
 }
@@ -260,6 +262,7 @@ pub(super) fn build(replica: &LocalReplica) -> Result<GraphArtifact, GraphError>
             readiness,
             assignees,
             labels,
+            projects: None,
             position: unresolved_position(),
             provenance: ElementProvenance::synchronized(),
         });
@@ -338,6 +341,7 @@ pub(super) fn build(replica: &LocalReplica) -> Result<GraphArtifact, GraphError>
             },
             assignees: Vec::new(),
             labels: Vec::new(),
+            projects: None,
             position: unresolved_position(),
             provenance: ElementProvenance::synchronized(),
         });
@@ -458,6 +462,9 @@ fn validate(artifact: &GraphArtifact) -> Result<(), GraphError> {
             }
             NodeKind::Issue | NodeKind::ExternalBlocker => {}
         }
+        if !valid_projects(node) {
+            return Err(GraphError::InvalidField("nodes.projects"));
+        }
         validate_element_provenance(&node.provenance, &pending_ids)?;
     }
     for edge in &artifact.edges {
@@ -477,6 +484,18 @@ fn validate(artifact: &GraphArtifact) -> Result<(), GraphError> {
         return Err(GraphError::ArtifactHashMismatch);
     }
     Ok(())
+}
+
+fn valid_projects(node: &ArtifactNode) -> bool {
+    let Some(projects) = &node.projects else {
+        return true;
+    };
+    node.kind == NodeKind::Issue
+        && !projects.is_empty()
+        && projects.iter().all(|project| !project.trim().is_empty())
+        && projects
+            .windows(2)
+            .all(|pair| pair[0].to_ascii_lowercase() < pair[1].to_ascii_lowercase())
 }
 
 fn validate_element_provenance(
@@ -566,4 +585,71 @@ fn strip_operation_markers(value: &str) -> String {
         sanitized.replace_range(start..start + relative_end + 3, "");
     }
     sanitized
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn optional_project_membership_is_valid_and_rendered_only_when_present() {
+        let synchronized = ElementProvenance::synchronized();
+        let mut artifact = GraphArtifact {
+            schema_version: ArtifactSchemaVersion::V1,
+            schema_url: SchemaLocation::Local,
+            repository: "acme/widgets".to_owned(),
+            synced_at: "2026-08-07T00:00:00Z".to_owned(),
+            input_hash: "a".repeat(64),
+            effective_input_hash: "a".repeat(64),
+            artifact_hash: String::new(),
+            provenance: ArtifactProvenance {
+                base: ProvenanceState::Synchronized,
+                state: ProvenanceState::Synchronized,
+                pending_mutation_count: 0,
+                pending_operation_ids: Vec::new(),
+            },
+            operational_counts: OperationalCounts {
+                operational_issue_count: 1,
+                ready_count: 1,
+                executable_count: 1,
+                assigned_ready_count: 0,
+                blocked_count: 0,
+            },
+            nodes: vec![ArtifactNode {
+                key: NodeKey::new("acme/widgets", 1),
+                repository: "acme/widgets".to_owned(),
+                number: 1,
+                kind: NodeKind::Issue,
+                url: Some("https://github.com/acme/widgets/issues/1".to_owned()),
+                title: Some("Project work".to_owned()),
+                state: "open".to_owned(),
+                readiness: Readiness::Ready,
+                assignees: Vec::new(),
+                labels: Vec::new(),
+                projects: Some(vec!["Platform".to_owned(), "Roadmap".to_owned()]),
+                position: Position {
+                    layer: Some(0),
+                    x: 0,
+                    y: 0,
+                },
+                provenance: synchronized,
+            }],
+            edges: Vec::new(),
+        };
+        artifact.artifact_hash = calculate_hash(&artifact).expect("artifact hash");
+
+        validate(&artifact).expect("valid artifact with Project membership");
+        let serialized = serde_json::to_vec(&artifact).expect("serialized artifact");
+        validate_serialized(&serialized).expect("serialized Project artifact");
+        let html = crate::graph::render::html(&artifact).expect("rendered Project artifact");
+        assert!(html.contains("<th scope=\"col\">Projects</th>"));
+        assert!(html.contains("<td>Platform, Roadmap</td>"));
+
+        artifact.nodes[0].projects = None;
+        artifact.artifact_hash = calculate_hash(&artifact).expect("artifact hash without Projects");
+        validate(&artifact).expect("valid artifact without Project membership");
+        let html =
+            crate::graph::render::html(&artifact).expect("rendered artifact without Projects");
+        assert!(!html.contains("<th scope=\"col\">Projects</th>"));
+    }
 }

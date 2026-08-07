@@ -10,7 +10,9 @@ frontier enumeration from
 [Issue #3](https://github.com/syntropika/grit/issues/3), plus the static graph
 artifact and browser explorer from
 [Issue #8](https://github.com/syntropika/grit/issues/8) and
-[Issue #12](https://github.com/syntropika/grit/issues/12).
+[Issue #12](https://github.com/syntropika/grit/issues/12), including the
+relationship filters and isolation tools from
+[Issue #16](https://github.com/syntropika/grit/issues/16).
 
 ## Build and test
 
@@ -92,8 +94,9 @@ grit graph --repo OWNER/REPO --output site/
 grit graph --repo OWNER/REPO --output site/ --json
 ```
 
-The target contains `index.html`, `app.css`, `app.js`, `graph.json`, and
-`graph.schema.json`. The versioned JSON uses explicit `blocked` and `blocker`
+The target contains `index.html`, `app.css`, `graph-query.js`, `app.js`,
+`graph.json`, and `graph.schema.json`. The versioned JSON uses explicit
+`blocked` and `blocker`
 edge roles, normalized Issue fields, precomputed layered positions,
 operational counts, hashes, and provenance. Bodies, comments, raw API records,
 and Operation markers are not part of the artifact.
@@ -104,6 +107,18 @@ Issue table. Its detail panel shows readiness, blockers, dependents, and the
 canonical GitHub link. Labels appear only on hover, focus, or selection, and
 the zoom controls never recalculate layout or ranking. All assets are local;
 the browser does not contact GitHub or any other network service.
+
+Readiness, state, Declared priority, area-label, assignee, and disconnected
+component filters compose over the static data. Area, multi-component, and
+optional Project controls are omitted when their source data is absent; the
+current Issues-only artifact has no Project membership and therefore renders
+no Project filter. Root-and-depth isolation follows Dependencies in both
+directions to bound the visible
+neighborhood while preserving every precomputed position and metric. Separate
+actions highlight transitive upstream blockers, transitive downstream
+dependents, or the shortest directed path between two selected nodes. The
+table mirrors both the visible nodes and relationship annotations, and
+`Clear view` restores the canonical graph.
 
 Generation validates the closed artifact model in a staging directory before
 replacing the target. Regenerating from the same effective Local replica is
