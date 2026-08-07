@@ -9,9 +9,10 @@ frontier enumeration from
 [Issue #2](https://github.com/syntropika/grit/issues/2) and
 [Issue #3](https://github.com/syntropika/grit/issues/3), plus canonical
 Declared priority support from
-[Issue #6](https://github.com/syntropika/grit/issues/6), and exact horizon-one
+[Issue #6](https://github.com/syntropika/grit/issues/6), and step-by-step
 recommendations from
-[Issue #11](https://github.com/syntropika/grit/issues/11).
+[Issue #11](https://github.com/syntropika/grit/issues/11) and
+[Issue #14](https://github.com/syntropika/grit/issues/14).
 
 ## Build and test
 
@@ -90,18 +91,32 @@ valid replica exists, the command fails instead of inventing an empty graph.
 
 ## Recommend the next Issue
 
-`grit next` evaluates every Issue in the active Executable frontier exactly at
-horizon one:
+`grit next` evaluates rollouts of up to three Executable completions. Three is
+the default Planning horizon; horizons one and two remain available:
 
 ```bash
+grit next --repo OWNER/REPO
 grit next --repo OWNER/REPO --horizon 1
-grit next --repo OWNER/REPO --assignee LOGIN --horizon 1 --json
+grit next --repo OWNER/REPO --assignee LOGIN --horizon 3 --json
 ```
 
 The `next/v1` policy first enforces Executable P0 and one-step P0-route gates.
-It then compares real AND-aware Unlock sets, downstream Priority composition,
-the first step's Declared priority, a quantized PageRank tie-break, and finally
-the Stable node key. It never recommends blocked or out-of-scope work.
+Every later step is selected from the Executable frontier produced by its
+predecessors. The policy compares distinct AND-aware transitions to Ready,
+downstream Priority composition, the cumulative Unlock curve, the completed
+Issues' Priority sequence, a quantized first-step PageRank tie-break, and
+finally the Stable node key. Assigned outcomes count as unlocked work even
+though only work inside the active Execution scope can be simulated as a step.
+It never recommends blocked or out-of-scope work.
+
+Horizon one remains an exact comparison of the complete first-step frontier.
+For longer horizons, Grit exhaustively explores successors until the
+deterministic 8,192-state budget is reached. Exhausted searches report
+`truncated_by: ["state_budget"]`, set `search_complete` and
+`global_optimum_claimed` to false, and scope the runner-up to `explored`.
+Multi-step critical-route discovery lands separately; until then, a blocked P0
+at horizons two or three similarly reports `p0_frontier` instead of making an
+unsupported optimum claim.
 
 Robot output reports both snapshot and effective-input hashes, metric states,
 the global runner-up comparison, structured reasons, and whether the result is
