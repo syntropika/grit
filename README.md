@@ -7,7 +7,8 @@ replica so later analysis can be fast and work offline.
 The current executable tracer implements full synchronization and Executable
 frontier enumeration from
 [Issue #2](https://github.com/syntropika/grit/issues/2) and
-[Issue #3](https://github.com/syntropika/grit/issues/3).
+[Issue #3](https://github.com/syntropika/grit/issues/3), plus the static graph
+artifact from [Issue #8](https://github.com/syntropika/grit/issues/8).
 
 ## Build and test
 
@@ -66,6 +67,28 @@ If GitHub cannot be reached, `ready` uses the latest valid Local replica and
 reports its unchanged `synced_at`. A replica is accepted only when its schema,
 Repository scope, timestamp, and deterministic content hash validate. If no
 valid replica exists, the command fails instead of inventing an empty graph.
+
+## Generate a static graph artifact
+
+`grit graph` writes a complete static site without a live service or
+browser-side GitHub client:
+
+```bash
+grit graph --repo OWNER/REPO --output site/
+grit graph --repo OWNER/REPO --output site/ --json
+```
+
+The target contains `index.html`, `graph.json`, and `graph.schema.json`. The
+versioned JSON uses explicit `blocked` and `blocker` edge roles, normalized
+Issue fields, precomputed layered positions, operational counts, hashes, and
+provenance. Bodies, comments, raw API records, and Operation markers are not
+part of the artifact. The HTML is an accessible, script-free table with no
+remote assets.
+
+Generation validates the closed artifact model in a staging directory before
+replacing the target. Regenerating from the same effective Local replica is
+byte-stable. `synced_at` is the only time field and changes only when the input
+replica itself has a different synchronization timestamp.
 
 ## Product decisions
 

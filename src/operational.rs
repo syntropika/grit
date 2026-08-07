@@ -12,6 +12,7 @@ pub(crate) struct ReadyAnalysis<'a> {
     pub(crate) ready_count: usize,
     pub(crate) assigned_ready_count: usize,
     pub(crate) blocked_count: usize,
+    pub(crate) ready: Vec<&'a Issue>,
     pub(crate) executable: Vec<&'a Issue>,
 }
 
@@ -77,6 +78,7 @@ pub(crate) fn analyze_ready<'a>(
         .iter()
         .filter(|issue| !issue.assignees.is_empty())
         .count();
+    ready.sort_by_key(|issue| issue.number);
     let mut executable: Vec<_> = ready
         .iter()
         .copied()
@@ -100,6 +102,7 @@ pub(crate) fn analyze_ready<'a>(
         ready_count,
         assigned_ready_count,
         blocked_count: operational_issue_count - ready_count,
+        ready,
         executable,
     }
 }

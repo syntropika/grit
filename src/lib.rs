@@ -1,6 +1,7 @@
 mod auth;
 mod cli;
 mod github;
+mod graph;
 mod model;
 mod operational;
 mod repository;
