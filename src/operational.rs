@@ -15,6 +15,25 @@ pub(crate) struct ReadyAnalysis<'a> {
     pub(crate) executable: Vec<&'a Issue>,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum IssueState {
+    Open,
+    Closed,
+    Unknown,
+}
+
+impl IssueState {
+    fn parse(value: &str) -> Self {
+        if value.eq_ignore_ascii_case("open") {
+            Self::Open
+        } else if value.eq_ignore_ascii_case("closed") {
+            Self::Closed
+        } else {
+            Self::Unknown
+        }
+    }
+}
+
 pub(crate) fn analyze_ready<'a>(
     replica: &'a LocalReplica,
     scope: ExecutionScope<'_>,
@@ -22,14 +41,14 @@ pub(crate) fn analyze_ready<'a>(
     let issue_states: BTreeMap<_, _> = replica
         .issues
         .iter()
-        .map(|issue| (issue.number, issue.state.as_str()))
+        .map(|issue| (issue.number, IssueState::parse(&issue.state)))
         .collect();
     let mut ready = Vec::new();
 
     for issue in replica
         .issues
         .iter()
-        .filter(|issue| issue.state.eq_ignore_ascii_case("open"))
+        .filter(|issue| IssueState::parse(&issue.state) == IssueState::Open)
     {
         let blockers_satisfied = replica
             .dependencies
@@ -44,8 +63,10 @@ pub(crate) fn analyze_ready<'a>(
             .all(|dependency| match dependency.blocker.scope {
                 BlockerScope::Internal => issue_states
                     .get(&dependency.blocker.number)
-                    .is_some_and(|state| state.eq_ignore_ascii_case("closed")),
-                BlockerScope::External => dependency.blocker.state.eq_ignore_ascii_case("closed"),
+                    .is_some_and(|state| *state == IssueState::Closed),
+                BlockerScope::External => {
+                    IssueState::parse(&dependency.blocker.state) == IssueState::Closed
+                }
             });
         if blockers_satisfied {
             ready.push(issue);
@@ -71,7 +92,7 @@ pub(crate) fn analyze_ready<'a>(
 
     let operational_issue_count = issue_states
         .values()
-        .filter(|state| state.eq_ignore_ascii_case("open"))
+        .filter(|state| **state == IssueState::Open)
         .count();
     let ready_count = ready.len();
     ReadyAnalysis {

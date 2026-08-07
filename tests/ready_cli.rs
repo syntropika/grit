@@ -1,34 +1,13 @@
 use std::{fs, process::Command};
 
-use mockito::Matcher;
+use mockito::{Matcher, Mock, Server};
 use serde_json::Value;
 use tempfile::TempDir;
 
 #[test]
 fn ready_separates_readiness_from_default_and_assignee_execution_scopes() {
-    let mut github = mockito::Server::new();
-    let issues = github
-        .mock("GET", "/repos/acme/widgets/issues")
-        .match_query(Matcher::AllOf(vec![
-            Matcher::UrlEncoded("state".into(), "all".into()),
-            Matcher::UrlEncoded("sort".into(), "created".into()),
-            Matcher::UrlEncoded("direction".into(), "asc".into()),
-            Matcher::UrlEncoded("per_page".into(), "100".into()),
-        ]))
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(issue_inventory())
-        .expect(2)
-        .create();
-    let comments = github
-        .mock("GET", "/repos/acme/widgets/issues/comments")
-        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body("[]")
-        .expect(2)
-        .create();
-    let dependency_mocks: Vec<_> = [1_u64, 2, 3, 4, 5]
+    let mut github = Server::new();
+    let dependencies = [1_u64, 2, 3, 4, 5]
         .into_iter()
         .map(|number| {
             let body = match number {
@@ -36,19 +15,16 @@ fn ready_separates_readiness_from_default_and_assignee_execution_scopes() {
                 4 => blocker(5, "closed"),
                 _ => "[]".to_owned(),
             };
-            github
-                .mock(
-                    "GET",
-                    format!("/repos/acme/widgets/issues/{number}/dependencies/blocked_by").as_str(),
-                )
-                .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
-                .with_status(200)
-                .with_header("content-type", "application/json")
-                .with_body(body)
-                .expect(2)
-                .create()
+            (number, body)
         })
         .collect();
+    let mocks = mock_repository(
+        &mut github,
+        "acme/widgets",
+        issue_inventory().to_owned(),
+        dependencies,
+        2,
+    );
 
     let state = TempDir::new().expect("temporary state directory");
     let default = ready_command(&state, &github.url(), None)
@@ -91,45 +67,19 @@ fn ready_separates_readiness_from_default_and_assignee_execution_scopes() {
     assert_eq!(assigned["issues"][0]["available"], false);
     assert_eq!(assigned["issues"][0]["assignees"][0], "alice");
 
-    issues.assert();
-    comments.assert();
-    for dependency in dependency_mocks {
-        dependency.assert();
-    }
+    mocks.assert();
 }
 
 #[test]
 fn ready_falls_back_to_the_latest_valid_replica_without_advancing_synced_at() {
-    let mut github = mockito::Server::new();
-    let issues = github
-        .mock("GET", "/repos/acme/widgets/issues")
-        .match_query(Matcher::AllOf(vec![
-            Matcher::UrlEncoded("state".into(), "all".into()),
-            Matcher::UrlEncoded("sort".into(), "created".into()),
-            Matcher::UrlEncoded("direction".into(), "asc".into()),
-            Matcher::UrlEncoded("per_page".into(), "100".into()),
-        ]))
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(single_issue_inventory())
-        .create();
-    let comments = github
-        .mock("GET", "/repos/acme/widgets/issues/comments")
-        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body("[]")
-        .create();
-    let dependencies = github
-        .mock(
-            "GET",
-            "/repos/acme/widgets/issues/1/dependencies/blocked_by",
-        )
-        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body("[]")
-        .create();
+    let mut github = Server::new();
+    let mocks = mock_repository(
+        &mut github,
+        "acme/widgets",
+        single_issue_inventory().to_owned(),
+        vec![(1, "[]".to_owned())],
+        1,
+    );
     let api_url = github.url();
     let state = TempDir::new().expect("temporary state directory");
 
@@ -140,9 +90,7 @@ fn ready_falls_back_to_the_latest_valid_replica_without_advancing_synced_at() {
     let online: Value = serde_json::from_slice(&online.stdout).expect("online ready JSON");
     let synced_at = online["synced_at"].clone();
     let input_hash = online["input_hash"].clone();
-    issues.assert();
-    comments.assert();
-    dependencies.assert();
+    mocks.assert();
     drop(github);
 
     let offline = ready_command(&state, &api_url, None)
@@ -168,40 +116,17 @@ fn ready_falls_back_to_the_latest_valid_replica_without_advancing_synced_at() {
 
 #[test]
 fn ready_respects_cycles_and_and_dependencies_and_every_external_state() {
-    let mut github = mockito::Server::new();
-    let issues = github
-        .mock("GET", "/repos/acme/graph/issues")
-        .match_query(Matcher::AllOf(vec![
-            Matcher::UrlEncoded("state".into(), "all".into()),
-            Matcher::UrlEncoded("sort".into(), "created".into()),
-            Matcher::UrlEncoded("direction".into(), "asc".into()),
-            Matcher::UrlEncoded("per_page".into(), "100".into()),
-        ]))
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(graph_issue_inventory())
-        .create();
-    let comments = github
-        .mock("GET", "/repos/acme/graph/issues/comments")
-        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body("[]")
-        .create();
-    let dependency_mocks: Vec<_> = (1_u64..=9)
-        .map(|number| {
-            github
-                .mock(
-                    "GET",
-                    format!("/repos/acme/graph/issues/{number}/dependencies/blocked_by").as_str(),
-                )
-                .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
-                .with_status(200)
-                .with_header("content-type", "application/json")
-                .with_body(graph_dependencies(number))
-                .create()
-        })
+    let mut github = Server::new();
+    let dependencies = (1_u64..=9)
+        .map(|number| (number, graph_dependencies(number)))
         .collect();
+    let mocks = mock_repository(
+        &mut github,
+        "acme/graph",
+        graph_issue_inventory(),
+        dependencies,
+        1,
+    );
     let state = TempDir::new().expect("temporary state directory");
 
     let output = ready_command_for(&state, &github.url(), "acme/graph", None)
@@ -218,11 +143,7 @@ fn ready_respects_cycles_and_and_dependencies_and_every_external_state() {
     assert_eq!(output["summary"]["ready_count"], 2);
     assert_eq!(output["summary"]["blocked_count"], 6);
 
-    issues.assert();
-    comments.assert();
-    for dependency in dependency_mocks {
-        dependency.assert();
-    }
+    mocks.assert();
 }
 
 #[test]
@@ -252,6 +173,76 @@ fn ready_fails_clearly_without_github_and_a_valid_replica() {
 
 fn ready_command(state: &TempDir, api_url: &str, assignee: Option<&str>) -> Command {
     ready_command_for(state, api_url, "acme/widgets", assignee)
+}
+
+struct RepositoryMocks {
+    issues: Mock,
+    comments: Mock,
+    dependencies: Vec<Mock>,
+}
+
+impl RepositoryMocks {
+    fn assert(self) {
+        self.issues.assert();
+        self.comments.assert();
+        for dependency in self.dependencies {
+            dependency.assert();
+        }
+    }
+}
+
+fn mock_repository(
+    github: &mut Server,
+    repository: &str,
+    issue_inventory: String,
+    dependencies: Vec<(u64, String)>,
+    expected_calls: usize,
+) -> RepositoryMocks {
+    let issues_path = format!("/repos/{repository}/issues");
+    let issues = github
+        .mock("GET", issues_path.as_str())
+        .match_query(Matcher::AllOf(vec![
+            Matcher::UrlEncoded("state".into(), "all".into()),
+            Matcher::UrlEncoded("sort".into(), "created".into()),
+            Matcher::UrlEncoded("direction".into(), "asc".into()),
+            Matcher::UrlEncoded("per_page".into(), "100".into()),
+        ]))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(issue_inventory)
+        .expect(expected_calls)
+        .create();
+
+    let comments_path = format!("/repos/{repository}/issues/comments");
+    let comments = github
+        .mock("GET", comments_path.as_str())
+        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("[]")
+        .expect(expected_calls)
+        .create();
+
+    let dependencies = dependencies
+        .into_iter()
+        .map(|(number, body)| {
+            let path = format!("/repos/{repository}/issues/{number}/dependencies/blocked_by");
+            github
+                .mock("GET", path.as_str())
+                .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(body)
+                .expect(expected_calls)
+                .create()
+        })
+        .collect();
+
+    RepositoryMocks {
+        issues,
+        comments,
+        dependencies,
+    }
 }
 
 fn ready_command_for(

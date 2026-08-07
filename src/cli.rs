@@ -126,12 +126,12 @@ fn print_sync_result(replica: &LocalReplica, json: bool) -> Result<(), CliError>
 }
 
 fn ready(repository: &Repository, assignee: Option<&str>, json: bool) -> Result<(), CliError> {
-    let (replica, source, used_fallback) = match synchronize(repository) {
-        Ok(replica) => (replica, "live", false),
+    let (replica, source) = match synchronize(repository) {
+        Ok(replica) => (replica, ReplicaSource::Live),
         Err(refresh_error) => {
             let store = ReplicaStore::discover(repository)?;
             match store.load(repository) {
-                Ok(replica) => (replica, "local_fallback", true),
+                Ok(replica) => (replica, ReplicaSource::LocalFallback),
                 Err(replica_error) => {
                     return Err(CliError::RefreshAndReplicaUnavailable {
                         refresh: refresh_error.to_string(),
@@ -186,13 +186,7 @@ fn ready(repository: &Repository, assignee: Option<&str>, json: bool) -> Result<
             assigned_ready_count: analysis.assigned_ready_count,
             blocked_count: analysis.blocked_count,
         },
-        warnings: used_fallback
-            .then_some(ReadyWarning {
-                code: "offline_fallback",
-                message: "GitHub refresh failed; using the latest valid Local replica",
-            })
-            .into_iter()
-            .collect(),
+        warnings: source.warning().into_iter().collect(),
     };
     if json {
         serde_json::to_writer(std::io::stdout().lock(), &output).map_err(CliError::EncodeOutput)?;
@@ -205,7 +199,7 @@ fn ready(repository: &Repository, assignee: Option<&str>, json: bool) -> Result<
         for issue in &output.issues {
             println!("#{} {}", issue.number, issue.title);
         }
-        if used_fallback {
+        if source.is_fallback() {
             eprintln!(
                 "warning: GitHub refresh failed; using Local replica from {}",
                 replica.synced_at
@@ -269,7 +263,7 @@ struct ReadyOutput<'a> {
     schema_version: &'static str,
     command: &'static str,
     repository: &'a str,
-    source: &'a str,
+    source: ReplicaSource,
     synced_at: &'a str,
     input_hash: &'a str,
     execution_scope: ExecutionScopeOutput<'a>,
@@ -308,6 +302,26 @@ struct ReadySummary {
 struct ReadyWarning {
     code: &'static str,
     message: &'static str,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ReplicaSource {
+    Live,
+    LocalFallback,
+}
+
+impl ReplicaSource {
+    fn is_fallback(self) -> bool {
+        matches!(self, Self::LocalFallback)
+    }
+
+    fn warning(self) -> Option<ReadyWarning> {
+        self.is_fallback().then_some(ReadyWarning {
+            code: "offline_fallback",
+            message: "GitHub refresh failed; using the latest valid Local replica",
+        })
+    }
 }
 
 #[derive(Debug, Error)]
