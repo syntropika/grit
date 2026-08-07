@@ -158,6 +158,119 @@ fn state_budget_is_reported_in_canonical_position() {
     );
 }
 
+#[test]
+fn bounded_policy_matches_the_exhaustive_oracle_for_every_five_issue_dag() {
+    const ISSUE_COUNT: u64 = 5;
+    let possible_edges = (2..=ISSUE_COUNT)
+        .flat_map(|blocked| (1..blocked).map(move |blocker| (blocked, blocker)))
+        .collect::<Vec<_>>();
+
+    for edge_mask in 0..(1_u64 << possible_edges.len()) {
+        let issues = (1..=ISSUE_COUNT)
+            .map(|number| issue(number, false))
+            .collect();
+        let dependencies = possible_edges
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| edge_mask & (1 << index) != 0)
+            .map(|(_, (blocked, blocker))| dependency(*blocked, *blocker))
+            .collect();
+        let replica = replica(issues, dependencies);
+        let graph = OperationalGraph::prepare(&replica);
+        let bounded = evaluate(&graph, ExecutionScope::Available, None, 3, 8_192);
+        assert!(
+            bounded.truncated_by.is_empty(),
+            "tiny DAG {edge_mask:#x} was unexpectedly truncated"
+        );
+        let exact = exhaustive_candidates(&graph, 3);
+        let bounded_winner = best_candidate(&bounded.candidates).expect("bounded winner");
+        let exact_winner = best_candidate(&exact).expect("exact winner");
+        assert_eq!(
+            candidate_signature(bounded_winner),
+            candidate_signature(exact_winner),
+            "tiny DAG {edge_mask:#x}"
+        );
+    }
+}
+
+fn exhaustive_candidates<'issues>(
+    graph: &OperationalGraph<'issues>,
+    horizon: u8,
+) -> Vec<EvaluatedCandidate<'issues>> {
+    let mut rollout = graph.rollout_state(ExecutionScope::Available);
+    let mut partial = SearchState::root(rollout.clone(), horizon).partial;
+    let mut best = BTreeMap::new();
+    enumerate_rollouts(graph, horizon, &mut rollout, &mut partial, &mut best);
+    best.into_values().collect()
+}
+
+fn enumerate_rollouts<'graph, 'issues, 'scope>(
+    graph: &'graph OperationalGraph<'issues>,
+    horizon: u8,
+    rollout: &mut RolloutState<'graph, 'issues, 'scope>,
+    partial: &mut PartialRollout<'issues>,
+    best: &mut BTreeMap<u64, EvaluatedCandidate<'issues>>,
+) {
+    if partial.steps.len() == horizon as usize {
+        return;
+    }
+    for issue in rollout.executable() {
+        let step = EvaluatedStep {
+            issue,
+            selection: StepSelection::Normal,
+        };
+        let completion = rollout.complete(issue.number).expect("Executable Issue");
+        let checkpoint = partial.apply(step, completion.newly_ready(), graph, None);
+        let candidate = snapshot(partial, graph, None, horizon);
+        match best.entry(candidate.data().issue.number) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(candidate);
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                if compare_same_first(&candidate, entry.get()).is_gt() {
+                    entry.insert(candidate);
+                }
+            }
+        }
+        enumerate_rollouts(graph, horizon, rollout, partial, best);
+        partial.undo(checkpoint);
+        rollout.undo(completion);
+    }
+}
+
+fn best_candidate<'a, 'issues>(
+    candidates: &'a [EvaluatedCandidate<'issues>],
+) -> Option<&'a EvaluatedCandidate<'issues>> {
+    candidates.iter().reduce(|best, candidate| {
+        if super::super::decision::compare(candidate, best)
+            .ordering
+            .is_gt()
+        {
+            candidate
+        } else {
+            best
+        }
+    })
+}
+
+fn candidate_signature(candidate: &EvaluatedCandidate<'_>) -> (u64, Vec<u64>, Vec<u64>) {
+    (
+        candidate.data().issue.number,
+        candidate
+            .data()
+            .steps
+            .iter()
+            .map(|step| step.issue.number)
+            .collect(),
+        candidate
+            .data()
+            .unlocks
+            .iter()
+            .map(|issue| issue.number)
+            .collect(),
+    )
+}
+
 fn replica(issues: Vec<crate::model::Issue>, dependencies: Vec<Dependency>) -> LocalReplica {
     LocalReplica {
         schema_version: "grit.local-replica/v1".to_owned(),

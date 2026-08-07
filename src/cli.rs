@@ -1,4 +1,4 @@
-use std::env;
+use std::{env, time::Instant};
 
 use chrono::{SecondsFormat, Utc};
 use clap::{Parser, Subcommand};
@@ -46,6 +46,9 @@ enum Command {
         /// Emit versioned machine-readable output.
         #[arg(long)]
         json: bool,
+        /// Report local ranking phase timings; Synchronization is excluded.
+        #[arg(long)]
+        profile: bool,
     },
     /// Create any missing canonical Priority labels.
     Init {
@@ -87,11 +90,13 @@ pub(crate) fn execute() -> Result<(), CliError> {
             assignee,
             horizon,
             json,
+            profile,
         } => next(
             &Repository::parse(&repo)?,
             assignee.as_deref(),
             horizon,
             json,
+            profile,
         ),
         Command::Init { repo, json } => initialize(&Repository::parse(&repo)?, json),
         Command::Sync { repo, json } => sync(&Repository::parse(&repo)?, json),
@@ -162,6 +167,7 @@ fn next(
     assignee: Option<&str>,
     horizon: u8,
     json: bool,
+    profile: bool,
 ) -> Result<(), CliError> {
     if !(ranking::MIN_HORIZON..=ranking::MAX_HORIZON).contains(&horizon) {
         return Err(CliError::UnsupportedNextHorizon(horizon));
@@ -170,7 +176,17 @@ fn next(
     let scope = assignee
         .map(ExecutionScope::Assignee)
         .unwrap_or(ExecutionScope::Available);
-    let analysis = ranking::analyze(&replica, scope, horizon);
+    let store = ReplicaStore::discover(repository)?;
+    let mut cache = ranking::RankingCache::at(store.repository_directory());
+    let run = ranking::analyze_profiled(&replica, scope, horizon, &[], &mut cache);
+    let analysis = run.analysis;
+    let analysis_serialization = (profile && json).then(|| {
+        let serialization_started = Instant::now();
+        let _ = serde_json::to_vec(&analysis).expect("Next analysis is serializable");
+        serialization_started.elapsed()
+    });
+    let performance =
+        profile.then(|| PerformanceOutput::from_profile(run.profile, analysis_serialization));
     let warnings = analysis_warnings(&replica, source);
     if json {
         let output = NextOutput {
@@ -184,6 +200,7 @@ fn next(
             execution_scope: execution_scope_output(assignee),
             analysis,
             warnings,
+            performance,
         };
         serde_json::to_writer(std::io::stdout().lock(), &output).map_err(CliError::EncodeOutput)?;
         println!();
@@ -201,6 +218,9 @@ fn next(
         }
         for warning in &warnings {
             print_warning(warning);
+        }
+        if let Some(performance) = performance {
+            eprintln!("{}", performance.human_summary());
         }
     }
     Ok(())
@@ -475,6 +495,65 @@ struct NextOutput<'a> {
     #[serde(flatten)]
     analysis: NextAnalysis,
     warnings: Vec<ReadyWarning>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    performance: Option<PerformanceOutput>,
+}
+
+#[derive(Serialize)]
+struct PerformanceOutput {
+    unit: &'static str,
+    graph_preparation: u128,
+    scc_detection: u128,
+    readiness: u128,
+    cache_lookup: u128,
+    pagerank: u128,
+    search: u128,
+    output_assembly: u128,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    analysis_serialization: Option<u128>,
+    cache_publication: u128,
+    total_before_serialization: u128,
+    cache_hit: bool,
+    cache_published: bool,
+    synchronization_included: bool,
+}
+
+impl PerformanceOutput {
+    fn from_profile(
+        profile: ranking::AnalysisProfile,
+        analysis_serialization: Option<std::time::Duration>,
+    ) -> Self {
+        Self {
+            unit: "microseconds",
+            graph_preparation: profile.graph_preparation.as_micros(),
+            scc_detection: profile.scc_detection.as_micros(),
+            readiness: profile.readiness.as_micros(),
+            cache_lookup: profile.cache_lookup.as_micros(),
+            pagerank: profile.pagerank.as_micros(),
+            search: profile.search.as_micros(),
+            output_assembly: profile.output_assembly.as_micros(),
+            analysis_serialization: analysis_serialization.map(|duration| duration.as_micros()),
+            cache_publication: profile.cache_publication.as_micros(),
+            total_before_serialization: profile.total.as_micros(),
+            cache_hit: profile.cache_hit,
+            cache_published: profile.cache_published,
+            synchronization_included: false,
+        }
+    }
+
+    fn human_summary(&self) -> String {
+        format!(
+            "ranking profile (microseconds, Synchronization excluded): graph={} scc={} readiness={} cache={} pagerank={} search={} output={} cache_hit={}",
+            self.graph_preparation,
+            self.scc_detection,
+            self.readiness,
+            self.cache_lookup,
+            self.pagerank,
+            self.search,
+            self.output_assembly,
+            self.cache_hit,
+        )
+    }
 }
 
 #[derive(Serialize)]

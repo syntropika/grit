@@ -1,7 +1,10 @@
 mod rollout;
 mod scc;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::{Duration, Instant},
+};
 
 use crate::model::{BlockerScope, Dependency, Issue, LocalReplica};
 pub(crate) use rollout::{OneStepAnalysis, RolloutState};
@@ -65,13 +68,25 @@ pub(crate) struct OperationalGraph<'a> {
     dependencies_by_blocked: BTreeMap<u64, Vec<&'a Dependency>>,
     dependents_by_blocker: BTreeMap<u64, Vec<u64>>,
     open_numbers: Vec<u64>,
+    open_index: BTreeMap<u64, usize>,
     internal_open_edges: BTreeSet<(u64, u64)>,
     components: Vec<Vec<u64>>,
     cyclic_numbers: BTreeSet<u64>,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct GraphPreparationTimings {
+    pub(crate) graph_preparation: Duration,
+    pub(crate) scc_detection: Duration,
+}
+
 impl<'a> OperationalGraph<'a> {
     pub(crate) fn prepare(replica: &'a LocalReplica) -> Self {
+        Self::prepare_profiled(replica).0
+    }
+
+    pub(crate) fn prepare_profiled(replica: &'a LocalReplica) -> (Self, GraphPreparationTimings) {
+        let preparation_started = Instant::now();
         let issues: BTreeMap<_, _> = replica
             .issues
             .iter()
@@ -85,6 +100,11 @@ impl<'a> OperationalGraph<'a> {
             .iter()
             .filter(|(_, state)| **state == IssueState::Open)
             .map(|(number, _)| *number)
+            .collect();
+        let open_index = open_numbers
+            .iter()
+            .enumerate()
+            .map(|(index, number)| (*number, index))
             .collect();
         let open_set: BTreeSet<_> = open_numbers.iter().copied().collect();
         let mut dependencies_by_blocked = BTreeMap::<u64, Vec<&Dependency>>::new();
@@ -117,8 +137,12 @@ impl<'a> OperationalGraph<'a> {
                     .then_with(|| left.blocker.number.cmp(&right.blocker.number))
             });
         }
+        let preparation_before_scc = preparation_started.elapsed();
+        let scc_started = Instant::now();
         let components = strongly_connected_components(&open_numbers, &internal_open_edges);
         let cyclic_numbers = cyclic_issue_numbers(&components, &internal_open_edges);
+        let scc_detection = scc_started.elapsed();
+        let remaining_preparation_started = Instant::now();
         let mut dependents_by_blocker = BTreeMap::<u64, Vec<u64>>::new();
         for (blocked, blocker) in &internal_open_edges {
             dependents_by_blocker
@@ -126,16 +150,23 @@ impl<'a> OperationalGraph<'a> {
                 .or_default()
                 .push(*blocked);
         }
-        Self {
-            issues,
-            issue_states,
-            dependencies_by_blocked,
-            dependents_by_blocker,
-            open_numbers,
-            internal_open_edges,
-            components,
-            cyclic_numbers,
-        }
+        (
+            Self {
+                issues,
+                issue_states,
+                dependencies_by_blocked,
+                dependents_by_blocker,
+                open_numbers,
+                open_index,
+                internal_open_edges,
+                components,
+                cyclic_numbers,
+            },
+            GraphPreparationTimings {
+                graph_preparation: preparation_before_scc + remaining_preparation_started.elapsed(),
+                scc_detection,
+            },
+        )
     }
 
     pub(crate) fn issue(&self, number: u64) -> Option<&'a Issue> {
@@ -148,6 +179,10 @@ impl<'a> OperationalGraph<'a> {
 
     pub(crate) fn open_numbers(&self) -> &[u64] {
         &self.open_numbers
+    }
+
+    pub(crate) fn open_index(&self, number: u64) -> Option<usize> {
+        self.open_index.get(&number).copied()
     }
 
     pub(crate) fn dependencies_for(&self, number: u64) -> &[&'a Dependency] {

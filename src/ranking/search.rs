@@ -1,4 +1,4 @@
-mod frontier;
+pub(in crate::ranking) mod frontier;
 mod policy;
 mod probe;
 mod scoring;
@@ -34,6 +34,13 @@ pub(super) struct SearchResult<'a> {
     pub(super) candidate_count: usize,
     pub(super) candidates: Vec<EvaluatedCandidate<'a>>,
     pub(super) truncated_by: Vec<SearchRestriction>,
+    pub(super) work: SearchWork,
+}
+
+#[derive(Clone, Copy, serde::Deserialize, serde::Serialize)]
+pub(super) struct SearchWork {
+    pub(super) materialized_successors: usize,
+    pub(super) probed_successors: usize,
 }
 
 struct Search<'graph, 'issues, 'scope, 'pagerank> {
@@ -44,8 +51,7 @@ struct Search<'graph, 'issues, 'scope, 'pagerank> {
     expanded_states: usize,
     probe_work: usize,
     p0_targets: BTreeSet<u64>,
-    potential_targets: Vec<u64>,
-    feasible_closures: BTreeMap<u64, Option<Vec<u64>>>,
+    potential_targets: Vec<(u64, Vec<u64>)>,
     restrictions: Restrictions,
     best_by_first: BTreeMap<u64, EvaluatedCandidate<'issues>>,
 }
@@ -76,18 +82,12 @@ pub(super) fn evaluate<'graph, 'issues, 'scope, 'pagerank>(
             .iter()
             .copied()
             .filter(|number| !root.is_ready(*number))
+            .filter_map(|number| {
+                root.feasible_prerequisite_closure(number, horizon as usize)
+                    .map(|closure| (number, closure.into_iter().collect()))
+            })
             .collect()
     };
-    let feasible_closures = potential_targets
-        .iter()
-        .map(|number| {
-            (
-                *number,
-                root.feasible_prerequisite_closure(*number, horizon as usize)
-                    .map(|closure| closure.into_iter().collect()),
-            )
-        })
-        .collect();
     let search = Search {
         root,
         pagerank,
@@ -97,7 +97,6 @@ pub(super) fn evaluate<'graph, 'issues, 'scope, 'pagerank>(
         probe_work: 0,
         p0_targets,
         potential_targets,
-        feasible_closures,
         restrictions: Restrictions::default(),
         best_by_first: BTreeMap::new(),
     };
@@ -121,7 +120,7 @@ impl<'graph, 'issues, 'scope, 'pagerank> Search<'graph, 'issues, 'scope, 'pagera
                     .as_ref()
                     .map(|analysis| analysis.unlocks_for(step.issue.number))
                     .unwrap_or(&[]);
-                let checkpoint = partial.apply(step, newly_ready, self.root.graph());
+                let checkpoint = partial.apply(step, newly_ready, self.root.graph(), self.pagerank);
                 self.record(&partial);
                 partial.undo(checkpoint);
             }
@@ -193,6 +192,10 @@ impl<'graph, 'issues, 'scope, 'pagerank> Search<'graph, 'issues, 'scope, 'pagera
             candidate_count,
             candidates: self.best_by_first.into_values().collect(),
             truncated_by: self.restrictions.into_vec(),
+            work: SearchWork {
+                materialized_successors: self.expanded_states,
+                probed_successors: self.probe_work,
+            },
         }
     }
 
@@ -215,7 +218,12 @@ impl<'graph, 'issues, 'scope, 'pagerank> Search<'graph, 'issues, 'scope, 'pagera
             .complete(step.issue.number)
             .expect("search frontiers contain only Executable Issues");
         let mut partial = parent.partial.clone();
-        partial.apply(step.clone(), completion.newly_ready(), rollout.graph());
+        partial.apply(
+            step.clone(),
+            completion.newly_ready(),
+            rollout.graph(),
+            self.pagerank,
+        );
         let mut causal = parent.causal.clone();
         causal.advance(step.issue.number, completion.newly_ready(), rollout.graph());
         let remaining = self.horizon as usize - partial.steps.len();

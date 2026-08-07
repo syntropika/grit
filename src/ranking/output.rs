@@ -28,6 +28,7 @@ pub(crate) struct NextAnalysis {
     global_optimum_claimed: bool,
     runner_up_scope: RunnerUpScope,
     summary: NextSummary,
+    work: WorkCounts,
 }
 
 impl NextAnalysis {
@@ -79,6 +80,10 @@ impl NextAnalysis {
                 RunnerUpScope::Explored
             },
             summary: result.summary,
+            work: WorkCounts {
+                materialized_successors: result.work.materialized_successors,
+                probed_successors: result.work.probed_successors,
+            },
         }
     }
 
@@ -117,6 +122,13 @@ pub(super) struct NextResult {
     pub(super) search_complete: bool,
     pub(super) truncated_by: Vec<SearchRestriction>,
     pub(super) summary: NextSummary,
+    pub(super) work: super::search::SearchWork,
+}
+
+#[derive(Serialize)]
+struct WorkCounts {
+    materialized_successors: usize,
+    probed_successors: usize,
 }
 
 #[derive(Serialize)]

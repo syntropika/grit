@@ -1,23 +1,26 @@
 use super::*;
 
-pub(super) struct Frontier<'a> {
-    pub(super) mode: RankingMode,
-    pub(super) steps: Vec<EvaluatedStep<'a>>,
+pub(in crate::ranking) struct Frontier<'a> {
+    pub(in crate::ranking) mode: RankingMode,
+    pub(in crate::ranking) steps: Vec<EvaluatedStep<'a>>,
 }
 
-pub(super) fn frontier<'issues>(
+pub(in crate::ranking) fn frontier<'issues>(
     state: &RolloutState<'_, 'issues, '_>,
     remaining_steps: usize,
     p0_targets: &BTreeSet<u64>,
 ) -> Frontier<'issues> {
-    let executable: BTreeMap<_, _> = state
-        .executable()
+    let executable = state.executable();
+    if let Some(frontier) = p0_ready_frontier(&executable, p0_targets) {
+        return frontier;
+    }
+    if p0_targets.is_empty() {
+        return normal_frontier(executable);
+    }
+    let executable: BTreeMap<_, _> = executable
         .into_iter()
         .map(|issue| (issue.number, issue))
         .collect();
-    if let Some(frontier) = p0_ready_frontier(&executable) {
-        return frontier;
-    }
 
     let mut route_by_step = BTreeMap::<u64, RouteMembership>::new();
     for target in p0_targets {
@@ -48,7 +51,8 @@ pub(super) fn one_step_frontier<'issues>(
         .executable()
         .map(|issue| (issue.number, issue))
         .collect::<BTreeMap<_, _>>();
-    if let Some(frontier) = p0_ready_frontier(&executable) {
+    let executable_issues = executable.values().copied().collect::<Vec<_>>();
+    if let Some(frontier) = p0_ready_frontier(&executable_issues, p0_targets) {
         return frontier;
     }
     let route_by_step = analysis
@@ -73,12 +77,13 @@ pub(super) fn one_step_frontier<'issues>(
 }
 
 fn p0_ready_frontier<'issues>(
-    executable: &BTreeMap<u64, &'issues crate::model::Issue>,
+    executable: &[&'issues crate::model::Issue],
+    p0_targets: &BTreeSet<u64>,
 ) -> Option<Frontier<'issues>> {
     let steps = executable
-        .values()
+        .iter()
         .copied()
-        .filter(|issue| priority(issue) == PriorityComparison::P0)
+        .filter(|issue| p0_targets.contains(&issue.number))
         .map(|issue| EvaluatedStep {
             issue,
             selection: StepSelection::P0Ready,
@@ -88,6 +93,24 @@ fn p0_ready_frontier<'issues>(
         mode: RankingMode::P0Ready,
         steps,
     })
+}
+
+fn normal_frontier(executable: Vec<&crate::model::Issue>) -> Frontier<'_> {
+    let mode = if executable.is_empty() {
+        RankingMode::None
+    } else {
+        RankingMode::Normal
+    };
+    Frontier {
+        mode,
+        steps: executable
+            .into_iter()
+            .map(|issue| EvaluatedStep {
+                issue,
+                selection: StepSelection::Normal,
+            })
+            .collect(),
+    }
 }
 
 fn finish_frontier<'issues>(

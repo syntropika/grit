@@ -16,7 +16,12 @@ impl<'graph, 'issues, 'scope, 'pagerank> Search<'graph, 'issues, 'scope, 'pagera
             let completion = rollout
                 .complete(step.issue.number)
                 .expect("scored frontiers contain only Executable Issues");
-            let checkpoint = partial.apply(step.clone(), completion.newly_ready(), rollout.graph());
+            let checkpoint = partial.apply(
+                step.clone(),
+                completion.newly_ready(),
+                rollout.graph(),
+                self.pagerank,
+            );
             let upper =
                 self.potential_key(&rollout, &partial, remaining_after, potential_visit_limit);
             let structural = if include_structural {
@@ -138,9 +143,7 @@ impl<'graph, 'issues, 'scope, 'pagerank> Search<'graph, 'issues, 'scope, 'pagera
         left: &PartialRollout<'issues>,
         right: &PartialRollout<'issues>,
     ) -> Ordering {
-        let left = snapshot(left, self.root.graph(), self.pagerank, self.horizon);
-        let right = snapshot(right, self.root.graph(), self.pagerank, self.horizon);
-        compare_same_first(&left, &right)
+        left.order.compare(&right.order)
     }
 
     fn compare_potential(
@@ -178,7 +181,7 @@ impl<'graph, 'issues, 'scope, 'pagerank> Search<'graph, 'issues, 'scope, 'pagera
         let mut potential_priority_profiles = vec![[0usize; 4]; remaining_steps + 1];
         let mut visits = 0usize;
         let mut exhausted = false;
-        for number in self
+        for (number, closure) in self
             .potential_targets
             .iter()
             .filter(|_| remaining_steps > 0)
@@ -194,13 +197,6 @@ impl<'graph, 'issues, 'scope, 'pagerank> Search<'graph, 'issues, 'scope, 'pagera
                 break;
             }
             visits += 1;
-            let Some(closure) = self
-                .feasible_closures
-                .get(number)
-                .and_then(|closure| closure.as_ref())
-            else {
-                continue;
-            };
             let distance = closure
                 .iter()
                 .filter(|blocker| !rollout.is_completed(**blocker))

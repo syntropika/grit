@@ -1,3 +1,4 @@
+use super::super::decision::{RankingKey, compare_ranking_keys};
 use super::*;
 
 #[derive(Clone)]
@@ -6,6 +7,8 @@ pub(super) struct PartialRollout<'a> {
     pub(super) unlocks: BTreeSet<u64>,
     pub(super) unlock_curve: Vec<usize>,
     pub(super) p0_curve: Vec<usize>,
+    horizon: usize,
+    pub(super) order: RolloutOrder,
 }
 
 impl<'a> PartialRollout<'a> {
@@ -14,10 +17,12 @@ impl<'a> PartialRollout<'a> {
         step: EvaluatedStep<'a>,
         newly_ready: &[u64],
         graph: &crate::operational::OperationalGraph<'a>,
+        pagerank: Option<&PageRank>,
     ) -> PartialCheckpoint {
         let steps_len = self.steps.len();
         let unlock_curve_len = self.unlock_curve.len();
         let p0_curve_len = self.p0_curve.len();
+        let previous_order = self.order.clone();
         let mut inserted_unlocks = Vec::new();
         self.steps.push(step);
         for number in newly_ready {
@@ -33,11 +38,13 @@ impl<'a> PartialRollout<'a> {
             .filter(|issue| priority(issue) == PriorityComparison::P0)
             .count();
         self.p0_curve.push(unlocked_p0);
+        self.order = RolloutOrder::from_partial(self, graph, pagerank);
         PartialCheckpoint {
             steps_len,
             unlock_curve_len,
             p0_curve_len,
             inserted_unlocks,
+            previous_order,
         }
     }
 
@@ -55,6 +62,7 @@ impl<'a> PartialRollout<'a> {
         for number in checkpoint.inserted_unlocks {
             debug_assert!(self.unlocks.remove(&number));
         }
+        self.order = checkpoint.previous_order;
     }
 }
 
@@ -63,6 +71,96 @@ pub(super) struct PartialCheckpoint {
     unlock_curve_len: usize,
     p0_curve_len: usize,
     inserted_unlocks: Vec<u64>,
+    previous_order: RolloutOrder,
+}
+
+#[derive(Clone, Default)]
+pub(super) struct RolloutOrder {
+    mode: RankingMode,
+    critical_distance: Option<usize>,
+    p0_curve: Vec<usize>,
+    unlock_count: usize,
+    priority_profile: PriorityProfile,
+    unlock_curve: Vec<usize>,
+    step_priorities: Vec<StepPriority>,
+    pagerank_bucket: Option<u64>,
+    first_issue: u64,
+    sequence: Vec<u64>,
+}
+
+impl RolloutOrder {
+    fn from_partial(
+        partial: &PartialRollout<'_>,
+        graph: &crate::operational::OperationalGraph<'_>,
+        pagerank: Option<&PageRank>,
+    ) -> Self {
+        let first = partial
+            .steps
+            .first()
+            .expect("a scored rollout has a first step");
+        let horizon = partial.horizon;
+        let mode = first.selection.mode();
+        let mut priority_profile = PriorityProfile::default();
+        for number in &partial.unlocks {
+            if let Some(issue) = graph.issue(*number) {
+                let issue_priority = priority(issue);
+                if issue_priority != PriorityComparison::P0 {
+                    priority_profile.record(issue_priority);
+                }
+            }
+        }
+        let mut unlock_curve = partial.unlock_curve.clone();
+        unlock_curve.resize(horizon, unlock_curve.last().copied().unwrap_or_default());
+        let mut p0_curve = partial.p0_curve.clone();
+        p0_curve.resize(horizon, p0_curve.last().copied().unwrap_or_default());
+        let mut step_priorities = partial
+            .steps
+            .iter()
+            .map(|step| StepPriority::from(priority(step.issue)))
+            .collect::<Vec<_>>();
+        step_priorities.resize(horizon, StepPriority::NoStep);
+        let critical_distance = match first.selection {
+            StepSelection::P0Route {
+                feasible_distance, ..
+            } => p0_curve
+                .iter()
+                .position(|count| *count > 0)
+                .map(|index| index + 1)
+                .or(Some(feasible_distance.get())),
+            StepSelection::P0Ready | StepSelection::Normal => None,
+        };
+        Self {
+            mode,
+            critical_distance,
+            p0_curve,
+            unlock_count: partial.unlocks.len(),
+            priority_profile,
+            unlock_curve,
+            step_priorities,
+            pagerank_bucket: pagerank.and_then(|pagerank| pagerank.bucket(first.issue.number)),
+            first_issue: first.issue.number,
+            sequence: partial.steps.iter().map(|step| step.issue.number).collect(),
+        }
+    }
+
+    pub(super) fn compare(&self, other: &Self) -> Ordering {
+        compare_ranking_keys(&self.ranking_key(), &other.ranking_key())
+            .then_with(|| other.sequence.cmp(&self.sequence))
+    }
+
+    fn ranking_key(&self) -> RankingKey<'_> {
+        RankingKey {
+            mode: self.mode,
+            critical_distance: self.critical_distance,
+            p0_curve: &self.p0_curve,
+            unlock_count: self.unlock_count,
+            priority_profile: self.priority_profile,
+            unlock_curve: &self.unlock_curve,
+            step_priorities: &self.step_priorities,
+            pagerank_bucket: self.pagerank_bucket,
+            issue_number: self.first_issue,
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -137,6 +235,8 @@ impl<'graph, 'issues, 'scope> SearchState<'graph, 'issues, 'scope> {
                 unlocks: BTreeSet::new(),
                 unlock_curve: Vec::with_capacity(horizon as usize),
                 p0_curve: Vec::with_capacity(horizon as usize),
+                horizon: horizon as usize,
+                order: RolloutOrder::default(),
             },
             causal: CausalCone::default(),
             joint_plan: None,
@@ -197,6 +297,7 @@ mod tests {
             },
             first_completion.newly_ready(),
             &graph,
+            None,
         );
         let second_completion = rollout.complete(2).expect("Issue #2 is Executable");
         let _second = partial.apply(
@@ -206,6 +307,7 @@ mod tests {
             },
             second_completion.newly_ready(),
             &graph,
+            None,
         );
 
         partial.undo(first);
