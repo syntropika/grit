@@ -402,7 +402,7 @@ fn normal_rollouts_compare_and_pad_the_step_priority_sequence() {
 }
 
 #[test]
-fn state_budget_restriction_is_reported_without_a_global_optimum_claim() {
+fn beam_restriction_is_reported_without_a_global_optimum_claim() {
     let mut github = Server::new();
     let state = TempDir::new().expect("temporary state directory");
     let issues = (1..=30)
@@ -426,7 +426,7 @@ fn state_budget_restriction_is_reported_without_a_global_optimum_claim() {
 
     assert_eq!(output["summary"]["candidate_count"], 30);
     assert_eq!(output["search_complete"], false);
-    assert_eq!(output["truncated_by"], json!(["state_budget"]));
+    assert_eq!(output["truncated_by"], json!(["probe_pool", "beam_width"]));
     assert_eq!(output["global_optimum_claimed"], false);
     assert_eq!(output["runner_up_scope"], "explored");
     mocks.assert();
@@ -438,13 +438,113 @@ fn state_budget_restriction_is_reported_without_a_global_optimum_claim() {
     assert_success(&human);
     let stderr = String::from_utf8_lossy(&human.stderr);
     assert!(
-        stderr.contains("restricted by state_budget"),
+        stderr.contains("restricted by probe_pool, beam_width"),
         "stderr: {stderr}"
     );
     assert!(
         stderr.contains("no global optimum is claimed"),
         "stderr: {stderr}"
     );
+}
+
+#[test]
+fn delayed_cascade_survives_one_hundred_twenty_nine_better_immediate_results() {
+    let mut github = Server::new();
+    let state = TempDir::new().expect("temporary state directory");
+    let mut issues = (1..=130)
+        .map(|number| issue(number, "open", &[], &[]))
+        .collect::<Vec<_>>();
+    let mut dependencies = (1..=130)
+        .map(|number| (number, Vec::new()))
+        .collect::<Vec<_>>();
+    issues.push(issue(1_000, "open", &[], &[]));
+    dependencies.push((1_000, vec![internal_blocker(1, "open")]));
+    for number in 1_001..=1_100 {
+        issues.push(issue(number, "open", &[], &[]));
+        dependencies.push((number, vec![internal_blocker(1_000, "open")]));
+    }
+    let mut next_number = 2_000;
+    for root in 2..=130 {
+        for _ in 0..2 {
+            issues.push(issue(next_number, "open", &[], &[]));
+            dependencies.push((next_number, vec![internal_blocker(root, "open")]));
+            next_number += 1;
+        }
+    }
+    let mocks = mock_repository(&mut github, "acme/delayed-cascade", issues, dependencies);
+
+    let output =
+        next_command_with_horizon(&state, &github.url(), "acme/delayed-cascade", true, Some(2))
+            .output()
+            .expect("run delayed-cascade search");
+    assert_success(&output);
+    let output: Value = serde_json::from_slice(&output.stdout).expect("next JSON");
+
+    assert_eq!(output["recommendation"]["first_issue"]["number"], 1);
+    assert_eq!(rollout_numbers(&output["recommendation"]), vec![1, 1_000]);
+    assert_eq!(
+        output["recommendation"]["outcome"]["unlock_profile"]["count"],
+        101
+    );
+    assert_eq!(
+        output["truncated_by"],
+        json!([
+            "first_step_shortlist",
+            "potential_budget",
+            "probe_pool",
+            "branch_width",
+            "beam_width"
+        ])
+    );
+    assert_eq!(output["summary"]["candidate_count"], 96);
+    mocks.assert();
+}
+
+#[test]
+fn feasible_cascade_survives_sixty_four_incompatible_and_upper_bounds() {
+    let mut github = Server::new();
+    let state = TempDir::new().expect("temporary state directory");
+    let mut issues = (1..=68)
+        .map(|number| issue(number, "open", &[], &[]))
+        .collect::<Vec<_>>();
+    let mut dependencies = (1..=68)
+        .map(|number| (number, Vec::new()))
+        .collect::<Vec<_>>();
+    issues.push(issue(100, "open", &[], &[]));
+    dependencies.push((100, vec![internal_blocker(1, "open")]));
+    for number in 101..=170 {
+        issues.push(issue(number, "open", &[], &[]));
+        dependencies.push((number, vec![internal_blocker(100, "open")]));
+    }
+    let mut outcome = 1_000;
+    for decoy in 2..=65 {
+        for co_blocker in 66..=68 {
+            issues.push(issue(outcome, "open", &[], &[]));
+            dependencies.push((
+                outcome,
+                vec![
+                    internal_blocker(decoy, "open"),
+                    internal_blocker(co_blocker, "open"),
+                ],
+            ));
+            outcome += 1;
+        }
+    }
+    let mocks = mock_repository(&mut github, "acme/and-decoys", issues, dependencies);
+
+    let output = next_command_with_horizon(&state, &github.url(), "acme/and-decoys", true, Some(2))
+        .output()
+        .expect("run AND-decoy search");
+    assert_success(&output);
+    let output: Value = serde_json::from_slice(&output.stdout).expect("next JSON");
+
+    assert_eq!(output["recommendation"]["first_issue"]["number"], 1);
+    assert_eq!(rollout_numbers(&output["recommendation"]), vec![1, 100]);
+    assert_eq!(
+        output["recommendation"]["outcome"]["unlock_profile"]["count"],
+        71
+    );
+    mocks.assert();
 }
 
 #[test]

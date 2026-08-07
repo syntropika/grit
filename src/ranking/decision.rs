@@ -63,7 +63,7 @@ impl PriorityProfile {
         }
     }
 
-    fn as_array(self) -> [usize; 4] {
+    pub(super) fn as_array(self) -> [usize; 4] {
         [self.p1, self.neutral, self.p3, self.p4]
     }
 }
