@@ -1,0 +1,3 @@
+# Use temporary identities for offline Issue creation
+
+Creating an Issue offline will produce a Draft Issue with a stable, opaque Temporary Issue ID. Pending mutations may use that identity for edits, comments, assignments, labels, parent or dependency relationships, so Mutation reconciliation must create referenced drafts before applying operations that need their GitHub identities. After GitHub creates the Issue, Grit durably records the mapping to its canonical node ID and number and resolves every pending reference without discarding the temporary alias; an Operation marker makes an ambiguous creation recoverable. This enables complete offline authoring while introducing identity mapping and replay ordering; the temporary ID's external format remains undecided.

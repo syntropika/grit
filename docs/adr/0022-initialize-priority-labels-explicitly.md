@@ -1,0 +1,3 @@
+# Initialize priority labels explicitly
+
+Grit v1 will provide an explicit, idempotent `grit init` operation that creates any missing canonical labels from `priority:p0` through `priority:p4`. It will not rename, delete, recolor, redescribe, or assign an existing label, and repeated execution converges without additional changes. Analysis and synchronization commands such as `grit next`, `grit plan`, and `grit sync` will report missing canonical labels when relevant but will never create them implicitly. This keeps read-oriented operations free of unexpected GitHub mutations while making Repository initialization straightforward.

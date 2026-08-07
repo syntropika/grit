@@ -1,0 +1,3 @@
+# Reconcile independent mutation branches
+
+Mutation reconciliation will preflight Pending mutations as a dependency graph rather than treat the outbox as one atomic FIFO transaction. A Mutation conflict blocks that operation and every operation that depends on its result, while independent valid branches continue; each accepted GitHub mutation is durably checkpointed and is never rolled back to simulate an unavailable cross-request transaction. This avoids head-of-line blocking and duplicate replay while accepting that one reconciliation can end with a mixture of applied, satisfied, conflicting, and transitively blocked operations.
