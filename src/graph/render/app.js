@@ -1,11 +1,13 @@
 (() => {
   "use strict";
 
+  const applicationStartedAt = performance.now();
   const svgNamespace = "http://www.w3.org/2000/svg";
   const graph = JSON.parse(document.querySelector("#graph-data").textContent);
-  const nodesByKey = new Map(graph.nodes.map((node) => [node.key, node]));
-  const blockersByKey = relationIndex("blocked", "blocker");
-  const dependentsByKey = relationIndex("blocker", "blocked");
+  const presentation = JSON.parse(
+    document.querySelector("#graph-presentation-data").textContent
+  );
+  const networkView = globalThis.GritNetworkView.create(graph, presentation);
   const canvas = document.querySelector("#graph-canvas");
   const viewport = document.querySelector("#graph-viewport");
   const nodeLayer = document.querySelector("#graph-nodes");
@@ -15,55 +17,62 @@
   const searchStatus = document.querySelector("#search-status");
   const detailPanel = document.querySelector("#issue-details");
   const tableBody = document.querySelector("tbody");
+  const networkMode = document.querySelector("#network-mode");
+  const networkStatus = document.querySelector("#network-mode-status");
   const graphElementsByKey = new Map();
   const tableRowsByKey = new Map(
     [...tableBody.querySelectorAll("tr[data-node-key]")].map((row) => [row.dataset.nodeKey, row])
   );
   let zoom = 1;
 
-  renderGraph();
+  const initialRenderStartedAt = performance.now();
+  renderGraph(networkView.current(), "initial overview");
+  const initialRenderDuration = performance.now() - initialRenderStartedAt;
   bindControls();
   applySearch("");
+  document.body.getBoundingClientRect();
+  document.documentElement.dataset.gritLoadMs = applicationStartedAt.toFixed(3);
+  document.documentElement.dataset.gritRenderMs = initialRenderDuration.toFixed(3);
+  document.documentElement.dataset.gritTimeToInteractiveMs = performance.now().toFixed(3);
+  document.documentElement.dataset.gritNetworkMode = presentation.mode;
 
-  function relationIndex(sourceField, targetField) {
-    const index = new Map();
-    for (const edge of graph.edges) {
-      const values = index.get(edge[sourceField]) || [];
-      values.push(edge[targetField]);
-      index.set(edge[sourceField], values);
-    }
-    return index;
-  }
-
-  function renderGraph() {
+  function renderGraph(keys, description) {
+    graphElementsByKey.clear();
+    edgeLayer.replaceChildren();
+    nodeLayer.replaceChildren();
+    layerLabels.replaceChildren();
+    const renderedNodes = graph.nodes.filter((node) => keys.has(node.key));
     const marginX = 80;
     const marginY = 70;
-    const maxX = Math.max(0, ...graph.nodes.map((node) => node.position.x));
-    const maxY = Math.max(0, ...graph.nodes.map((node) => node.position.y));
-    canvas.setAttribute("viewBox", `0 0 ${Math.max(520, maxX + 260)} ${Math.max(380, maxY + 150)}`);
+    const { minX, minY, width, height } = positionBounds(renderedNodes);
+    canvas.setAttribute(
+      "viewBox",
+      `0 0 ${Math.max(520, width + 260)} ${Math.max(380, height + 150)}`
+    );
 
     for (const edge of graph.edges) {
-      const blocker = nodesByKey.get(edge.blocker);
-      const blocked = nodesByKey.get(edge.blocked);
+      if (!keys.has(edge.blocker) || !keys.has(edge.blocked)) continue;
+      const blocker = networkView.node(edge.blocker);
+      const blocked = networkView.node(edge.blocked);
       if (!blocker || !blocked) continue;
       const line = svgElement("line");
       line.classList.add("graph-edge");
       line.dataset.blocker = edge.blocker;
       line.dataset.blocked = edge.blocked;
-      line.setAttribute("x1", blocker.position.x + marginX);
-      line.setAttribute("y1", blocker.position.y + marginY);
-      line.setAttribute("x2", blocked.position.x + marginX);
-      line.setAttribute("y2", blocked.position.y + marginY);
+      line.setAttribute("x1", blocker.position.x - minX + marginX);
+      line.setAttribute("y1", blocker.position.y - minY + marginY);
+      line.setAttribute("x2", blocked.position.x - minX + marginX);
+      line.setAttribute("y2", blocked.position.y - minY + marginY);
       edgeLayer.append(line);
     }
 
     const labels = new Map();
-    for (const node of graph.nodes) {
+    for (const node of renderedNodes) {
       const labelKey = node.position.layer === null ? "unresolved" : `layer-${node.position.layer}`;
       if (!labels.has(labelKey)) {
         labels.set(labelKey, {
           text: node.position.layer === null ? "Unresolved / SCC" : `Layer ${node.position.layer}`,
-          x: node.position.x + marginX
+          x: node.position.x - minX + marginX
         });
       }
 
@@ -73,7 +82,10 @@
       group.dataset.nodeKey = node.key;
       group.dataset.sourceX = String(node.position.x);
       group.dataset.sourceY = String(node.position.y);
-      group.setAttribute("transform", `translate(${node.position.x + marginX} ${node.position.y + marginY})`);
+      group.setAttribute(
+        "transform",
+        `translate(${node.position.x - minX + marginX} ${node.position.y - minY + marginY})`
+      );
       group.setAttribute("tabindex", "0");
       group.setAttribute("role", "button");
       group.setAttribute("aria-pressed", "false");
@@ -108,6 +120,31 @@
       text.textContent = label.text;
       layerLabels.append(text);
     }
+    document.documentElement.dataset.gritRenderedNodes = String(renderedNodes.length);
+    document.documentElement.dataset.gritRenderedEdges = String(edgeLayer.children.length);
+    const selectedKey = detailPanel.dataset.selectedKey;
+    const selectedGraphNode = selectedKey ? graphElement(selectedKey) : null;
+    if (selectedGraphNode) {
+      selectedGraphNode.classList.add("selected");
+      selectedGraphNode.setAttribute("aria-pressed", "true");
+    }
+    updateNetworkStatus(description);
+  }
+
+  function positionBounds(nodes) {
+    if (nodes.length === 0) return { minX: 0, minY: 0, width: 0, height: 0 };
+    let minX = nodes[0].position.x;
+    let minY = nodes[0].position.y;
+    let maxX = minX;
+    let maxY = minY;
+    for (let index = 1; index < nodes.length; index += 1) {
+      const node = nodes[index];
+      minX = Math.min(minX, node.position.x);
+      minY = Math.min(minY, node.position.y);
+      maxX = Math.max(maxX, node.position.x);
+      maxY = Math.max(maxY, node.position.y);
+    }
+    return { minX, minY, width: maxX - minX, height: maxY - minY };
   }
 
   function bindControls() {
@@ -129,20 +166,32 @@
     document.querySelector("#zoom-in").addEventListener("click", () => setZoom(zoom + 0.2));
     document.querySelector("#zoom-out").addEventListener("click", () => setZoom(zoom - 0.2));
     document.querySelector("#zoom-reset").addEventListener("click", () => setZoom(1));
+    document.querySelector("#show-initial-network").addEventListener("click", () => {
+      renderGraph(networkView.reset(), "initial overview");
+      applySearch(search.value);
+    });
+    document.querySelector("#show-full-network").addEventListener("click", () => {
+      renderGraph(networkView.showFull(), "full network requested by visitor");
+      applySearch(search.value);
+    });
   }
 
   function applySearch(rawQuery) {
     const query = rawQuery.trim().toLocaleLowerCase();
     const numberQuery = query.match(/^#?(\d+)$/)?.[1] || null;
     let visibleCount = 0;
+    let visibleNetworkCount = 0;
     for (const node of graph.nodes) {
       const matches = !query
         || (numberQuery !== null && String(node.number) === numberQuery)
         || (node.title || "").toLocaleLowerCase().includes(query);
       const graphNode = graphElement(node.key);
       const row = tableRow(node.key);
-      setHidden(graphNode, !matches);
-      graphNode.setAttribute("tabindex", matches ? "0" : "-1");
+      if (graphNode) {
+        setHidden(graphNode, !matches);
+        graphNode.setAttribute("tabindex", matches ? "0" : "-1");
+        if (matches) visibleNetworkCount += 1;
+      }
       setHidden(row, !matches);
       if (matches) visibleCount += 1;
     }
@@ -152,12 +201,19 @@
         isHidden(graphElement(edge.dataset.blocker)) || isHidden(graphElement(edge.dataset.blocked))
       );
     }
-    searchStatus.textContent = `${visibleCount} ${visibleCount === 1 ? "result" : "results"}`;
+    const networkSuffix = presentation.mode === "constrained"
+      ? `; ${visibleNetworkCount} in the current network view`
+      : "";
+    searchStatus.textContent = `${visibleCount} ${visibleCount === 1 ? "result" : "results"}${networkSuffix}`;
   }
 
   function selectNode(key) {
-    const node = nodesByKey.get(key);
+    const node = networkView.node(key);
     if (!node) return;
+    if (presentation.mode === "constrained" && !networkView.contains(key)) {
+      renderGraph(networkView.showNeighborhood(key), `neighborhood around ${key}`);
+      applySearch(search.value);
+    }
     detailPanel.dataset.selectedKey = key;
     for (const element of document.querySelectorAll("[data-node-key]")) {
       const selected = element.dataset.nodeKey === key;
@@ -165,6 +221,13 @@
       if (element.matches("button, .graph-node")) element.setAttribute("aria-pressed", String(selected));
     }
     renderDetails(node);
+  }
+
+  function updateNetworkStatus(description) {
+    if (presentation.mode !== "constrained") return;
+    networkMode.hidden = false;
+    const renderedEdgeCount = [...edgeLayer.children].length;
+    networkStatus.textContent = `Showing ${graphElementsByKey.size} of ${graph.nodes.length} nodes and ${renderedEdgeCount} of ${graph.edges.length} edges: ${description}. Positions are precomputed; selecting a table result opens its bounded neighborhood.`;
   }
 
   function renderDetails(node) {
@@ -184,8 +247,8 @@
     appendDetail(details, "Assignees", node.assignees.join(", ") || "—");
     appendDetail(details, "Labels", node.labels.join(", ") || "—");
     detailPanel.append(heading, key, badge, details);
-    appendRelations("Blockers", blockersByKey.get(node.key) || []);
-    appendRelations("Dependents", dependentsByKey.get(node.key) || []);
+    appendRelations("Blockers", networkView.blockers(node.key));
+    appendRelations("Dependents", networkView.dependents(node.key));
     if (node.url) {
       const link = document.createElement("a");
       link.href = node.url;

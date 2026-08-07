@@ -1,7 +1,11 @@
 mod artifact;
 mod layout;
+mod presentation;
 mod publication;
 mod render;
+
+#[cfg(test)]
+mod benchmark;
 
 use std::{io, path::Path};
 
@@ -22,10 +26,11 @@ pub(crate) fn publish_site(
     output: &Path,
 ) -> Result<SiteSummary, GraphError> {
     let artifact = artifact::build(replica)?;
+    let presentation = presentation::build(&artifact);
     let graph_bytes = render::graph_json(&artifact)?;
     artifact::validate_serialized(&graph_bytes)?;
     let schema_bytes = render::schema_json()?;
-    let html_bytes = render::html(&artifact)?.into_bytes();
+    let html_bytes = render::html(&artifact, &presentation)?.into_bytes();
 
     publication::publish(
         output,
@@ -34,6 +39,10 @@ pub(crate) fn publish_site(
             ("graph.schema.json", schema_bytes),
             ("index.html", html_bytes),
             ("app.css", render::stylesheet().to_vec()),
+            (
+                "network-view.js",
+                render::network_view_javascript().to_vec(),
+            ),
             ("app.js", render::javascript().to_vec()),
         ],
     )?;

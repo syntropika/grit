@@ -111,7 +111,7 @@ pub(super) enum NodeKind {
     ExternalBlocker,
 }
 
-#[derive(Clone, Copy, Deserialize, JsonSchema, Serialize)]
+#[derive(Clone, Copy, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum Readiness {
     Ready,
