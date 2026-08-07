@@ -146,6 +146,10 @@ impl<'a> OperationalGraph<'a> {
         self.issue_states.get(&number).copied()
     }
 
+    pub(crate) fn open_numbers(&self) -> &[u64] {
+        &self.open_numbers
+    }
+
     pub(crate) fn dependencies_for(&self, number: u64) -> &[&'a Dependency] {
         self.dependencies_by_blocked
             .get(&number)

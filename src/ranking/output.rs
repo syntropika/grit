@@ -167,6 +167,8 @@ struct PageRankMetricState {
 pub(crate) struct CandidateResult {
     first_issue: IssueReference,
     #[serde(skip_serializing_if = "Option::is_none")]
+    critical_distance: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pagerank_bucket: Option<u64>,
     rollout: Rollout,
     outcome: Outcome,
@@ -308,6 +310,7 @@ pub(super) fn candidate_output(
     repository: &str,
     reasons: Vec<Reason>,
 ) -> CandidateResult {
+    let (candidate, critical_route) = candidate.into_parts();
     let first_issue = issue_reference(repository, candidate.issue);
     let available_unlocks = candidate
         .unlocks
@@ -323,6 +326,7 @@ pub(super) fn candidate_output(
         .collect();
     CandidateResult {
         first_issue: first_issue.clone(),
+        critical_distance: critical_route.map(|route| route.distance().get()),
         pagerank_bucket: candidate.pagerank_bucket,
         rollout: Rollout {
             steps: candidate
@@ -331,7 +335,7 @@ pub(super) fn candidate_output(
                 .enumerate()
                 .map(|(index, step)| RolloutStep {
                     position: (index + 1) as u8,
-                    mode: step_mode(step.mode),
+                    mode: step_mode(step.selection.mode()),
                     issue: issue_reference(repository, step.issue),
                 })
                 .collect(),

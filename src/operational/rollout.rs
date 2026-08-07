@@ -76,25 +76,26 @@ impl<'graph, 'issues, 'scope> RolloutState<'graph, 'issues, 'scope> {
             .collect()
     }
 
-    pub(crate) fn graph(&self) -> &'graph OperationalGraph<'issues> {
-        self.graph
+    pub(crate) fn feasible_prerequisite_closure(
+        &self,
+        target: u64,
+        maximum_size: usize,
+    ) -> Option<BTreeSet<u64>> {
+        self.graph.issue(target)?;
+        if self.completed.contains(&target)
+            || self.graph.issue_state(target) != Some(IssueState::Open)
+            || self.graph.cyclic_numbers.contains(&target)
+        {
+            return None;
+        }
+
+        let mut required = BTreeSet::new();
+        self.collect_open_prerequisites(target, maximum_size, &mut required)?;
+        Some(required)
     }
 
-    pub(crate) fn preview_unlocks(&self, issue_number: u64) -> Vec<&'issues Issue> {
-        if !self.is_executable(issue_number) {
-            return Vec::new();
-        }
-        let mut completed = self.completed.clone();
-        completed.insert(issue_number);
+    pub(crate) fn graph(&self) -> &'graph OperationalGraph<'issues> {
         self.graph
-            .dependents_by_blocker
-            .get(&issue_number)
-            .into_iter()
-            .flatten()
-            .filter(|number| !self.ready.contains(number))
-            .filter(|number| self.graph.is_ready_after(**number, &completed))
-            .filter_map(|number| self.graph.issue(*number))
-            .collect()
     }
 
     pub(crate) fn complete(&mut self, issue_number: u64) -> Option<Completion> {
@@ -140,6 +141,45 @@ impl<'graph, 'issues, 'scope> RolloutState<'graph, 'issues, 'scope> {
                 .graph
                 .issue(issue_number)
                 .is_some_and(|issue| self.scope.contains(issue))
+    }
+
+    fn collect_open_prerequisites(
+        &self,
+        issue_number: u64,
+        maximum_size: usize,
+        required: &mut BTreeSet<u64>,
+    ) -> Option<()> {
+        for dependency in self.graph.dependencies_for(issue_number) {
+            match dependency.blocker.scope {
+                BlockerScope::External => {
+                    if IssueState::parse(&dependency.blocker.state) != IssueState::Closed {
+                        return None;
+                    }
+                }
+                BlockerScope::Internal => {
+                    let blocker = dependency.blocker.number;
+                    if self.completed.contains(&blocker)
+                        || self.graph.issue_state(blocker) == Some(IssueState::Closed)
+                    {
+                        continue;
+                    }
+                    let blocker_issue = self.graph.issue(blocker)?;
+                    if self.graph.issue_state(blocker) != Some(IssueState::Open)
+                        || self.graph.cyclic_numbers.contains(&blocker)
+                        || !self.scope.contains(blocker_issue)
+                    {
+                        return None;
+                    }
+                    if required.insert(blocker) {
+                        if required.len() > maximum_size {
+                            return None;
+                        }
+                        self.collect_open_prerequisites(blocker, maximum_size, required)?;
+                    }
+                }
+            }
+        }
+        Some(())
     }
 }
 
