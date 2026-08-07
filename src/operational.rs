@@ -47,6 +47,15 @@ pub(crate) enum IssueState {
     Unknown,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum BlockerResolution {
+    Satisfied,
+    InternalOpen(u64),
+    ExternalOpen,
+    ExternalUnknown,
+    InternalUnknown,
+}
+
 impl IssueState {
     pub(crate) fn parse(value: &str) -> Self {
         if value.eq_ignore_ascii_case("open") {
@@ -68,6 +77,28 @@ pub(crate) struct OperationalGraph<'a> {
     internal_open_edges: BTreeSet<(u64, u64)>,
     components: Vec<Vec<u64>>,
     cyclic_numbers: BTreeSet<u64>,
+}
+
+pub(crate) struct PreparedRepository<'a> {
+    replica: &'a LocalReplica,
+    graph: OperationalGraph<'a>,
+}
+
+impl<'a> PreparedRepository<'a> {
+    pub(crate) fn prepare(replica: &'a LocalReplica) -> Self {
+        Self {
+            replica,
+            graph: OperationalGraph::prepare(replica),
+        }
+    }
+
+    pub(crate) fn replica(&self) -> &'a LocalReplica {
+        self.replica
+    }
+
+    pub(crate) fn graph(&self) -> &OperationalGraph<'a> {
+        &self.graph
+    }
 }
 
 impl<'a> OperationalGraph<'a> {
@@ -157,8 +188,32 @@ impl<'a> OperationalGraph<'a> {
             .unwrap_or(&[])
     }
 
+    pub(crate) fn blocker_resolution(&self, dependency: &Dependency) -> BlockerResolution {
+        match dependency.blocker.scope {
+            BlockerScope::Internal => match self.issue_state(dependency.blocker.number) {
+                Some(IssueState::Closed) => BlockerResolution::Satisfied,
+                Some(IssueState::Open) => {
+                    BlockerResolution::InternalOpen(dependency.blocker.number)
+                }
+                Some(IssueState::Unknown) | None => BlockerResolution::InternalUnknown,
+            },
+            BlockerScope::External => match IssueState::parse(&dependency.blocker.state) {
+                IssueState::Closed => BlockerResolution::Satisfied,
+                IssueState::Open => BlockerResolution::ExternalOpen,
+                IssueState::Unknown => BlockerResolution::ExternalUnknown,
+            },
+        }
+    }
+
     pub(crate) fn internal_open_edges(&self) -> &BTreeSet<(u64, u64)> {
         &self.internal_open_edges
+    }
+
+    pub(crate) fn dependents_for(&self, number: u64) -> &[u64] {
+        self.dependents_by_blocker
+            .get(&number)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     pub(crate) fn components(&self) -> &[Vec<u64>] {
@@ -174,14 +229,10 @@ impl<'a> OperationalGraph<'a> {
             .iter()
             .filter(|number| {
                 self.dependencies_for(**number).iter().any(|dependency| {
-                    match dependency.blocker.scope {
-                        BlockerScope::External => {
-                            IssueState::parse(&dependency.blocker.state) == IssueState::Unknown
-                        }
-                        BlockerScope::Internal => self
-                            .issue_state(dependency.blocker.number)
-                            .is_none_or(|state| state == IssueState::Unknown),
-                    }
+                    matches!(
+                        self.blocker_resolution(dependency),
+                        BlockerResolution::ExternalUnknown | BlockerResolution::InternalUnknown
+                    )
                 })
             })
             .count()
@@ -193,7 +244,9 @@ impl<'a> OperationalGraph<'a> {
         {
             return false;
         }
-        unsatisfied_blockers(self.dependencies_for(number), &self.issue_states).is_empty()
+        self.dependencies_for(number)
+            .iter()
+            .all(|dependency| self.blocker_resolution(dependency) == BlockerResolution::Satisfied)
     }
 
     pub(crate) fn analyze_ready(&self, scope: ExecutionScope<'_>) -> ReadyAnalysis<'a> {
@@ -223,43 +276,6 @@ impl<'a> OperationalGraph<'a> {
             executable,
         }
     }
-}
-
-#[derive(Eq, Ord, PartialEq, PartialOrd)]
-enum UnsatisfiedBlocker {
-    Internal(u64),
-    Opaque(String, u64),
-}
-
-fn unsatisfied_blockers(
-    dependencies: &[&Dependency],
-    issue_states: &BTreeMap<u64, IssueState>,
-) -> Vec<UnsatisfiedBlocker> {
-    dependencies
-        .iter()
-        .filter_map(|dependency| match dependency.blocker.scope {
-            BlockerScope::Internal => match issue_states.get(&dependency.blocker.number) {
-                Some(IssueState::Closed) => None,
-                Some(IssueState::Open) => {
-                    Some(UnsatisfiedBlocker::Internal(dependency.blocker.number))
-                }
-                Some(IssueState::Unknown) | None => Some(UnsatisfiedBlocker::Opaque(
-                    dependency.blocker.repository.to_ascii_lowercase(),
-                    dependency.blocker.number,
-                )),
-            },
-            BlockerScope::External => {
-                (IssueState::parse(&dependency.blocker.state) != IssueState::Closed).then(|| {
-                    UnsatisfiedBlocker::Opaque(
-                        dependency.blocker.repository.to_ascii_lowercase(),
-                        dependency.blocker.number,
-                    )
-                })
-            }
-        })
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
 }
 
 pub(crate) fn analyze_ready<'a>(

@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
-use super::{ExecutionScope, IssueState, OperationalGraph};
-use crate::model::{BlockerScope, Issue};
+use super::{BlockerResolution, ExecutionScope, IssueState, OperationalGraph};
+use crate::model::Issue;
 
 pub(crate) struct Completion {
     issue_number: u64,
@@ -37,17 +37,15 @@ impl<'a> OperationalGraph<'a> {
         {
             return false;
         }
-        self.dependencies_for(number)
-            .iter()
-            .all(|dependency| match dependency.blocker.scope {
-                BlockerScope::Internal => {
-                    completed.contains(&dependency.blocker.number)
-                        || self.issue_state(dependency.blocker.number) == Some(IssueState::Closed)
-                }
-                BlockerScope::External => {
-                    IssueState::parse(&dependency.blocker.state) == IssueState::Closed
-                }
-            })
+        self.dependencies_for(number).iter().all(|dependency| {
+            match self.blocker_resolution(dependency) {
+                BlockerResolution::Satisfied => true,
+                BlockerResolution::InternalOpen(blocker) => completed.contains(&blocker),
+                BlockerResolution::ExternalOpen
+                | BlockerResolution::ExternalUnknown
+                | BlockerResolution::InternalUnknown => false,
+            }
+        })
     }
 }
 
@@ -150,17 +148,10 @@ impl<'graph, 'issues, 'scope> RolloutState<'graph, 'issues, 'scope> {
         required: &mut BTreeSet<u64>,
     ) -> Option<()> {
         for dependency in self.graph.dependencies_for(issue_number) {
-            match dependency.blocker.scope {
-                BlockerScope::External => {
-                    if IssueState::parse(&dependency.blocker.state) != IssueState::Closed {
-                        return None;
-                    }
-                }
-                BlockerScope::Internal => {
-                    let blocker = dependency.blocker.number;
-                    if self.completed.contains(&blocker)
-                        || self.graph.issue_state(blocker) == Some(IssueState::Closed)
-                    {
+            match self.graph.blocker_resolution(dependency) {
+                BlockerResolution::Satisfied => {}
+                BlockerResolution::InternalOpen(blocker) => {
+                    if self.completed.contains(&blocker) {
                         continue;
                     }
                     let blocker_issue = self.graph.issue(blocker)?;
@@ -177,6 +168,9 @@ impl<'graph, 'issues, 'scope> RolloutState<'graph, 'issues, 'scope> {
                         self.collect_open_prerequisites(blocker, maximum_size, required)?;
                     }
                 }
+                BlockerResolution::ExternalOpen
+                | BlockerResolution::ExternalUnknown
+                | BlockerResolution::InternalUnknown => return None,
             }
         }
         Some(())
@@ -186,7 +180,9 @@ impl<'graph, 'issues, 'scope> RolloutState<'graph, 'issues, 'scope> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{BlockerIdentity, Dependency, IssueIdentity, LocalReplica, ReplicaError};
+    use crate::model::{
+        BlockerIdentity, BlockerScope, Dependency, IssueIdentity, LocalReplica, ReplicaError,
+    };
 
     #[test]
     fn nested_and_fanout_completions_restore_each_frontier() -> Result<(), ReplicaError> {

@@ -1,8 +1,12 @@
 use std::process::Command;
 
-use mockito::{Matcher, Mock, Server};
+use mockito::Server;
 use serde_json::{Value, json};
 use tempfile::TempDir;
+
+mod support;
+
+use support::{assert_success, external_blocker, internal_blocker, issue, mock_repository};
 
 #[test]
 fn next_evaluates_the_complete_frontier_with_and_unlocks_and_deduplication() {
@@ -1178,161 +1182,6 @@ fn ready_command(state: &TempDir, api_url: &str, repository: &str) -> Command {
     command
 }
 
-struct RepositoryMocks {
-    labels: Mock,
-    issues: Mock,
-    comments: Mock,
-    dependencies: Vec<Mock>,
-}
-
-impl RepositoryMocks {
-    fn assert(self) {
-        self.labels.assert();
-        self.issues.assert();
-        self.comments.assert();
-        for dependency in self.dependencies {
-            dependency.assert();
-        }
-    }
-}
-
-fn mock_repository(
-    github: &mut Server,
-    repository: &str,
-    issues: Vec<Value>,
-    dependencies: Vec<(u64, Vec<Value>)>,
-) -> RepositoryMocks {
-    let labels_path = format!("/repos/{repository}/labels");
-    let labels = github
-        .mock("GET", labels_path.as_str())
-        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(canonical_labels().to_string())
-        .create();
-    let issues_path = format!("/repos/{repository}/issues");
-    let issue_response = Value::Array(issues);
-    let issues = github
-        .mock("GET", issues_path.as_str())
-        .match_query(Matcher::AllOf(vec![
-            Matcher::UrlEncoded("state".into(), "all".into()),
-            Matcher::UrlEncoded("sort".into(), "created".into()),
-            Matcher::UrlEncoded("direction".into(), "asc".into()),
-            Matcher::UrlEncoded("per_page".into(), "100".into()),
-        ]))
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(issue_response.to_string())
-        .create();
-    let comments_path = format!("/repos/{repository}/issues/comments");
-    let comments = github
-        .mock("GET", comments_path.as_str())
-        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body("[]")
-        .create();
-    let dependencies = dependencies
-        .into_iter()
-        .map(|(number, blockers)| {
-            let blockers = blockers
-                .into_iter()
-                .map(|mut blocker| {
-                    if blocker["repository_url"] == "https://api.github.com/repos/acme/placeholder"
-                    {
-                        blocker["repository_url"] =
-                            Value::String(format!("https://api.github.com/repos/{repository}"));
-                    }
-                    blocker
-                })
-                .collect();
-            let path = format!("/repos/{repository}/issues/{number}/dependencies/blocked_by");
-            github
-                .mock("GET", path.as_str())
-                .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
-                .with_status(200)
-                .with_header("content-type", "application/json")
-                .with_body(Value::Array(blockers).to_string())
-                .create()
-        })
-        .collect();
-    RepositoryMocks {
-        labels,
-        issues,
-        comments,
-        dependencies,
-    }
-}
-
-fn issue(number: u64, state: &str, priority_labels: &[&str], assignees: &[&str]) -> Value {
-    json!({
-        "id": number * 100,
-        "node_id": format!("I_{number}"),
-        "number": number,
-        "title": format!("Issue {number}"),
-        "body": "",
-        "state": state,
-        "state_reason": if state == "closed" { Some("completed") } else { None },
-        "html_url": format!("https://github.com/acme/repo/issues/{number}"),
-        "user": null,
-        "assignees": assignees
-            .iter()
-            .enumerate()
-            .map(|(index, login)| actor(number * 1000 + index as u64, login))
-            .collect::<Vec<_>>(),
-        "labels": priority_labels
-            .iter()
-            .enumerate()
-            .map(|(index, name)| label(number * 10 + index as u64, name))
-            .collect::<Vec<_>>(),
-        "created_at": "2026-08-01T00:00:00Z",
-        "updated_at": "2026-08-01T00:00:00Z",
-        "closed_at": if state == "closed" { Some("2026-08-02T00:00:00Z") } else { None }
-    })
-}
-
-fn internal_blocker(number: u64, state: &str) -> Value {
-    blocker("acme/placeholder", number, state)
-}
-
-fn external_blocker(repository: &str, number: u64, state: &str) -> Value {
-    blocker(repository, number, state)
-}
-
-fn blocker(repository: &str, number: u64, state: &str) -> Value {
-    json!({
-        "id": number * 100,
-        "node_id": format!("I_{number}"),
-        "repository_url": format!("https://api.github.com/repos/{repository}"),
-        "number": number,
-        "state": state
-    })
-}
-
-fn canonical_labels() -> Value {
-    json!([
-        label(1, "priority:p0"),
-        label(2, "priority:p1"),
-        label(3, "priority:p2"),
-        label(4, "priority:p3"),
-        label(5, "priority:p4")
-    ])
-}
-
-fn label(id: u64, name: &str) -> Value {
-    json!({
-        "id": id,
-        "node_id": format!("L_{id}"),
-        "name": name,
-        "color": "123456",
-        "description": null
-    })
-}
-
-fn actor(id: u64, login: &str) -> Value {
-    json!({"id": id, "node_id": format!("U_{id}"), "login": login})
-}
-
 fn reason_codes(output: &Value) -> Vec<&str> {
     output["recommendation"]["reasons"]
         .as_array()
@@ -1340,12 +1189,4 @@ fn reason_codes(output: &Value) -> Vec<&str> {
         .iter()
         .map(|reason| reason["code"].as_str().expect("reason code"))
         .collect()
-}
-
-fn assert_success(output: &std::process::Output) {
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
 }

@@ -11,11 +11,11 @@ mod search;
 
 use crate::{
     model::{Issue, LocalReplica},
-    operational::{ExecutionScope, OperationalGraph},
+    operational::{ExecutionScope, PreparedRepository},
     priority::{PriorityComparison, PriorityState},
 };
 use decision::{PriorityProfile, RankingMode, StepPriority};
-pub(crate) use output::NextAnalysis;
+pub(crate) use output::{NextAnalysis, PlanDecision};
 use output::{NextResult, NextSummary};
 use pagerank::PageRank;
 
@@ -107,10 +107,20 @@ pub(crate) fn analyze(
     scope: ExecutionScope<'_>,
     horizon: u8,
 ) -> NextAnalysis {
-    let graph = OperationalGraph::prepare(replica);
+    let prepared = PreparedRepository::prepare(replica);
+    analyze_prepared(&prepared, scope, horizon)
+}
+
+pub(crate) fn analyze_prepared(
+    prepared: &PreparedRepository<'_>,
+    scope: ExecutionScope<'_>,
+    horizon: u8,
+) -> NextAnalysis {
+    let replica = prepared.replica();
+    let graph = prepared.graph();
     let ready = graph.analyze_ready(scope);
-    let pagerank = PageRank::calculate(&graph);
-    let search = search::evaluate(&graph, scope, pagerank.as_ref(), horizon, STATE_BUDGET);
+    let pagerank = PageRank::calculate(graph);
+    let search = search::evaluate(graph, scope, pagerank.as_ref(), horizon, STATE_BUDGET);
     let mode = search.mode;
     let candidate_count = search.candidate_count;
     let search_complete = search.truncated_by.is_empty();
@@ -149,7 +159,7 @@ pub(crate) fn analyze(
     });
     let recommendation = ranked_results.next();
     let alternatives: Vec<_> = ranked_results.take(ALTERNATIVE_LIMIT).collect();
-    let summary = NextSummary::from_graph(&ready, candidate_count, &graph);
+    let summary = NextSummary::from_graph(&ready, candidate_count, graph);
     NextAnalysis::from_search(NextResult {
         input_hash: effective_input_hash(replica, scope),
         horizon,

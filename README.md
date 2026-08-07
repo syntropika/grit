@@ -12,7 +12,8 @@ Declared priority support from
 [Issue #6](https://github.com/syntropika/grit/issues/6), and step-by-step
 recommendations from
 [Issue #11](https://github.com/syntropika/grit/issues/11) and
-[Issue #14](https://github.com/syntropika/grit/issues/14).
+[Issue #14](https://github.com/syntropika/grit/issues/14), and structural plans
+from [Issue #23](https://github.com/syntropika/grit/issues/23).
 
 ## Build and test
 
@@ -124,6 +125,28 @@ a close structural tie. If no Issue is Executable, the command succeeds with a
 null recommendation and categorized blocker counts. Like `ready`, it attempts
 a pull Synchronization and falls back to the latest valid Local replica without
 mutating GitHub.
+
+## Inspect a structural plan
+
+`grit plan` exposes the exact `next/v1` decision together with immediate
+parallel capacity and counterfactual Dependency layers:
+
+```bash
+grit plan --repo OWNER/REPO
+grit plan --repo OWNER/REPO --assignee LOGIN --horizon 3 --json
+```
+
+`parallel_now` is the complete Executable frontier for the active Execution
+scope. `dependency_layers` covers every open Issue in the Repository: layer 0
+contains all current Ready Issues, and each later finite layer follows the
+latest layer of all its open blockers. Every Issue records assignment,
+Execution-scope eligibility, and whether it is Executable now.
+
+Cycles, opaque External blockers, unknown internal blockers, and their
+affected descendants remain in `unresolved`; Grit does not assign them a
+misleading finite layer. These layers describe dependency topology under
+unlimited structural capacity. They are not dates, worker rounds, an ETA, or
+a Critical Path. `plan/v1` therefore rejects `--workers` explicitly.
 
 ## Product decisions
 

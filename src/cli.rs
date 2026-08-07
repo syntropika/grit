@@ -10,11 +10,12 @@ use crate::{
     auth::{AuthError, AuthToken},
     github::{CreateLabelRequest, GitHubClient, GitHubError, LabelCreation},
     model::{LocalReplica, ReplicaError},
-    operational::{ExecutionScope, analyze_ready},
+    operational::{ExecutionScope, PreparedRepository, analyze_ready},
+    plan::{DependencyLayers, PlanIssue},
     priority::{
         DeclaredPriority, PriorityState, missing_canonical_labels, present_canonical_labels,
     },
-    ranking::{self, NextAnalysis},
+    ranking::{self, NextAnalysis, PlanDecision},
     repository::{Repository, RepositoryError},
     store::{ReplicaStore, StoreError},
 };
@@ -22,6 +23,7 @@ use crate::{
 const SYNC_SCHEMA_VERSION: &str = "grit.sync/v1";
 const READY_SCHEMA_VERSION: &str = "grit.ready/v1";
 const INIT_SCHEMA_VERSION: &str = "grit.init/v1";
+const PLAN_SCHEMA_VERSION: &str = "grit.plan/v1";
 
 #[derive(Parser)]
 #[command(name = "grit", version, about)]
@@ -43,6 +45,24 @@ enum Command {
         /// Number of completions to evaluate, from one through the default three.
         #[arg(long, default_value_t = ranking::DEFAULT_HORIZON)]
         horizon: u8,
+        /// Emit versioned machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Explain the best rollout and structural dependency layers.
+    Plan {
+        /// Repository in OWNER/REPO form.
+        #[arg(long)]
+        repo: String,
+        /// Select Ready work assigned to this GitHub login.
+        #[arg(long)]
+        assignee: Option<String>,
+        /// Number of completions to evaluate, from one through the default three.
+        #[arg(long, default_value_t = ranking::DEFAULT_HORIZON)]
+        horizon: u8,
+        /// Capacity is intentionally unsupported by plan/v1.
+        #[arg(long)]
+        workers: Option<usize>,
         /// Emit versioned machine-readable output.
         #[arg(long)]
         json: bool,
@@ -93,6 +113,19 @@ pub(crate) fn execute() -> Result<(), CliError> {
             horizon,
             json,
         ),
+        Command::Plan {
+            repo,
+            assignee,
+            horizon,
+            workers,
+            json,
+        } => plan(
+            &Repository::parse(&repo)?,
+            assignee.as_deref(),
+            horizon,
+            workers,
+            json,
+        ),
         Command::Init { repo, json } => initialize(&Repository::parse(&repo)?, json),
         Command::Sync { repo, json } => sync(&Repository::parse(&repo)?, json),
         Command::Ready {
@@ -101,6 +134,74 @@ pub(crate) fn execute() -> Result<(), CliError> {
             json,
         } => ready(&Repository::parse(&repo)?, assignee.as_deref(), json),
     }
+}
+
+fn plan(
+    repository: &Repository,
+    assignee: Option<&str>,
+    horizon: u8,
+    workers: Option<usize>,
+    json: bool,
+) -> Result<(), CliError> {
+    if workers.is_some() {
+        return Err(CliError::UnsupportedPlanWorkers);
+    }
+    if !(ranking::MIN_HORIZON..=ranking::MAX_HORIZON).contains(&horizon) {
+        return Err(CliError::UnsupportedNextHorizon(horizon));
+    }
+    let (replica, source) = refresh_or_local(repository)?;
+    let scope = assignee
+        .map(ExecutionScope::Assignee)
+        .unwrap_or(ExecutionScope::Available);
+    let prepared = PreparedRepository::prepare(&replica);
+    let decision = ranking::analyze_prepared(&prepared, scope, horizon).into_plan_decision();
+    let structural = crate::plan::analyze(prepared.graph(), scope);
+    let parallel_now = structural.parallel_now;
+    let dependency_layers = structural.dependency_layers;
+    let warnings = analysis_warnings(&replica, source);
+
+    if json {
+        let output = PlanOutput {
+            schema_version: PLAN_SCHEMA_VERSION,
+            policy_version: ranking::POLICY_VERSION,
+            command: "plan",
+            repository: &replica.repository,
+            source,
+            synced_at: &replica.synced_at,
+            replica_snapshot_hash: &replica.input_hash,
+            execution_scope: execution_scope_output(assignee),
+            decision,
+            parallel_now,
+            dependency_layers,
+            warnings,
+        };
+        serde_json::to_writer(std::io::stdout().lock(), &output).map_err(CliError::EncodeOutput)?;
+        println!();
+    } else {
+        println!(
+            "plan/v1 for {} (synced_at {}):",
+            replica.repository, replica.synced_at
+        );
+        match decision.recommendation() {
+            Some(recommendation) => println!("{}", recommendation.human_summary()),
+            None => println!("{}", decision.summary().human_empty_summary()),
+        }
+        println!("parallel_now:");
+        for issue in &parallel_now {
+            println!("#{} {}", issue.number, issue.title);
+        }
+        println!("dependency layers (counterfactual topology):");
+        for layer in dependency_layers.human_lines() {
+            println!("{layer}");
+        }
+        if let Some(warning) = decision.truncation_warning() {
+            eprintln!("warning: {warning}");
+        }
+        for warning in &warnings {
+            print_warning(warning);
+        }
+    }
+    Ok(())
 }
 
 fn initialize(repository: &Repository, json: bool) -> Result<(), CliError> {
@@ -478,6 +579,22 @@ struct NextOutput<'a> {
 }
 
 #[derive(Serialize)]
+struct PlanOutput<'a> {
+    schema_version: &'static str,
+    policy_version: &'static str,
+    command: &'static str,
+    repository: &'a str,
+    source: ReplicaSource,
+    synced_at: &'a str,
+    replica_snapshot_hash: &'a str,
+    execution_scope: ExecutionScopeOutput<'a>,
+    decision: PlanDecision,
+    parallel_now: Vec<PlanIssue<'a>>,
+    dependency_layers: DependencyLayers<'a>,
+    warnings: Vec<ReadyWarning>,
+}
+
+#[derive(Serialize)]
 struct SnapshotSummary<'a> {
     schema_version: &'a str,
     synced_at: &'a str,
@@ -580,6 +697,8 @@ pub(crate) enum CliError {
     EncodeOutput(serde_json::Error),
     #[error("next/v1 horizon must be between 1 and 3, not {0}")]
     UnsupportedNextHorizon(u8),
+    #[error("grit plan does not accept --workers in v1")]
+    UnsupportedPlanWorkers,
     #[error("GitHub refresh failed ({refresh}); no valid Local replica is available ({replica})")]
     RefreshAndReplicaUnavailable { refresh: String, replica: String },
 }
