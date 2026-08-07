@@ -4,6 +4,7 @@ mod github;
 mod model;
 mod operational;
 mod priority;
+mod ranking;
 mod repository;
 mod store;
 

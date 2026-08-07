@@ -14,6 +14,7 @@ use crate::{
     priority::{
         DeclaredPriority, PriorityState, missing_canonical_labels, present_canonical_labels,
     },
+    ranking::{self, NextAnalysis},
     repository::{Repository, RepositoryError},
     store::{ReplicaStore, StoreError},
 };
@@ -31,6 +32,21 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Recommend the best executable first step under next/v1.
+    Next {
+        /// Repository in OWNER/REPO form.
+        #[arg(long)]
+        repo: String,
+        /// Select Ready work assigned to this GitHub login.
+        #[arg(long)]
+        assignee: Option<String>,
+        /// Number of completions to evaluate; this slice implements exactly one.
+        #[arg(long, default_value_t = ranking::HORIZON)]
+        horizon: u8,
+        /// Emit versioned machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
     /// Create any missing canonical Priority labels.
     Init {
         /// Repository in OWNER/REPO form.
@@ -66,6 +82,17 @@ enum Command {
 pub(crate) fn execute() -> Result<(), CliError> {
     let cli = Cli::parse();
     match cli.command {
+        Command::Next {
+            repo,
+            assignee,
+            horizon,
+            json,
+        } => next(
+            &Repository::parse(&repo)?,
+            assignee.as_deref(),
+            horizon,
+            json,
+        ),
         Command::Init { repo, json } => initialize(&Repository::parse(&repo)?, json),
         Command::Sync { repo, json } => sync(&Repository::parse(&repo)?, json),
         Command::Ready {
@@ -127,6 +154,52 @@ fn initialize(repository: &Repository, json: bool) -> Result<(), CliError> {
 fn sync(repository: &Repository, json: bool) -> Result<(), CliError> {
     let replica = synchronize(repository)?;
     print_sync_result(&replica, json)?;
+    Ok(())
+}
+
+fn next(
+    repository: &Repository,
+    assignee: Option<&str>,
+    horizon: u8,
+    json: bool,
+) -> Result<(), CliError> {
+    if horizon != ranking::HORIZON {
+        return Err(CliError::UnsupportedNextHorizon(horizon));
+    }
+    let (replica, source) = refresh_or_local(repository)?;
+    let scope = assignee
+        .map(ExecutionScope::Assignee)
+        .unwrap_or(ExecutionScope::Available);
+    let analysis = ranking::analyze(&replica, scope);
+    let warnings = analysis_warnings(&replica, source);
+    if json {
+        let output = NextOutput {
+            schema_version: ranking::OUTPUT_SCHEMA_VERSION,
+            policy_version: ranking::POLICY_VERSION,
+            command: "next",
+            repository: &replica.repository,
+            source,
+            synced_at: &replica.synced_at,
+            replica_snapshot_hash: &replica.input_hash,
+            execution_scope: execution_scope_output(assignee),
+            analysis,
+            warnings,
+        };
+        serde_json::to_writer(std::io::stdout().lock(), &output).map_err(CliError::EncodeOutput)?;
+        println!();
+    } else {
+        println!(
+            "next/v1 recommendation in {} (synced_at {}):",
+            replica.repository, replica.synced_at
+        );
+        match analysis.recommendation() {
+            Some(recommendation) => println!("{}", recommendation.human_summary()),
+            None => println!("{}", analysis.summary().human_empty_summary()),
+        }
+        for warning in &warnings {
+            print_warning(warning);
+        }
+    }
     Ok(())
 }
 
@@ -193,25 +266,87 @@ fn print_sync_result(replica: &LocalReplica, json: bool) -> Result<(), CliError>
 }
 
 fn ready(repository: &Repository, assignee: Option<&str>, json: bool) -> Result<(), CliError> {
-    let (replica, source) = match synchronize(repository) {
-        Ok(replica) => (replica, ReplicaSource::Live),
-        Err(refresh_error) => {
-            let store = ReplicaStore::discover(repository)?;
-            match store.load(repository) {
-                Ok(replica) => (replica, ReplicaSource::LocalFallback),
-                Err(replica_error) => {
-                    return Err(CliError::RefreshAndReplicaUnavailable {
-                        refresh: refresh_error.to_string(),
-                        replica: replica_error.to_string(),
-                    });
-                }
-            }
-        }
-    };
+    let (replica, source) = refresh_or_local(repository)?;
     let scope = assignee
         .map(ExecutionScope::Assignee)
         .unwrap_or(ExecutionScope::Available);
     let analysis = analyze_ready(&replica, scope);
+    let warnings = analysis_warnings(&replica, source);
+    let issues: Vec<_> = analysis
+        .executable
+        .iter()
+        .map(|issue| ReadyIssue {
+            number: issue.number,
+            url: &issue.url,
+            title: &issue.title,
+            ready: true,
+            available: issue.assignees.is_empty(),
+            priority: PriorityState::from_issue_labels(&issue.labels),
+            assignees: issue
+                .assignees
+                .iter()
+                .map(|actor| actor.login.as_str())
+                .collect(),
+        })
+        .collect();
+    let output = ReadyOutput {
+        schema_version: READY_SCHEMA_VERSION,
+        command: "ready",
+        repository: &replica.repository,
+        source,
+        synced_at: &replica.synced_at,
+        input_hash: &replica.input_hash,
+        execution_scope: execution_scope_output(assignee),
+        issues,
+        summary: ReadySummary {
+            operational_issue_count: analysis.operational_issue_count,
+            ready_count: analysis.ready_count,
+            executable_count: analysis.executable.len(),
+            assigned_ready_count: analysis.assigned_ready_count,
+            blocked_count: analysis.blocked_count,
+        },
+        warnings,
+    };
+    if json {
+        serde_json::to_writer(std::io::stdout().lock(), &output).map_err(CliError::EncodeOutput)?;
+        println!();
+    } else {
+        println!(
+            "Executable Issues in {} (synced_at {}):",
+            replica.repository, replica.synced_at
+        );
+        for issue in &output.issues {
+            println!(
+                "#{} {} [{}]",
+                issue.number,
+                issue.title,
+                issue.priority.display_name()
+            );
+        }
+        for warning in &output.warnings {
+            print_warning(warning);
+        }
+    }
+    Ok(())
+}
+
+fn refresh_or_local(repository: &Repository) -> Result<(LocalReplica, ReplicaSource), CliError> {
+    match synchronize(repository) {
+        Ok(replica) => Ok((replica, ReplicaSource::Live)),
+        Err(refresh_error) => {
+            let store = ReplicaStore::discover(repository)?;
+            match store.load(repository) {
+                Ok(replica) => Ok((replica, ReplicaSource::LocalFallback)),
+                Err(replica_error) => Err(CliError::RefreshAndReplicaUnavailable {
+                    refresh: refresh_error.to_string(),
+                    replica: replica_error.to_string(),
+                }),
+            }
+        }
+    }
+}
+
+fn analysis_warnings(replica: &LocalReplica, source: ReplicaSource) -> Vec<ReadyWarning> {
     let mut warnings = Vec::new();
     if let Some(repository_labels) = replica.repository_labels.as_deref() {
         let missing_labels: Vec<_> = missing_canonical_labels(repository_labels)
@@ -248,79 +383,32 @@ fn ready(repository: &Repository, assignee: Option<&str>, json: bool) -> Result<
     if let Some(warning) = source.warning() {
         warnings.push(warning);
     }
-    let issues: Vec<_> = analysis
-        .executable
-        .iter()
-        .map(|issue| ReadyIssue {
-            number: issue.number,
-            url: &issue.url,
-            title: &issue.title,
-            ready: true,
-            available: issue.assignees.is_empty(),
-            priority: PriorityState::from_issue_labels(&issue.labels),
-            assignees: issue
-                .assignees
-                .iter()
-                .map(|actor| actor.login.as_str())
-                .collect(),
-        })
-        .collect();
-    let output = ReadyOutput {
-        schema_version: READY_SCHEMA_VERSION,
-        command: "ready",
-        repository: &replica.repository,
-        source,
-        synced_at: &replica.synced_at,
-        input_hash: &replica.input_hash,
-        execution_scope: match assignee {
-            Some(assignee) => ExecutionScopeOutput {
-                mode: "assignee",
-                assignee: Some(assignee),
-            },
-            None => ExecutionScopeOutput {
-                mode: "available",
-                assignee: None,
-            },
+    warnings
+}
+
+fn execution_scope_output(assignee: Option<&str>) -> ExecutionScopeOutput<'_> {
+    match assignee {
+        Some(assignee) => ExecutionScopeOutput {
+            mode: "assignee",
+            assignee: Some(assignee),
         },
-        issues,
-        summary: ReadySummary {
-            operational_issue_count: analysis.operational_issue_count,
-            ready_count: analysis.ready_count,
-            executable_count: analysis.executable.len(),
-            assigned_ready_count: analysis.assigned_ready_count,
-            blocked_count: analysis.blocked_count,
+        None => ExecutionScopeOutput {
+            mode: "available",
+            assignee: None,
         },
-        warnings,
-    };
-    if json {
-        serde_json::to_writer(std::io::stdout().lock(), &output).map_err(CliError::EncodeOutput)?;
-        println!();
-    } else {
-        println!(
-            "Executable Issues in {} (synced_at {}):",
-            replica.repository, replica.synced_at
-        );
-        for issue in &output.issues {
-            println!(
-                "#{} {} [{}]",
-                issue.number,
-                issue.title,
-                issue.priority.display_name()
-            );
-        }
-        for warning in &output.warnings {
-            if warning.labels.is_empty() {
-                eprintln!("warning: {}", warning.message);
-            } else {
-                eprintln!(
-                    "warning: {} ({})",
-                    warning.message,
-                    warning.labels.join(", ")
-                );
-            }
-        }
     }
-    Ok(())
+}
+
+fn print_warning(warning: &ReadyWarning) {
+    if warning.labels.is_empty() {
+        eprintln!("warning: {}", warning.message);
+    } else {
+        eprintln!(
+            "warning: {} ({})",
+            warning.message,
+            warning.labels.join(", ")
+        );
+    }
 }
 
 fn api_base_url() -> Result<Url, CliError> {
@@ -369,6 +457,21 @@ struct InitOutput<'a> {
     repository: &'a str,
     created_labels: Vec<String>,
     already_present: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct NextOutput<'a> {
+    schema_version: &'static str,
+    policy_version: &'static str,
+    command: &'static str,
+    repository: &'a str,
+    source: ReplicaSource,
+    synced_at: &'a str,
+    replica_snapshot_hash: &'a str,
+    execution_scope: ExecutionScopeOutput<'a>,
+    #[serde(flatten)]
+    analysis: NextAnalysis,
+    warnings: Vec<ReadyWarning>,
 }
 
 #[derive(Serialize)]
@@ -472,6 +575,8 @@ pub(crate) enum CliError {
     Replica(#[from] ReplicaError),
     #[error("could not encode command JSON output: {0}")]
     EncodeOutput(serde_json::Error),
+    #[error("this implementation supports only next/v1 horizon 1, not horizon {0}")]
+    UnsupportedNextHorizon(u8),
     #[error("GitHub refresh failed ({refresh}); no valid Local replica is available ({replica})")]
     RefreshAndReplicaUnavailable { refresh: String, replica: String },
 }
