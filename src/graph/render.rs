@@ -1,7 +1,5 @@
+use super::{GraphError, artifact::GraphArtifact, serialization::pretty_json, text::escape_html};
 use schemars::schema_for;
-use serde::Serialize;
-
-use super::{GraphError, artifact::GraphArtifact};
 
 pub(super) fn graph_json(artifact: &GraphArtifact) -> Result<Vec<u8>, GraphError> {
     pretty_json(artifact)
@@ -39,19 +37,4 @@ pub(super) fn html(artifact: &GraphArtifact) -> String {
         synced_at = escape_html(&artifact.synced_at),
         artifact_hash = escape_html(&artifact.artifact_hash),
     )
-}
-
-fn pretty_json<T: Serialize>(value: &T) -> Result<Vec<u8>, GraphError> {
-    let mut bytes = serde_json::to_vec_pretty(value).map_err(GraphError::EncodeArtifact)?;
-    bytes.push(b'\n');
-    Ok(bytes)
-}
-
-fn escape_html(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
 }
