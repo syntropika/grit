@@ -3,19 +3,20 @@ use std::env;
 use chrono::{SecondsFormat, Utc};
 use clap::{Parser, Subcommand};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 use url::Url;
 
 use crate::{
     auth::{AuthError, AuthToken},
-    github::{GitHubClient, GitHubError, HashInput},
-    model::{LocalReplica, REPLICA_SCHEMA_VERSION},
+    github::{GitHubClient, GitHubError},
+    model::{LocalReplica, ReplicaError},
+    operational::{ExecutionScope, analyze_ready},
     repository::{Repository, RepositoryError},
     store::{ReplicaStore, StoreError},
 };
 
 const SYNC_SCHEMA_VERSION: &str = "grit.sync/v1";
+const READY_SCHEMA_VERSION: &str = "grit.ready/v1";
 
 #[derive(Parser)]
 #[command(name = "grit", version, about)]
@@ -35,16 +36,39 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Enumerate the complete Executable frontier.
+    Ready {
+        /// Repository in OWNER/REPO form.
+        #[arg(long)]
+        repo: String,
+        /// Select Ready work assigned to this GitHub login.
+        #[arg(long)]
+        assignee: Option<String>,
+        /// Emit versioned machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 pub(crate) fn execute() -> Result<(), CliError> {
     let cli = Cli::parse();
     match cli.command {
         Command::Sync { repo, json } => sync(&Repository::parse(&repo)?, json),
+        Command::Ready {
+            repo,
+            assignee,
+            json,
+        } => ready(&Repository::parse(&repo)?, assignee.as_deref(), json),
     }
 }
 
 fn sync(repository: &Repository, json: bool) -> Result<(), CliError> {
+    let replica = synchronize(repository)?;
+    print_sync_result(&replica, json)?;
+    Ok(())
+}
+
+fn synchronize(repository: &Repository) -> Result<LocalReplica, CliError> {
     let base_url = api_base_url()?;
     let hostname = env::var("GRIT_GITHUB_HOST")
         .ok()
@@ -54,29 +78,18 @@ fn sync(repository: &Repository, json: bool) -> Result<(), CliError> {
     let client = GitHubClient::new(base_url, &token)?;
     let data = client.fetch_repository(repository)?;
 
-    let hash_input = HashInput {
-        schema_version: REPLICA_SCHEMA_VERSION,
-        repository: repository.full_name(),
-        issues: &data.issues,
-        dependencies: &data.dependencies,
-    };
-    let canonical = serde_json::to_vec(&hash_input).map_err(CliError::EncodeHashInput)?;
-    let input_hash = hex::encode(Sha256::digest(canonical));
-    let replica = LocalReplica {
-        schema_version: REPLICA_SCHEMA_VERSION.to_owned(),
-        repository: repository.full_name().to_owned(),
-        synced_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-        input_hash,
-        issues: data.issues,
-        dependencies: data.dependencies,
-    };
+    let replica = LocalReplica::build(
+        repository.full_name().to_owned(),
+        Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        data.issues,
+        data.dependencies,
+    )?;
 
     ReplicaStore::discover(repository)?.publish(&replica)?;
-    print_result(&replica, json)?;
-    Ok(())
+    Ok(replica)
 }
 
-fn print_result(replica: &LocalReplica, json: bool) -> Result<(), CliError> {
+fn print_sync_result(replica: &LocalReplica, json: bool) -> Result<(), CliError> {
     let comment_count = replica
         .issues
         .iter()
@@ -108,6 +121,96 @@ fn print_result(replica: &LocalReplica, json: bool) -> Result<(), CliError> {
             snapshot.dependency_count,
             snapshot.synced_at
         );
+    }
+    Ok(())
+}
+
+fn ready(repository: &Repository, assignee: Option<&str>, json: bool) -> Result<(), CliError> {
+    let (replica, source, used_fallback) = match synchronize(repository) {
+        Ok(replica) => (replica, "live", false),
+        Err(refresh_error) => {
+            let store = ReplicaStore::discover(repository)?;
+            match store.load(repository) {
+                Ok(replica) => (replica, "local_fallback", true),
+                Err(replica_error) => {
+                    return Err(CliError::RefreshAndReplicaUnavailable {
+                        refresh: refresh_error.to_string(),
+                        replica: replica_error.to_string(),
+                    });
+                }
+            }
+        }
+    };
+    let scope = assignee
+        .map(ExecutionScope::Assignee)
+        .unwrap_or(ExecutionScope::Available);
+    let analysis = analyze_ready(&replica, scope);
+    let issues: Vec<_> = analysis
+        .executable
+        .iter()
+        .map(|issue| ReadyIssue {
+            number: issue.number,
+            url: &issue.url,
+            title: &issue.title,
+            ready: true,
+            available: issue.assignees.is_empty(),
+            assignees: issue
+                .assignees
+                .iter()
+                .map(|actor| actor.login.as_str())
+                .collect(),
+        })
+        .collect();
+    let output = ReadyOutput {
+        schema_version: READY_SCHEMA_VERSION,
+        command: "ready",
+        repository: &replica.repository,
+        source,
+        synced_at: &replica.synced_at,
+        input_hash: &replica.input_hash,
+        execution_scope: match assignee {
+            Some(assignee) => ExecutionScopeOutput {
+                mode: "assignee",
+                assignee: Some(assignee),
+            },
+            None => ExecutionScopeOutput {
+                mode: "available",
+                assignee: None,
+            },
+        },
+        issues,
+        summary: ReadySummary {
+            operational_issue_count: analysis.operational_issue_count,
+            ready_count: analysis.ready_count,
+            executable_count: analysis.executable.len(),
+            assigned_ready_count: analysis.assigned_ready_count,
+            blocked_count: analysis.blocked_count,
+        },
+        warnings: used_fallback
+            .then_some(ReadyWarning {
+                code: "offline_fallback",
+                message: "GitHub refresh failed; using the latest valid Local replica",
+            })
+            .into_iter()
+            .collect(),
+    };
+    if json {
+        serde_json::to_writer(std::io::stdout().lock(), &output).map_err(CliError::EncodeOutput)?;
+        println!();
+    } else {
+        println!(
+            "Executable Issues in {} (synced_at {}):",
+            replica.repository, replica.synced_at
+        );
+        for issue in &output.issues {
+            println!("#{} {}", issue.number, issue.title);
+        }
+        if used_fallback {
+            eprintln!(
+                "warning: GitHub refresh failed; using Local replica from {}",
+                replica.synced_at
+            );
+        }
     }
     Ok(())
 }
@@ -161,6 +264,52 @@ struct SnapshotSummary<'a> {
     dependency_count: usize,
 }
 
+#[derive(Serialize)]
+struct ReadyOutput<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    repository: &'a str,
+    source: &'a str,
+    synced_at: &'a str,
+    input_hash: &'a str,
+    execution_scope: ExecutionScopeOutput<'a>,
+    issues: Vec<ReadyIssue<'a>>,
+    summary: ReadySummary,
+    warnings: Vec<ReadyWarning>,
+}
+
+#[derive(Serialize)]
+struct ExecutionScopeOutput<'a> {
+    mode: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    assignee: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct ReadyIssue<'a> {
+    number: u64,
+    url: &'a str,
+    title: &'a str,
+    ready: bool,
+    available: bool,
+    assignees: Vec<&'a str>,
+}
+
+#[derive(Serialize)]
+struct ReadySummary {
+    operational_issue_count: usize,
+    ready_count: usize,
+    executable_count: usize,
+    assigned_ready_count: usize,
+    blocked_count: usize,
+}
+
+#[derive(Serialize)]
+struct ReadyWarning {
+    code: &'static str,
+    message: &'static str,
+}
+
 #[derive(Debug, Error)]
 pub(crate) enum CliError {
     #[error(transparent)]
@@ -175,10 +324,12 @@ pub(crate) enum CliError {
     GitHub(#[from] GitHubError),
     #[error(transparent)]
     Store(#[from] StoreError),
-    #[error("could not encode normalized input for hashing: {0}")]
-    EncodeHashInput(serde_json::Error),
-    #[error("could not encode sync JSON output: {0}")]
+    #[error(transparent)]
+    Replica(#[from] ReplicaError),
+    #[error("could not encode command JSON output: {0}")]
     EncodeOutput(serde_json::Error),
+    #[error("GitHub refresh failed ({refresh}); no valid Local replica is available ({replica})")]
+    RefreshAndReplicaUnavailable { refresh: String, replica: String },
 }
 
 #[cfg(test)]

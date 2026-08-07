@@ -4,8 +4,10 @@ Grit treats the Issues and native Dependencies in one GitHub Repository as a
 graph. GitHub remains the source of truth; Grit keeps a disposable Local
 replica so later analysis can be fast and work offline.
 
-The current executable tracer implements the initial full synchronization
-path from [Issue #2](https://github.com/syntropika/grit/issues/2).
+The current executable tracer implements full synchronization and Executable
+frontier enumeration from
+[Issue #2](https://github.com/syntropika/grit/issues/2) and
+[Issue #3](https://github.com/syntropika/grit/issues/3).
 
 ## Build and test
 
@@ -45,6 +47,25 @@ entire load succeeds.
 The replica file format and location below `GRIT_STATE_DIR` are implementation
 details. Consumers should use Grit's versioned command output rather than read
 the replica directly.
+
+## Enumerate Executable work
+
+`grit ready` refreshes the Local replica and lists the complete Executable
+frontier in ascending Issue-number order:
+
+```bash
+grit ready --repo OWNER/REPO
+grit ready --repo OWNER/REPO --assignee LOGIN --json
+```
+
+Without `--assignee`, the Execution scope contains Ready unassigned Issues.
+With it, the scope contains Ready Issues assigned to that login. Assignment is
+reported separately from Dependency readiness.
+
+If GitHub cannot be reached, `ready` uses the latest valid Local replica and
+reports its unchanged `synced_at`. A replica is accepted only when its schema,
+Repository scope, timestamp, and deterministic content hash validate. If no
+valid replica exists, the command fails instead of inventing an empty graph.
 
 ## Product decisions
 
