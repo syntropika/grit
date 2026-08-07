@@ -43,10 +43,11 @@ The first synchronization retrieves every page of Issues and Repository Issue
 comments, then the native `blocked_by` Dependencies for each Issue. Pull
 Requests returned by the Issues endpoint are excluded. Later runs request
 ordinary Issue and comment changes from an overlapped `updated_at` watermark,
-upsert them by stable GitHub identity, and refresh Dependencies only for Issues
-whose ordinary fields changed. A scoped ETag is reused only when the preceding
-delta proved that the complete representation fit in fewer than 100 items; it
-is never treated as a Repository-wide continuity guarantee.
+paginate them in stable creation order, upsert them by stable GitHub identity,
+and refresh Dependencies only for Issues whose ordinary fields changed. A
+scoped ETag is reused only when the preceding delta proved that the complete
+representation fit in fewer than 100 items; it is never treated as a
+Repository-wide continuity guarantee.
 
 Grit writes only a normalized model and atomically replaces the previous valid
 replica after every required page has completed. A failed or rate-limited delta

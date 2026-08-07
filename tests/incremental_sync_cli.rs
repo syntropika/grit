@@ -1,11 +1,13 @@
 use std::{fs, process::Command};
 
+use chrono::{DateTime, Duration, SecondsFormat};
 use mockito::{Matcher, Mock, Server};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
+mod support;
+
 const INITIAL_WATERMARK: &str = "2026-08-02T11:00:00Z";
-const INITIAL_SINCE: &str = "2026-08-02T10:59:00Z";
 
 #[test]
 fn incremental_sync_upserts_old_and_new_issues_with_every_ordinary_change() {
@@ -25,20 +27,21 @@ fn incremental_sync_upserts_old_and_new_issues_with_every_ordinary_change() {
         .expect("initial sync");
     assert_success(&first);
     initial.assert();
+    let initial_since = replica_since(&state);
 
     let closed = issue_with_classification(
         7,
         "closed",
         "Closed after review",
         "Revised body",
-        "2026-08-07T12:00:00Z",
+        "2099-08-07T12:00:00Z",
         vec![actor("grace", 11)],
         vec![label("priority:p0", 21)],
     );
-    let created = issue(10, "open", "New Issue", "New work", "2026-08-07T12:15:00Z");
+    let created = issue(10, "open", "New Issue", "New work", "2099-08-07T12:15:00Z");
     let changed_issues = mock_issue_delta(
         &mut github,
-        INITIAL_SINCE,
+        &initial_since,
         None,
         200,
         serde_json::to_string(&vec![closed, created]).expect("Issue delta"),
@@ -46,14 +49,14 @@ fn incremental_sync_upserts_old_and_new_issues_with_every_ordinary_change() {
     );
     let changed_comments = mock_comment_delta(
         &mut github,
-        INITIAL_SINCE,
+        &initial_since,
         None,
         200,
         serde_json::to_string(&vec![comment(
             701,
             7,
             "A newly synchronized comment",
-            "2026-08-07T12:30:00Z",
+            "2099-08-07T12:30:00Z",
         )])
         .expect("comment delta"),
         None,
@@ -71,6 +74,20 @@ fn incremental_sync_upserts_old_and_new_issues_with_every_ordinary_change() {
     dependency_ten.assert();
 
     let replica = load_replica(&state);
+    let watermark = DateTime::parse_from_rfc3339(
+        replica["sync"]["ordinary_issues"]["watermark"]
+            .as_str()
+            .expect("watermark"),
+    )
+    .expect("valid watermark");
+    let synced_at =
+        DateTime::parse_from_rfc3339(replica["synced_at"].as_str().expect("Synchronization time"))
+            .expect("valid Synchronization time");
+    assert!(watermark <= synced_at);
+    assert_ne!(
+        replica["sync"]["ordinary_issues"]["watermark"],
+        "2099-08-07T12:30:00Z"
+    );
     assert_eq!(replica["issues"].as_array().expect("Issues").len(), 2);
     let issue_seven = replica_issue(&replica, 7);
     assert_eq!(issue_seven["state"], "closed");
@@ -84,26 +101,26 @@ fn incremental_sync_upserts_old_and_new_issues_with_every_ordinary_change() {
     );
     assert_eq!(replica_issue(&replica, 10)["title"], "New Issue");
 
-    let second_since = "2026-08-07T12:29:00Z";
+    let second_since = replica_since(&state);
     let reopened = issue_with_classification(
         7,
         "open",
         "Reopened old Issue",
         "Follow-up required",
-        "2026-08-07T13:00:00Z",
+        "2099-08-07T13:00:00Z",
         Vec::new(),
         vec![label("priority:p1", 22)],
     );
     let reopened_issues = mock_issue_delta(
         &mut github,
-        second_since,
+        &second_since,
         None,
         200,
         serde_json::to_string(&vec![reopened]).expect("reopened Issue delta"),
         None,
     );
     let no_new_comments =
-        mock_comment_delta(&mut github, second_since, None, 200, "[]".to_owned(), None);
+        mock_comment_delta(&mut github, &second_since, None, 200, "[]".to_owned(), None);
     let reopened_dependencies = mock_dependencies(&mut github, 7);
 
     let third = sync_command(&state, &github.url())
@@ -145,10 +162,12 @@ fn unchanged_sync_uses_only_safe_query_scoped_conditional_requests() {
         .expect("initial sync");
     assert_success(&first);
     initial.assert();
+    let initial_watermark = replica_watermark(&state);
+    let initial_since = replica_since(&state);
 
     let warm_issues = mock_issue_delta(
         &mut github,
-        INITIAL_SINCE,
+        &initial_since,
         Some(Matcher::Missing),
         200,
         serde_json::to_string(&vec![initial_issue]).expect("overlapped Issue"),
@@ -156,7 +175,7 @@ fn unchanged_sync_uses_only_safe_query_scoped_conditional_requests() {
     );
     let warm_comments = mock_comment_delta(
         &mut github,
-        INITIAL_SINCE,
+        &initial_since,
         Some(Matcher::Missing),
         200,
         "[]".to_owned(),
@@ -172,7 +191,7 @@ fn unchanged_sync_uses_only_safe_query_scoped_conditional_requests() {
 
     let unchanged_issues = mock_issue_delta(
         &mut github,
-        INITIAL_SINCE,
+        &initial_since,
         Some(Matcher::Exact("\"issues-safe-v1\"".into())),
         304,
         String::new(),
@@ -180,7 +199,7 @@ fn unchanged_sync_uses_only_safe_query_scoped_conditional_requests() {
     );
     let unchanged_comments = mock_comment_delta(
         &mut github,
-        INITIAL_SINCE,
+        &initial_since,
         Some(Matcher::Exact("\"comments-safe-v1\"".into())),
         304,
         String::new(),
@@ -199,7 +218,7 @@ fn unchanged_sync_uses_only_safe_query_scoped_conditional_requests() {
     assert_eq!(replica_issue(&replica, 7)["title"], "Stable Issue");
     assert_eq!(
         replica["sync"]["ordinary_issues"]["watermark"],
-        INITIAL_WATERMARK
+        initial_watermark
     );
 }
 
@@ -214,6 +233,7 @@ fn a_paginated_etag_is_not_reused_as_a_global_continuity_signal() {
         .expect("initial sync");
     assert_success(&first);
     initial.assert();
+    let initial_since = replica_since(&state);
 
     let mut pull_request = issue(
         8,
@@ -226,12 +246,13 @@ fn a_paginated_etag_is_not_reused_as_a_global_continuity_signal() {
         "url": "https://api.github.com/repos/acme/widgets/pulls/8"
     });
     let next = format!(
-        "<{}/repos/acme/widgets/issues?state=all&sort=updated&direction=asc&since={INITIAL_SINCE}&per_page=100&page=2>; rel=\"next\"",
-        github.url()
+        "<{}/repos/acme/widgets/issues?state=all&sort=created&direction=asc&since={}&per_page=100&page=2>; rel=\"next\"",
+        github.url(),
+        initial_since
     );
     let paginated_first = github
         .mock("GET", "/repos/acme/widgets/issues")
-        .match_query(delta_query(INITIAL_SINCE))
+        .match_query(support::issue_delta_query(&initial_since, None))
         .match_header("if-none-match", Matcher::Missing)
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -241,21 +262,14 @@ fn a_paginated_etag_is_not_reused_as_a_global_continuity_signal() {
         .create();
     let paginated_second = github
         .mock("GET", "/repos/acme/widgets/issues")
-        .match_query(Matcher::AllOf(vec![
-            Matcher::UrlEncoded("state".into(), "all".into()),
-            Matcher::UrlEncoded("sort".into(), "updated".into()),
-            Matcher::UrlEncoded("direction".into(), "asc".into()),
-            Matcher::UrlEncoded("since".into(), INITIAL_SINCE.into()),
-            Matcher::UrlEncoded("per_page".into(), "100".into()),
-            Matcher::UrlEncoded("page".into(), "2".into()),
-        ]))
+        .match_query(support::issue_delta_query(&initial_since, Some(2)))
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body("[]")
         .create();
     let warm_comments = mock_comment_delta(
         &mut github,
-        INITIAL_SINCE,
+        &initial_since,
         Some(Matcher::Missing),
         200,
         "[]".to_owned(),
@@ -272,7 +286,7 @@ fn a_paginated_etag_is_not_reused_as_a_global_continuity_signal() {
 
     let next_issues = mock_issue_delta(
         &mut github,
-        INITIAL_SINCE,
+        &initial_since,
         Some(Matcher::Missing),
         200,
         serde_json::to_string(&vec![initial_issue]).expect("overlap"),
@@ -280,7 +294,7 @@ fn a_paginated_etag_is_not_reused_as_a_global_continuity_signal() {
     );
     let next_comments = mock_comment_delta(
         &mut github,
-        INITIAL_SINCE,
+        &initial_since,
         Some(Matcher::Exact("\"comments-safe-v1\"".into())),
         304,
         String::new(),
@@ -308,16 +322,18 @@ fn interrupted_incremental_pagination_preserves_the_complete_replica_and_cursor(
         .expect("initial sync");
     assert_success(&first);
     initial.assert();
+    let initial_since = replica_since(&state);
     let replica_path = replica_path(&state);
     let before = fs::read(&replica_path).expect("complete replica");
 
     let next = format!(
-        "<{}/repos/acme/widgets/issues?state=all&sort=updated&direction=asc&since={INITIAL_SINCE}&per_page=100&page=2>; rel=\"next\"",
-        github.url()
+        "<{}/repos/acme/widgets/issues?state=all&sort=created&direction=asc&since={}&per_page=100&page=2>; rel=\"next\"",
+        github.url(),
+        initial_since
     );
     let first_page = github
         .mock("GET", "/repos/acme/widgets/issues")
-        .match_query(delta_query(INITIAL_SINCE))
+        .match_query(support::issue_delta_query(&initial_since, None))
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_header("link", &next)
@@ -334,14 +350,7 @@ fn interrupted_incremental_pagination_preserves_the_complete_replica_and_cursor(
         .create();
     let failed_page = github
         .mock("GET", "/repos/acme/widgets/issues")
-        .match_query(Matcher::AllOf(vec![
-            Matcher::UrlEncoded("state".into(), "all".into()),
-            Matcher::UrlEncoded("sort".into(), "updated".into()),
-            Matcher::UrlEncoded("direction".into(), "asc".into()),
-            Matcher::UrlEncoded("since".into(), INITIAL_SINCE.into()),
-            Matcher::UrlEncoded("per_page".into(), "100".into()),
-            Matcher::UrlEncoded("page".into(), "2".into()),
-        ]))
+        .match_query(support::issue_delta_query(&initial_since, Some(2)))
         .with_status(403)
         .with_header("content-type", "application/json")
         .with_header("x-ratelimit-remaining", "0")
@@ -422,7 +431,7 @@ fn mock_issue_delta(
 ) -> Mock {
     let mut mock = github
         .mock("GET", "/repos/acme/widgets/issues")
-        .match_query(delta_query(since));
+        .match_query(support::issue_delta_query(since, None));
     if let Some(matcher) = if_none_match {
         mock = mock.match_header("if-none-match", matcher);
     }
@@ -443,12 +452,7 @@ fn mock_comment_delta(
 ) -> Mock {
     let mut mock = github
         .mock("GET", "/repos/acme/widgets/issues/comments")
-        .match_query(Matcher::AllOf(vec![
-            Matcher::UrlEncoded("sort".into(), "updated".into()),
-            Matcher::UrlEncoded("direction".into(), "asc".into()),
-            Matcher::UrlEncoded("since".into(), since.into()),
-            Matcher::UrlEncoded("per_page".into(), "100".into()),
-        ]));
+        .match_query(support::comment_delta_query(since, None));
     if let Some(matcher) = if_none_match {
         mock = mock.match_header("if-none-match", matcher);
     }
@@ -470,16 +474,6 @@ fn mock_dependencies(github: &mut Server, issue_number: u64) -> Mock {
         .with_header("content-type", "application/json")
         .with_body("[]")
         .create()
-}
-
-fn delta_query(since: &str) -> Matcher {
-    Matcher::AllOf(vec![
-        Matcher::UrlEncoded("state".into(), "all".into()),
-        Matcher::UrlEncoded("sort".into(), "updated".into()),
-        Matcher::UrlEncoded("direction".into(), "asc".into()),
-        Matcher::UrlEncoded("since".into(), since.into()),
-        Matcher::UrlEncoded("per_page".into(), "100".into()),
-    ])
 }
 
 fn sync_command(state: &TempDir, api_url: &str) -> Command {
@@ -575,6 +569,19 @@ fn replica_path(state: &TempDir) -> std::path::PathBuf {
 fn load_replica(state: &TempDir) -> Value {
     serde_json::from_slice(&fs::read(replica_path(state)).expect("Local replica"))
         .expect("replica JSON")
+}
+
+fn replica_watermark(state: &TempDir) -> String {
+    load_replica(state)["sync"]["ordinary_issues"]["watermark"]
+        .as_str()
+        .expect("ordinary-Issue watermark")
+        .to_owned()
+}
+
+fn replica_since(state: &TempDir) -> String {
+    let watermark = replica_watermark(state);
+    let watermark = DateTime::parse_from_rfc3339(&watermark).expect("valid watermark");
+    (watermark - Duration::minutes(1)).to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
 fn replica_issue(replica: &Value, number: u64) -> &Value {

@@ -1,6 +1,5 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::HashSet;
 
-use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use reqwest::{
     StatusCode,
     blocking::{Client, Response},
@@ -15,8 +14,8 @@ use url::Url;
 use crate::{
     auth::AuthToken,
     model::{
-        Actor, BlockerIdentity, BlockerScope, Comment, Dependency, Issue, IssueIdentity, Label,
-        LocalReplica, OrdinaryIssueCursor, SyncMetadata,
+        Actor, BlockerIdentity, BlockerScope, Comment, Dependency, EntityTag, Issue, IssueIdentity,
+        Label,
     },
     repository::Repository,
 };
@@ -26,12 +25,6 @@ const API_VERSION: &str = "2026-03-10";
 pub(crate) struct GitHubClient {
     client: Client,
     base_url: Url,
-}
-
-pub(crate) struct RepositoryData {
-    pub(crate) issues: Vec<Issue>,
-    pub(crate) dependencies: Vec<Dependency>,
-    pub(crate) sync: SyncMetadata,
 }
 
 impl GitHubClient {
@@ -60,20 +53,10 @@ impl GitHubClient {
         Ok(Self { client, base_url })
     }
 
-    pub(crate) fn fetch_repository(
+    pub(crate) fn fetch_all_issues(
         &self,
         repository: &Repository,
-        previous: Option<&LocalReplica>,
-    ) -> Result<RepositoryData, GitHubError> {
-        if let Some(previous) = previous
-            && let Some(cursor) = previous.sync.ordinary_issues.as_ref()
-        {
-            return self.fetch_incremental(repository, previous, cursor);
-        }
-        self.fetch_full(repository)
-    }
-
-    fn fetch_full(&self, repository: &Repository) -> Result<RepositoryData, GitHubError> {
+    ) -> Result<Vec<Issue>, GitHubError> {
         let owner = repository.owner();
         let repo = repository.name();
         let issue_url = self.endpoint(&format!("repos/{owner}/{repo}/issues"))?;
@@ -87,164 +70,93 @@ impl GitHubClient {
             ],
         )?;
 
-        let mut issues: Vec<Issue> = raw_issues
+        let mut issues: Vec<_> = raw_issues
             .into_iter()
             .filter(|issue| issue.pull_request.is_none())
             .map(GitHubIssue::normalize)
             .collect();
         issues.sort_by_key(|issue| (issue.number, issue.id));
+        Ok(issues)
+    }
 
+    pub(crate) fn fetch_all_comments(
+        &self,
+        repository: &Repository,
+    ) -> Result<Vec<CommentChange>, GitHubError> {
+        let owner = repository.owner();
+        let repo = repository.name();
         let comments_url = self.endpoint(&format!("repos/{owner}/{repo}/issues/comments"))?;
         let raw_comments: Vec<GitHubComment> =
             self.paginate(comments_url, &[("per_page", "100")])?;
-        attach_comments(&mut issues, raw_comments);
-
-        let mut dependencies = BTreeMap::new();
-        for issue in &issues {
-            let dependency_url = self.endpoint(&format!(
-                "repos/{owner}/{repo}/issues/{}/dependencies/blocked_by",
-                issue.number
-            ))?;
-            let blockers: Vec<GitHubBlocker> =
-                self.paginate(dependency_url, &[("per_page", "100")])?;
-            for blocker in blockers {
-                let dependency = normalize_dependency(repository.full_name(), issue, blocker)?;
-                dependencies
-                    .entry(DependencyKey::from(&dependency))
-                    .or_insert(dependency);
-            }
-        }
-
-        let watermark = latest_watermark(&issues)?
-            .unwrap_or_else(|| Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true));
-        Ok(RepositoryData {
-            issues,
-            dependencies: dependencies.into_values().collect(),
-            sync: SyncMetadata {
-                ordinary_issues: Some(OrdinaryIssueCursor {
-                    watermark,
-                    issues_etag: None,
-                    comments_etag: None,
-                }),
-            },
-        })
+        Ok(raw_comments
+            .into_iter()
+            .filter_map(GitHubComment::normalize_change)
+            .collect())
     }
 
-    fn fetch_incremental(
+    pub(crate) fn fetch_issue_delta(
         &self,
         repository: &Repository,
-        previous: &LocalReplica,
-        cursor: &OrdinaryIssueCursor,
-    ) -> Result<RepositoryData, GitHubError> {
+        since: &str,
+        etag: Option<&EntityTag>,
+    ) -> Result<ConditionalPages<Issue>, GitHubError> {
         let owner = repository.owner();
         let repo = repository.name();
-        let since = overlapped_since(&cursor.watermark)?;
-
         let issue_url = self.endpoint(&format!("repos/{owner}/{repo}/issues"))?;
-        let issue_delta: ConditionalPages<GitHubIssue> = self.paginate_conditional(
+        self.paginate_conditional::<GitHubIssue>(
             issue_url,
             &[
                 ("state", "all"),
-                ("sort", "updated"),
+                ("sort", "created"),
                 ("direction", "asc"),
-                ("since", since.as_str()),
+                ("since", since),
                 ("per_page", "100"),
             ],
-            cursor.issues_etag.as_deref(),
-        )?;
+            etag.map(EntityTag::as_str),
+        )
+        .map(|pages| {
+            pages.filter_map(|issue| issue.pull_request.is_none().then(|| issue.normalize()))
+        })
+    }
 
+    pub(crate) fn fetch_comment_delta(
+        &self,
+        repository: &Repository,
+        since: &str,
+        etag: Option<&EntityTag>,
+    ) -> Result<ConditionalPages<CommentChange>, GitHubError> {
+        let owner = repository.owner();
+        let repo = repository.name();
         let comments_url = self.endpoint(&format!("repos/{owner}/{repo}/issues/comments"))?;
-        let comment_delta: ConditionalPages<GitHubComment> = self.paginate_conditional(
+        self.paginate_conditional::<GitHubComment>(
             comments_url,
             &[
-                ("sort", "updated"),
+                ("sort", "created"),
                 ("direction", "asc"),
-                ("since", since.as_str()),
+                ("since", since),
                 ("per_page", "100"),
             ],
-            cursor.comments_etag.as_deref(),
-        )?;
+            etag.map(EntityTag::as_str),
+        )
+        .map(|pages| pages.filter_map(GitHubComment::normalize_change))
+    }
 
-        let mut issues = previous.issues.clone();
-        let mut changed_issue_numbers = BTreeSet::new();
-        let issue_etag = match issue_delta {
-            ConditionalPages::NotModified => cursor.issues_etag.clone(),
-            ConditionalPages::Modified(page) => {
-                for raw in page
-                    .items
-                    .into_iter()
-                    .filter(|issue| issue.pull_request.is_none())
-                {
-                    let mut incoming = raw.normalize();
-                    match issues.iter().position(|issue| issue.id == incoming.id) {
-                        Some(index) => {
-                            incoming.comments = issues[index].comments.clone();
-                            if issues[index] != incoming {
-                                changed_issue_numbers.insert(incoming.number);
-                                issues[index] = incoming;
-                            }
-                        }
-                        None => {
-                            changed_issue_numbers.insert(incoming.number);
-                            issues.push(incoming);
-                        }
-                    }
-                }
-                page.safe_etag
-            }
-        };
-
-        let comments_etag = match comment_delta {
-            ConditionalPages::NotModified => cursor.comments_etag.clone(),
-            ConditionalPages::Modified(page) => {
-                attach_comments(&mut issues, page.items);
-                page.safe_etag
-            }
-        };
-        issues.sort_by_key(|issue| (issue.number, issue.id));
-
-        let mut dependencies: BTreeMap<_, _> = previous
-            .dependencies
-            .iter()
-            .cloned()
-            .map(|dependency| (DependencyKey::from(&dependency), dependency))
-            .collect();
-        for number in &changed_issue_numbers {
-            dependencies.retain(|key, _| key.blocked_number != *number);
-            let issue = issues
-                .iter()
-                .find(|issue| issue.number == *number)
-                .expect("changed Issue remains in the merged inventory");
-            let dependency_url = self.endpoint(&format!(
-                "repos/{owner}/{repo}/issues/{number}/dependencies/blocked_by"
-            ))?;
-            let blockers: Vec<GitHubBlocker> =
-                self.paginate(dependency_url, &[("per_page", "100")])?;
-            for blocker in blockers {
-                let dependency = normalize_dependency(repository.full_name(), issue, blocker)?;
-                dependencies
-                    .entry(DependencyKey::from(&dependency))
-                    .or_insert(dependency);
-            }
-        }
-
-        let watermark = latest_watermark(&issues)?
-            .map(|latest| later_timestamp(&cursor.watermark, &latest))
-            .transpose()?
-            .unwrap_or_else(|| cursor.watermark.clone());
-        let watermark_advanced = watermark != cursor.watermark;
-
-        Ok(RepositoryData {
-            issues,
-            dependencies: dependencies.into_values().collect(),
-            sync: SyncMetadata {
-                ordinary_issues: Some(OrdinaryIssueCursor {
-                    watermark,
-                    issues_etag: (!watermark_advanced).then_some(issue_etag).flatten(),
-                    comments_etag: (!watermark_advanced).then_some(comments_etag).flatten(),
-                }),
-            },
-        })
+    pub(crate) fn fetch_dependencies(
+        &self,
+        repository: &Repository,
+        issue: &Issue,
+    ) -> Result<Vec<Dependency>, GitHubError> {
+        let dependency_url = self.endpoint(&format!(
+            "repos/{}/{}/issues/{}/dependencies/blocked_by",
+            repository.owner(),
+            repository.name(),
+            issue.number
+        ))?;
+        let blockers: Vec<GitHubBlocker> = self.paginate(dependency_url, &[("per_page", "100")])?;
+        blockers
+            .into_iter()
+            .map(|blocker| normalize_dependency(repository.full_name(), issue, blocker))
+            .collect()
     }
 
     fn paginate<T>(&self, url: Url, initial_query: &[(&str, &str)]) -> Result<Vec<T>, GitHubError>
@@ -295,7 +207,7 @@ impl GitHubClient {
                     .headers()
                     .get(ETAG)
                     .and_then(|value| value.to_str().ok())
-                    .map(str::to_owned);
+                    .and_then(EntityTag::parse);
             }
             let (page, next) = self.decode_page(response)?;
             if first_page {
@@ -349,96 +261,31 @@ impl GitHubClient {
     }
 }
 
-enum ConditionalPages<T> {
+pub(crate) enum ConditionalPages<T> {
     NotModified,
     Modified(CompletePages<T>),
 }
 
-struct CompletePages<T> {
-    items: Vec<T>,
-    safe_etag: Option<String>,
-}
-
-fn overlapped_since(watermark: &str) -> Result<String, GitHubError> {
-    let watermark = DateTime::parse_from_rfc3339(watermark)
-        .map_err(|_| GitHubError::InvalidTimestamp(watermark.to_owned()))?;
-    Ok((watermark - Duration::minutes(1)).to_rfc3339_opts(SecondsFormat::Secs, true))
-}
-
-fn latest_watermark(issues: &[Issue]) -> Result<Option<String>, GitHubError> {
-    let timestamps = issues.iter().flat_map(|issue| {
-        std::iter::once(issue.updated_at.as_str()).chain(
-            issue
-                .comments
-                .iter()
-                .map(|comment| comment.updated_at.as_str()),
-        )
-    });
-    let mut latest = None;
-    for value in timestamps {
-        let parsed = DateTime::parse_from_rfc3339(value)
-            .map_err(|_| GitHubError::InvalidTimestamp(value.to_owned()))?;
-        if latest.as_ref().is_none_or(|current| parsed > *current) {
-            latest = Some(parsed);
-        }
-    }
-    Ok(latest.map(|value| value.to_rfc3339_opts(SecondsFormat::Secs, true)))
-}
-
-fn later_timestamp(left: &str, right: &str) -> Result<String, GitHubError> {
-    let left_parsed = DateTime::parse_from_rfc3339(left)
-        .map_err(|_| GitHubError::InvalidTimestamp(left.to_owned()))?;
-    let right_parsed = DateTime::parse_from_rfc3339(right)
-        .map_err(|_| GitHubError::InvalidTimestamp(right.to_owned()))?;
-    Ok(if right_parsed > left_parsed {
-        right.to_owned()
-    } else {
-        left.to_owned()
-    })
-}
-
-#[derive(Eq, Ord, PartialEq, PartialOrd)]
-struct DependencyKey {
-    blocked_number: u64,
-    blocker_repository: String,
-    blocker_number: u64,
-}
-
-impl From<&Dependency> for DependencyKey {
-    fn from(dependency: &Dependency) -> Self {
-        Self {
-            blocked_number: dependency.blocked.number,
-            blocker_repository: dependency.blocker.repository.to_ascii_lowercase(),
-            blocker_number: dependency.blocker.number,
+impl<T> ConditionalPages<T> {
+    fn filter_map<U>(self, map: impl FnMut(T) -> Option<U>) -> ConditionalPages<U> {
+        match self {
+            Self::NotModified => ConditionalPages::NotModified,
+            Self::Modified(page) => ConditionalPages::Modified(CompletePages {
+                items: page.items.into_iter().filter_map(map).collect(),
+                safe_etag: page.safe_etag,
+            }),
         }
     }
 }
 
-fn attach_comments(issues: &mut [Issue], comments: Vec<GitHubComment>) {
-    let by_number: BTreeMap<u64, usize> = issues
-        .iter()
-        .enumerate()
-        .map(|(index, issue)| (issue.number, index))
-        .collect();
+pub(crate) struct CompletePages<T> {
+    pub(crate) items: Vec<T>,
+    pub(crate) safe_etag: Option<EntityTag>,
+}
 
-    for comment in comments {
-        if let Some(number) = issue_number_from_url(&comment.issue_url)
-            && let Some(index) = by_number.get(&number)
-        {
-            let comment = comment.normalize();
-            match issues[*index]
-                .comments
-                .iter()
-                .position(|existing| existing.id == comment.id)
-            {
-                Some(comment_index) => issues[*index].comments[comment_index] = comment,
-                None => issues[*index].comments.push(comment),
-            }
-        }
-    }
-    for issue in issues {
-        issue.comments.sort_by_key(|comment| comment.id);
-    }
+pub(crate) struct CommentChange {
+    pub(crate) issue_number: u64,
+    pub(crate) comment: Comment,
 }
 
 fn issue_number_from_url(value: &str) -> Option<u64> {
@@ -672,6 +519,14 @@ struct GitHubComment {
 }
 
 impl GitHubComment {
+    fn normalize_change(self) -> Option<CommentChange> {
+        let issue_number = issue_number_from_url(&self.issue_url)?;
+        Some(CommentChange {
+            issue_number,
+            comment: self.normalize(),
+        })
+    }
+
     fn normalize(self) -> Comment {
         Comment {
             id: self.id,
@@ -718,8 +573,6 @@ pub(crate) enum GitHubError {
     UnexpectedNotModified,
     #[error("the stored GitHub ETag cannot be represented as an HTTP header")]
     InvalidEtag,
-    #[error("GitHub returned an invalid updated_at timestamp: {0}")]
-    InvalidTimestamp(String),
     #[error("GitHub returned an invalid pagination Link header")]
     InvalidLink,
     #[error("GitHub pagination attempted to revisit a page")]

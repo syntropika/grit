@@ -1,8 +1,11 @@
 use std::{fs, process::Command};
 
+use chrono::{DateTime, Duration, SecondsFormat};
 use mockito::{Matcher, Mock, Server};
 use serde_json::Value;
 use tempfile::TempDir;
+
+mod support;
 
 #[test]
 fn ready_separates_readiness_from_default_and_assignee_execution_scopes() {
@@ -25,13 +28,6 @@ fn ready_separates_readiness_from_default_and_assignee_execution_scopes() {
         dependencies,
         1,
     );
-    let delta_mocks = mock_unchanged_delta(
-        &mut github,
-        "acme/widgets",
-        "2026-07-31T23:59:00Z",
-        issue_inventory().to_owned(),
-    );
-
     let state = TempDir::new().expect("temporary state directory");
     let default = ready_command(&state, &github.url(), None)
         .output()
@@ -56,6 +52,14 @@ fn ready_separates_readiness_from_default_and_assignee_execution_scopes() {
     assert_eq!(default["summary"]["assigned_ready_count"], 1);
     assert_eq!(default["summary"]["blocked_count"], 1);
     assert_eq!(default["warnings"], serde_json::json!([]));
+    mocks.assert();
+
+    let delta_mocks = mock_unchanged_delta(
+        &mut github,
+        "acme/widgets",
+        &replica_since(&state, "acme/widgets"),
+        issue_inventory().to_owned(),
+    );
 
     let assigned = ready_command(&state, &github.url(), Some("alice"))
         .output()
@@ -73,7 +77,6 @@ fn ready_separates_readiness_from_default_and_assignee_execution_scopes() {
     assert_eq!(assigned["issues"][0]["available"], false);
     assert_eq!(assigned["issues"][0]["assignees"][0], "alice");
 
-    mocks.assert();
     delta_mocks.assert();
 }
 
@@ -273,13 +276,7 @@ fn mock_unchanged_delta(
     let issues_path = format!("/repos/{repository}/issues");
     let issues = github
         .mock("GET", issues_path.as_str())
-        .match_query(Matcher::AllOf(vec![
-            Matcher::UrlEncoded("state".into(), "all".into()),
-            Matcher::UrlEncoded("sort".into(), "updated".into()),
-            Matcher::UrlEncoded("direction".into(), "asc".into()),
-            Matcher::UrlEncoded("since".into(), since.into()),
-            Matcher::UrlEncoded("per_page".into(), "100".into()),
-        ]))
+        .match_query(support::issue_delta_query(since, None))
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(issue_inventory)
@@ -288,12 +285,7 @@ fn mock_unchanged_delta(
     let comments_path = format!("/repos/{repository}/issues/comments");
     let comments = github
         .mock("GET", comments_path.as_str())
-        .match_query(Matcher::AllOf(vec![
-            Matcher::UrlEncoded("sort".into(), "updated".into()),
-            Matcher::UrlEncoded("direction".into(), "asc".into()),
-            Matcher::UrlEncoded("since".into(), since.into()),
-            Matcher::UrlEncoded("per_page".into(), "100".into()),
-        ]))
+        .match_query(support::comment_delta_query(since, None))
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body("[]")
@@ -319,6 +311,21 @@ fn ready_command_for(
         .env("GRIT_STATE_DIR", state.path())
         .env("PATH", "");
     command
+}
+
+fn replica_since(state: &TempDir, repository: &str) -> String {
+    let replica_path = state
+        .path()
+        .join("repositories")
+        .join(repository)
+        .join("replica.json");
+    let replica: Value = serde_json::from_slice(&fs::read(replica_path).expect("Local replica"))
+        .expect("replica JSON");
+    let watermark = replica["sync"]["ordinary_issues"]["watermark"]
+        .as_str()
+        .expect("ordinary-Issue watermark");
+    let watermark = DateTime::parse_from_rfc3339(watermark).expect("valid watermark");
+    (watermark - Duration::minutes(1)).to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
 fn issue_numbers(document: &Value) -> Vec<u64> {

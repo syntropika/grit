@@ -5,6 +5,7 @@ mod model;
 mod operational;
 mod repository;
 mod store;
+mod synchronization;
 
 use std::process::ExitCode;
 

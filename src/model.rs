@@ -1,4 +1,5 @@
-use serde::{Deserialize, Serialize};
+use chrono::{DateTime, Duration, FixedOffset, SecondsFormat, Utc};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -48,10 +49,6 @@ impl LocalReplica {
         }
         chrono::DateTime::parse_from_rfc3339(&self.synced_at)
             .map_err(|_| ReplicaError::InvalidSyncedAt)?;
-        if let Some(cursor) = &self.sync.ordinary_issues {
-            chrono::DateTime::parse_from_rfc3339(&cursor.watermark)
-                .map_err(|_| ReplicaError::InvalidOrdinaryIssueWatermark)?;
-        }
         let expected_hash =
             calculate_input_hash(&self.repository, &self.issues, &self.dependencies)?;
         if self.input_hash != expected_hash {
@@ -69,11 +66,89 @@ pub(crate) struct SyncMetadata {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct OrdinaryIssueCursor {
-    pub(crate) watermark: String,
+    pub(crate) watermark: Watermark,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) issues_etag: Option<String>,
+    pub(crate) issues_etag: Option<EntityTag>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) comments_etag: Option<String>,
+    pub(crate) comments_etag: Option<EntityTag>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct Watermark(DateTime<FixedOffset>);
+
+impl Watermark {
+    pub(crate) fn now() -> Self {
+        Self(Utc::now().fixed_offset())
+    }
+
+    pub(crate) fn overlapped_since(&self) -> String {
+        (self.0 - Duration::minutes(1)).to_rfc3339_opts(SecondsFormat::Secs, true)
+    }
+
+    pub(crate) fn later(&self, other: &Self) -> Self {
+        std::cmp::max(self, other).clone()
+    }
+}
+
+impl Serialize for Watermark {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.0.to_rfc3339_opts(SecondsFormat::Millis, true))
+    }
+}
+
+impl<'de> Deserialize<'de> for Watermark {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        DateTime::parse_from_rfc3339(&value)
+            .map(Self)
+            .map_err(|_| de::Error::custom("invalid ordinary-Issue watermark"))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct EntityTag(String);
+
+impl EntityTag {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        let opaque = value.strip_prefix("W/").unwrap_or(value);
+        (value.is_ascii()
+            && opaque.len() >= 2
+            && opaque.starts_with('"')
+            && opaque.ends_with('"')
+            && !opaque[1..opaque.len() - 1]
+                .chars()
+                .any(|character| matches!(character, '\r' | '\n' | '"')))
+        .then(|| Self(value.to_owned()))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Serialize for EntityTag {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for EntityTag {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).ok_or_else(|| de::Error::custom("invalid GitHub ETag"))
+    }
 }
 
 fn calculate_input_hash(
@@ -109,8 +184,6 @@ pub(crate) enum ReplicaError {
     RepositoryMismatch { expected: String, actual: String },
     #[error("Local replica has an invalid synced_at timestamp")]
     InvalidSyncedAt,
-    #[error("Local replica has an invalid ordinary-Issue watermark")]
-    InvalidOrdinaryIssueWatermark,
     #[error("Local replica input_hash does not match its normalized contents")]
     HashMismatch,
 }
