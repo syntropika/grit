@@ -1,0 +1,23 @@
+[package]
+name = "grit"
+version = "0.1.0"
+edition = "2024"
+description = "Graph-ranked Issues and Tasks for GitHub"
+license = "MIT"
+
+[dependencies]
+chrono = { version = "0.4.41", features = ["serde"] }
+clap = { version = "4.5.45", features = ["derive"] }
+directories = "6.0.0"
+hex = "0.4.3"
+reqwest = { version = "0.12.23", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.143"
+sha2 = "0.10.9"
+thiserror = "2.0.16"
+url = "2.5.7"
+
+[dev-dependencies]
+mockito = "1.7.0"
+tempfile = "3.21.0"
+
