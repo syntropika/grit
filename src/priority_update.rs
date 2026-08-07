@@ -3,10 +3,12 @@ use thiserror::Error;
 use crate::{
     github::{GitHubClient, GitHubError},
     model::LocalReplica,
-    priority::{DeclaredPriority, PrioritySelection, PriorityState},
+    outbox::{OutboxError, OutboxStore, PendingMutation},
+    priority::{DeclaredPriority, LogicalPriority, PrioritySelection, PriorityState},
     replica_sync::{self, ReplicaSyncError},
     repository::IssueReference,
     store::{ReplicaStore, StoreError},
+    working_graph::{WorkingGraph, WorkingGraphError},
 };
 
 pub(crate) struct PriorityUpdateResult {
@@ -15,6 +17,17 @@ pub(crate) struct PriorityUpdateResult {
     pub(crate) issue_url: String,
     pub(crate) previous_priority: PriorityState,
     pub(crate) resulting_priority: PriorityState,
+    pub(crate) replica: LocalReplica,
+}
+
+pub(crate) struct PendingPriorityUpdateResult {
+    pub(crate) issue_key: String,
+    pub(crate) issue_number: u64,
+    pub(crate) issue_url: String,
+    pub(crate) previous_priority: PriorityState,
+    pub(crate) resulting_priority: PriorityState,
+    pub(crate) operation: PendingMutation,
+    pub(crate) working_input_hash: String,
     pub(crate) replica: LocalReplica,
 }
 
@@ -111,6 +124,42 @@ pub(crate) fn update(
     })
 }
 
+pub(crate) fn queue(
+    issue: &IssueReference,
+    selection: PrioritySelection,
+) -> Result<PendingPriorityUpdateResult, PendingPriorityUpdateError> {
+    let outbox_store = OutboxStore::discover(issue.repository())?;
+    let transaction = outbox_store.begin_transaction(issue.repository())?;
+    let replica = ReplicaStore::discover(issue.repository())?.load(issue.repository())?;
+    let current_working = WorkingGraph::project(&replica, transaction.outbox())?;
+    let local_issue = replica
+        .issues
+        .iter()
+        .find(|candidate| candidate.number == issue.number())
+        .ok_or_else(|| PendingPriorityUpdateError::MissingIssue(issue.stable_key()))?;
+    let previous_priority = current_working.priority(local_issue);
+    let desired = LogicalPriority::from_selection(selection);
+    let operation = PendingMutation::priority_update(
+        issue.repository(),
+        issue.number(),
+        LogicalPriority::from_state(&previous_priority),
+        desired.clone(),
+    );
+    let next_outbox = transaction.append(issue.repository(), operation.clone())?;
+    let next_working = WorkingGraph::project(&replica, &next_outbox)?;
+
+    Ok(PendingPriorityUpdateResult {
+        issue_key: issue.stable_key(),
+        issue_number: local_issue.number,
+        issue_url: local_issue.url.clone(),
+        previous_priority,
+        resulting_priority: desired.to_state(),
+        operation,
+        working_input_hash: next_working.input_hash().to_owned(),
+        replica,
+    })
+}
+
 fn has_priority(labels: &[crate::model::Label], priority: DeclaredPriority) -> bool {
     labels
         .iter()
@@ -173,4 +222,33 @@ pub(crate) enum PriorityUpdateError {
         "GitHub accepted the Priority update, but the Local replica could not be published: {source}"
     )]
     PublicationAfterMutation { source: StoreError },
+}
+
+impl PriorityUpdateError {
+    pub(crate) fn permits_offline_queue(&self) -> bool {
+        match self {
+            Self::GitHub(source) | Self::PartiallyApplied { source } => {
+                source.permits_offline_queue()
+            }
+            Self::Synchronization { .. }
+            | Self::SynchronizationAfterMutation { .. }
+            | Self::ReadbackMissing(_)
+            | Self::ReadbackMismatch { .. }
+            | Self::LabelsNotPreserved { .. }
+            | Self::Publication { .. }
+            | Self::PublicationAfterMutation { .. } => false,
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum PendingPriorityUpdateError {
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    #[error(transparent)]
+    Outbox(#[from] OutboxError),
+    #[error(transparent)]
+    WorkingGraph(#[from] WorkingGraphError),
+    #[error("cannot queue a Priority update because {0} is absent from the Local replica")]
+    MissingIssue(String),
 }

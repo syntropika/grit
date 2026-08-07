@@ -7,6 +7,7 @@ use super::{
     output::{IssueReference, issue_reference},
 };
 use crate::priority::PriorityComparison;
+use crate::working_graph::{PendingProvenance, WorkingGraph};
 
 #[derive(Serialize)]
 #[serde(tag = "code", rename_all = "snake_case")]
@@ -68,6 +69,8 @@ impl Reason {
 
 #[derive(Serialize)]
 pub(super) struct ComparisonEvidence {
+    #[serde(flatten)]
+    provenance: PendingProvenance,
     reason_code: &'static str,
     component: &'static str,
     winner: IssueReference,
@@ -80,7 +83,8 @@ pub(super) fn evidence(
     decision: DecisiveComparison,
     winner: &EvaluatedCandidate<'_>,
     runner_up: &EvaluatedCandidate<'_>,
-    repository: &str,
+    working: &WorkingGraph<'_>,
+    ranking_provenance_context: &[u64],
 ) -> ComparisonEvidence {
     let (winner_value, runner_up_value) = match decision {
         DecisiveComparison::P0Curve { left, right } => (json!([left]), json!([right])),
@@ -90,11 +94,19 @@ pub(super) fn evidence(
         DecisiveComparison::PageRankBucket { left, right } => (json!(left), json!(right)),
         DecisiveComparison::StableNodeKey { left, right } => (json!(left), json!(right)),
     };
+    let provenance = working.provenance_for_issues(
+        std::iter::once(winner.issue.number)
+            .chain(winner.unlocks.iter().map(|issue| issue.number))
+            .chain(std::iter::once(runner_up.issue.number))
+            .chain(runner_up.unlocks.iter().map(|issue| issue.number))
+            .chain(ranking_provenance_context.iter().copied()),
+    );
     ComparisonEvidence {
+        provenance,
         reason_code: decision.reason_code(),
         component: decision.component(),
-        winner: issue_reference(repository, winner.issue),
-        runner_up: issue_reference(repository, runner_up.issue),
+        winner: issue_reference(working, winner.issue),
+        runner_up: issue_reference(working, runner_up.issue),
         winner_value,
         runner_up_value,
     }
