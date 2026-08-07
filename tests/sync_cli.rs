@@ -46,6 +46,7 @@ fn sync_uses_gh_token_and_reports_a_versioned_snapshot() {
         .with_header("content-type", "application/json")
         .with_body("[]")
         .create();
+    let events = mock_events(&mut github, "acme/widgets", Some("Bearer automation-token"));
 
     let state = TempDir::new().expect("temporary state directory");
     let output = sync_command(&state, &github.url(), "acme/widgets", true)
@@ -81,6 +82,7 @@ fn sync_uses_gh_token_and_reports_a_versioned_snapshot() {
     issues.assert();
     comments.assert();
     dependencies.assert();
+    events.assert();
 }
 
 #[test]
@@ -107,6 +109,7 @@ fn sync_falls_back_to_gh_token_when_gh_session_output_is_invalid() {
         .with_header("content-type", "application/json")
         .with_body("[]")
         .create();
+    let events = mock_events(&mut github, "acme/empty", Some("Bearer fallback-token"));
 
     let state = TempDir::new().expect("temporary state directory");
     let bin = TempDir::new().expect("temporary binary directory");
@@ -128,6 +131,7 @@ fn sync_falls_back_to_gh_token_when_gh_session_output_is_invalid() {
     );
     issues.assert();
     comments.assert();
+    events.assert();
 }
 
 #[test]
@@ -211,6 +215,7 @@ fn sync_paginates_and_persists_only_normalized_issue_data() {
         .with_header("content-type", "application/json")
         .with_body("[]")
         .create();
+    let events = mock_events(&mut github, "acme/widgets", None);
 
     let state = TempDir::new().expect("temporary state directory");
     let output = sync_command(&state, &github.url(), "acme/widgets", true)
@@ -284,6 +289,7 @@ fn sync_paginates_and_persists_only_normalized_issue_data() {
     dependency_page_one.assert();
     dependency_page_two.assert();
     issue_nine_dependencies.assert();
+    events.assert();
 }
 
 #[test]
@@ -319,6 +325,7 @@ fn pagination_failure_preserves_the_previous_complete_replica() {
         .with_header("content-type", "application/json")
         .with_body("[]")
         .create();
+    let initial_events = mock_events(&mut initial_github, "acme/widgets", None);
 
     let initial = sync_command(&state, &initial_github.url(), "acme/widgets", true)
         .output()
@@ -327,6 +334,7 @@ fn pagination_failure_preserves_the_previous_complete_replica() {
     initial_issues.assert();
     initial_comments.assert();
     initial_dependencies.assert();
+    initial_events.assert();
 
     let replica_path = state.path().join("repositories/acme/widgets/replica.json");
     let complete_replica = fs::read(&replica_path).expect("initial complete replica");
@@ -397,6 +405,7 @@ fn sync_reuses_an_available_gh_session_for_human_output() {
         .with_header("content-type", "application/json")
         .with_body("[]")
         .create();
+    let events = mock_events(&mut github, "acme/empty", Some("Bearer gh-session-token"));
 
     let state = TempDir::new().expect("temporary state directory");
     let bin = TempDir::new().expect("temporary binary directory");
@@ -427,6 +436,7 @@ fn sync_reuses_an_available_gh_session_for_human_output() {
     assert!(!stdout.contains("gh-session-token"));
     issues.assert();
     comments.assert();
+    events.assert();
 }
 
 #[test]
@@ -464,6 +474,7 @@ fn sync_rebuilds_a_corrupt_local_replica_when_github_is_available() {
         .with_header("content-type", "application/json")
         .with_body("[]")
         .create();
+    let events = mock_events(&mut github, "acme/widgets", None);
     let state = TempDir::new().expect("temporary state directory");
     let replica_path = state.path().join("repositories/acme/widgets/replica.json");
     fs::create_dir_all(replica_path.parent().expect("replica directory"))
@@ -485,11 +496,13 @@ fn sync_rebuilds_a_corrupt_local_replica_when_github_is_available() {
     assert_eq!(rebuilt["issues"], serde_json::json!([]));
     issues.assert();
     comments.assert();
+    events.assert();
 }
 
 #[test]
 fn rate_limit_failure_is_actionable_and_does_not_publish_a_replica() {
     let mut github = mockito::Server::new();
+    let events = mock_events(&mut github, "acme/widgets", None);
     let limited = github
         .mock("GET", "/repos/acme/widgets/issues")
         .match_query(Matcher::AllOf(vec![
@@ -518,12 +531,14 @@ fn rate_limit_failure_is_actionable_and_does_not_publish_a_replica() {
     assert!(stderr.contains("60"));
     assert!(!stderr.contains("automation-token"));
     assert!(!state.path().join("repositories").exists());
+    events.assert();
     limited.assert();
 }
 
 #[test]
 fn interrupted_response_does_not_publish_a_replica() {
     let mut github = mockito::Server::new();
+    let events = mock_events(&mut github, "acme/widgets", None);
     let interrupted = github
         .mock("GET", "/repos/acme/widgets/issues")
         .match_query(Matcher::AllOf(vec![
@@ -545,6 +560,7 @@ fn interrupted_response_does_not_publish_a_replica() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("invalid JSON"));
     assert!(!state.path().join("repositories").exists());
+    events.assert();
     interrupted.assert();
 }
 
@@ -572,6 +588,27 @@ fn sync_rejects_an_unsafe_api_base_before_authentication() {
         );
         assert!(!state.path().join("repositories").exists());
     }
+}
+
+fn mock_events(
+    github: &mut mockito::Server,
+    repository: &str,
+    authorization: Option<&str>,
+) -> mockito::Mock {
+    let path = format!("/repos/{repository}/issues/events");
+    let mut events = github
+        .mock("GET", path.as_str())
+        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()));
+    if let Some(authorization) = authorization {
+        events = events.match_header("authorization", authorization);
+    }
+    events
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            r#"[{"id":100,"event":"labeled","created_at":"2026-08-01T00:00:00Z","issue":null}]"#,
+        )
+        .create()
 }
 
 fn sync_command(state: &TempDir, api_url: &str, repository: &str, json: bool) -> Command {

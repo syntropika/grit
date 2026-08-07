@@ -1,8 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    github::{CommentChange, ConditionalPages, GitHubClient, GitHubError},
-    model::{Dependency, Issue, LocalReplica, OrdinaryIssueCursor, SyncMetadata, Watermark},
+    dependency_events::{DependencyEvent, RelationshipAction},
+    github::{CommentChange, ConditionalPages, DependencyEventWindow, GitHubClient, GitHubError},
+    model::{
+        BlockerIdentity, BlockerScope, Dependency, DependencyEventCheckpoint, Issue, IssueIdentity,
+        LocalReplica, OrdinaryIssueCursor, SyncMetadata, Watermark,
+    },
     repository::Repository,
 };
 
@@ -19,8 +23,10 @@ pub(crate) fn refresh_repository(
 ) -> Result<RepositoryData, GitHubError> {
     if let Some(previous) = previous
         && let Some(cursor) = previous.sync.ordinary_issues.as_ref()
+        && let Some(dependency_checkpoint) = previous.sync.dependency_events.as_ref()
+        && dependency_checkpoint.latest_event_id.is_some()
     {
-        return refresh_incremental(client, repository, previous, cursor);
+        return refresh_incremental(client, repository, previous, cursor, dependency_checkpoint);
     }
     refresh_full(client, repository)
 }
@@ -30,6 +36,7 @@ fn refresh_full(
     repository: &Repository,
 ) -> Result<RepositoryData, GitHubError> {
     let pass_started_at = Watermark::now();
+    let latest_dependency_event_id = client.fetch_latest_dependency_event_id(repository)?;
     let mut issues = client.fetch_all_issues(repository)?;
     merge_comments(&mut issues, client.fetch_all_comments(repository)?);
 
@@ -40,7 +47,6 @@ fn refresh_full(
             client.fetch_dependencies(repository, issue)?,
         );
     }
-
     Ok(RepositoryData {
         issues,
         dependencies: dependencies.into_values().collect(),
@@ -49,6 +55,9 @@ fn refresh_full(
                 watermark: pass_started_at,
                 issues_etag: None,
                 comments_etag: None,
+            }),
+            dependency_events: Some(DependencyEventCheckpoint {
+                latest_event_id: latest_dependency_event_id,
             }),
         },
     })
@@ -59,6 +68,7 @@ fn refresh_incremental(
     repository: &Repository,
     previous: &LocalReplica,
     cursor: &OrdinaryIssueCursor,
+    dependency_checkpoint: &DependencyEventCheckpoint,
 ) -> Result<RepositoryData, GitHubError> {
     let pass_started_at = Watermark::now();
     let since = cursor.watermark.overlapped_since();
@@ -90,12 +100,9 @@ fn refresh_incremental(
         }
     };
 
-    let (comments_etag, comments_changed) = match comment_delta {
-        ConditionalPages::NotModified => (cursor.comments_etag.clone(), false),
-        ConditionalPages::Modified(page) => {
-            let changed = merge_comments(&mut issues, page.items);
-            (page.safe_etag, changed)
-        }
+    let (comments_etag, comment_changes) = match comment_delta {
+        ConditionalPages::NotModified => (cursor.comments_etag.clone(), Vec::new()),
+        ConditionalPages::Modified(page) => (page.safe_etag, page.items),
     };
     issues.sort_by_key(|issue| (issue.number, issue.id));
 
@@ -117,6 +124,26 @@ fn refresh_incremental(
         );
     }
 
+    let event_window =
+        client.fetch_dependency_event_window(repository, dependency_checkpoint.latest_event_id)?;
+    let (events, next_dependency_checkpoint) = match event_window {
+        DependencyEventWindow::Continuous {
+            events,
+            next_checkpoint,
+        } => (events, next_checkpoint),
+        DependencyEventWindow::Gap => return refresh_full(client, repository),
+    };
+    if apply_dependency_events(client, repository, &mut issues, &mut dependencies, events)?
+        == EventApplication::NeedsFullReconciliation
+    {
+        return refresh_full(client, repository);
+    }
+    let comments_changed = merge_comments(&mut issues, comment_changes);
+    issues.sort_by_key(|issue| (issue.number, issue.id));
+    if client.fetch_issue_count(repository)? != issues.len() as u64 {
+        return refresh_full(client, repository);
+    }
+
     let observed_change = !changed_issue_numbers.is_empty() || comments_changed;
     let watermark = if observed_change {
         cursor.watermark.later(&pass_started_at)
@@ -134,8 +161,131 @@ fn refresh_incremental(
                 issues_etag: (!watermark_advanced).then_some(issue_etag).flatten(),
                 comments_etag: (!watermark_advanced).then_some(comments_etag).flatten(),
             }),
+            dependency_events: Some(DependencyEventCheckpoint {
+                latest_event_id: next_dependency_checkpoint,
+            }),
         },
     })
+}
+
+#[derive(Eq, PartialEq)]
+enum EventApplication {
+    Applied,
+    NeedsFullReconciliation,
+}
+
+fn apply_dependency_events(
+    client: &GitHubClient,
+    repository: &Repository,
+    issues: &mut Vec<Issue>,
+    dependencies: &mut BTreeMap<DependencyKey, Dependency>,
+    events: Vec<DependencyEvent>,
+) -> Result<EventApplication, GitHubError> {
+    let mut mutations = Vec::new();
+    for event in events.into_iter().rev() {
+        match event {
+            DependencyEvent::Mutation(mutation) => mutations.push(mutation),
+            DependencyEvent::Ignored => {}
+            DependencyEvent::ReconcileRequired => {
+                return Ok(EventApplication::NeedsFullReconciliation);
+            }
+        }
+    }
+    for mutation in mutations {
+        let blocked_repository = mutation.blocked.repository.as_str();
+        let blocker_repository = mutation.blocker.repository.as_str();
+        if !blocked_repository.eq_ignore_ascii_case(repository.full_name()) {
+            continue;
+        }
+        if !ensure_internal_issue(
+            client,
+            repository,
+            issues,
+            dependencies,
+            mutation.blocked.number,
+        )? {
+            return Ok(EventApplication::NeedsFullReconciliation);
+        }
+        let blocker_is_internal = blocker_repository.eq_ignore_ascii_case(repository.full_name());
+        if blocker_is_internal
+            && !ensure_internal_issue(
+                client,
+                repository,
+                issues,
+                dependencies,
+                mutation.blocker.number,
+            )?
+        {
+            return Ok(EventApplication::NeedsFullReconciliation);
+        }
+
+        let key = DependencyKey {
+            blocked_number: mutation.blocked.number,
+            blocker_repository: blocker_repository.to_ascii_lowercase(),
+            blocker_number: mutation.blocker.number,
+        };
+        match mutation.action {
+            RelationshipAction::Remove => {
+                dependencies.remove(&key);
+            }
+            RelationshipAction::Add => {
+                let blocked = issues
+                    .iter()
+                    .find(|issue| issue.number == mutation.blocked.number)
+                    .expect("the blocked Issue was fetched before applying its event");
+                let internal_blocker = blocker_is_internal.then(|| {
+                    issues
+                        .iter()
+                        .find(|issue| issue.number == mutation.blocker.number)
+                        .expect("the internal blocker was fetched before applying its event")
+                });
+                dependencies.insert(
+                    key,
+                    Dependency {
+                        blocked: IssueIdentity {
+                            repository: repository.full_name().to_owned(),
+                            number: blocked.number,
+                            id: blocked.id,
+                            node_id: blocked.node_id.clone(),
+                        },
+                        blocker: BlockerIdentity {
+                            repository: blocker_repository.to_owned(),
+                            number: mutation.blocker.number,
+                            state: internal_blocker
+                                .map(|issue| issue.state.clone())
+                                .unwrap_or(mutation.blocker.state),
+                            scope: if blocker_is_internal {
+                                BlockerScope::Internal
+                            } else {
+                                BlockerScope::External
+                            },
+                            id: internal_blocker.map(|issue| issue.id),
+                            node_id: internal_blocker.map(|issue| issue.node_id.clone()),
+                        },
+                    },
+                );
+            }
+        }
+    }
+    Ok(EventApplication::Applied)
+}
+
+fn ensure_internal_issue(
+    client: &GitHubClient,
+    repository: &Repository,
+    issues: &mut Vec<Issue>,
+    dependencies: &mut BTreeMap<DependencyKey, Dependency>,
+    number: u64,
+) -> Result<bool, GitHubError> {
+    if issues.iter().any(|issue| issue.number == number) {
+        return Ok(true);
+    }
+    let Some(issue) = client.fetch_issue(repository, number)? else {
+        return Ok(false);
+    };
+    insert_dependencies(dependencies, client.fetch_dependencies(repository, &issue)?);
+    issues.push(issue);
+    Ok(true)
 }
 
 fn merge_comments(issues: &mut [Issue], comments: Vec<CommentChange>) -> bool {

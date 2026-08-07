@@ -8,11 +8,13 @@ use reqwest::{
     },
 };
 use serde::{Deserialize, de::DeserializeOwned};
+use serde_json::json;
 use thiserror::Error;
 use url::Url;
 
 use crate::{
     auth::AuthToken,
+    dependency_events::{DependencyEvent, RawEvent, RawIssueReference},
     model::{
         Actor, BlockerIdentity, BlockerScope, Comment, Dependency, EntityTag, Issue, IssueIdentity,
         Label,
@@ -159,13 +161,175 @@ impl GitHubClient {
             .collect()
     }
 
+    pub(crate) fn fetch_issue(
+        &self,
+        repository: &Repository,
+        number: u64,
+    ) -> Result<Option<Issue>, GitHubError> {
+        let url = self.endpoint(&format!(
+            "repos/{}/{}/issues/{number}",
+            repository.owner(),
+            repository.name()
+        ))?;
+        let response = self.client.get(url).send().map_err(GitHubError::Request)?;
+        if matches!(response.status(), StatusCode::NOT_FOUND | StatusCode::GONE) {
+            return Ok(None);
+        }
+        let status = response.status();
+        if !status.is_success() {
+            return Err(api_status_error(status, response.headers()));
+        }
+        let issue: GitHubIssue = response.json().map_err(GitHubError::Decode)?;
+        if issue.pull_request.is_some() {
+            return Ok(None);
+        }
+        let mut issue = issue.normalize();
+        let comments_url = self.endpoint(&format!(
+            "repos/{}/{}/issues/{number}/comments",
+            repository.owner(),
+            repository.name()
+        ))?;
+        let comments: Vec<GitHubComment> = self.paginate(comments_url, &[("per_page", "100")])?;
+        issue.comments = comments.into_iter().map(GitHubComment::normalize).collect();
+        issue.comments.sort_by_key(|comment| comment.id);
+        Ok(Some(issue))
+    }
+
+    pub(crate) fn fetch_dependency_event_window(
+        &self,
+        repository: &Repository,
+        checkpoint: Option<u64>,
+    ) -> Result<DependencyEventWindow, GitHubError> {
+        let url = self.endpoint(&format!(
+            "repos/{}/{}/issues/events",
+            repository.owner(),
+            repository.name()
+        ))?;
+        let mut event_ids = HashSet::new();
+        let mut events = Vec::new();
+        let mut checkpoint_found = checkpoint.is_none();
+        let mut next_checkpoint = checkpoint;
+        self.walk_pages(
+            url,
+            &[("per_page", "100")],
+            |page: Vec<GitHubIssueEvent>| {
+                for event in page {
+                    if Some(event.id) == checkpoint {
+                        checkpoint_found = true;
+                        return Ok(PageFlow::Stop);
+                    }
+                    if event_ids.insert(event.id) {
+                        if next_checkpoint == checkpoint {
+                            next_checkpoint = Some(event.id);
+                        }
+                        events.push(event.normalize(repository.full_name())?);
+                    }
+                }
+                Ok(PageFlow::Continue)
+            },
+        )?;
+
+        if checkpoint_found {
+            Ok(DependencyEventWindow::Continuous {
+                events,
+                next_checkpoint,
+            })
+        } else {
+            Ok(DependencyEventWindow::Gap)
+        }
+    }
+
+    pub(crate) fn fetch_latest_dependency_event_id(
+        &self,
+        repository: &Repository,
+    ) -> Result<Option<u64>, GitHubError> {
+        let url = self.endpoint(&format!(
+            "repos/{}/{}/issues/events",
+            repository.owner(),
+            repository.name()
+        ))?;
+        let mut latest = None;
+        self.walk_pages(
+            url,
+            &[("per_page", "100")],
+            |events: Vec<GitHubEventIdentity>| {
+                latest = events.first().map(|event| event.id);
+                Ok(PageFlow::Stop)
+            },
+        )?;
+        Ok(latest)
+    }
+
+    pub(crate) fn fetch_issue_count(&self, repository: &Repository) -> Result<u64, GitHubError> {
+        let response = self
+            .client
+            .post(self.graphql_endpoint())
+            .json(&json!({
+                "query": "query IssueInventoryCount($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { issues(first: 1) { totalCount } } }",
+                "variables": {
+                    "owner": repository.owner(),
+                    "name": repository.name()
+                }
+            }))
+            .send()
+            .map_err(GitHubError::Request)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(api_status_error(status, response.headers()));
+        }
+        let payload: GitHubIssueCountResponse = response.json().map_err(GitHubError::Decode)?;
+        if !payload.errors.is_empty() {
+            return Err(GitHubError::GraphQl);
+        }
+        payload
+            .data
+            .and_then(|data| data.repository)
+            .map(|repository| repository.issues.total_count)
+            .ok_or(GitHubError::GraphQl)
+    }
+
     fn paginate<T>(&self, url: Url, initial_query: &[(&str, &str)]) -> Result<Vec<T>, GitHubError>
     where
         T: DeserializeOwned,
     {
-        match self.paginate_conditional(url, initial_query, None)? {
-            ConditionalPages::Modified(page) => Ok(page.items),
-            ConditionalPages::NotModified => Err(GitHubError::UnexpectedNotModified),
+        let mut results = Vec::new();
+        self.walk_pages(url, initial_query, |page| {
+            results.extend(page);
+            Ok(PageFlow::Continue)
+        })?;
+        Ok(results)
+    }
+
+    fn walk_pages<T>(
+        &self,
+        mut url: Url,
+        initial_query: &[(&str, &str)],
+        mut visit: impl FnMut(Vec<T>) -> Result<PageFlow, GitHubError>,
+    ) -> Result<(), GitHubError>
+    where
+        T: DeserializeOwned,
+    {
+        url.query_pairs_mut()
+            .extend_pairs(initial_query.iter().copied());
+        let mut visited = HashSet::new();
+        loop {
+            if !visited.insert(url.as_str().to_owned()) {
+                return Err(GitHubError::PaginationLoop);
+            }
+            self.require_same_origin(&url)?;
+            let response = self
+                .client
+                .get(url.clone())
+                .send()
+                .map_err(GitHubError::Request)?;
+            let (page, next) = self.decode_page(response)?;
+            if visit(page)? == PageFlow::Stop {
+                return Ok(());
+            }
+            match next {
+                Some(next) => url = next,
+                None => return Ok(()),
+            }
         }
     }
 
@@ -250,6 +414,18 @@ impl GitHubClient {
             .map_err(|source| GitHubError::InvalidUrl { source })
     }
 
+    fn graphql_endpoint(&self) -> Url {
+        let mut endpoint = self.base_url.clone();
+        let base_path = endpoint.path().trim_end_matches('/');
+        let path = match base_path.strip_suffix("/api/v3") {
+            Some(prefix) => format!("{prefix}/api/graphql"),
+            None if base_path.is_empty() => "/graphql".to_owned(),
+            None => format!("{base_path}/graphql"),
+        };
+        endpoint.set_path(&path);
+        endpoint
+    }
+
     fn require_same_origin(&self, candidate: &Url) -> Result<(), GitHubError> {
         if self.base_url.scheme() != candidate.scheme()
             || self.base_url.host_str() != candidate.host_str()
@@ -264,6 +440,12 @@ impl GitHubClient {
 pub(crate) enum ConditionalPages<T> {
     NotModified,
     Modified(CompletePages<T>),
+}
+
+#[derive(Eq, PartialEq)]
+enum PageFlow {
+    Continue,
+    Stop,
 }
 
 impl<T> ConditionalPages<T> {
@@ -286,6 +468,14 @@ pub(crate) struct CompletePages<T> {
 pub(crate) struct CommentChange {
     pub(crate) issue_number: u64,
     pub(crate) comment: Comment,
+}
+
+pub(crate) enum DependencyEventWindow {
+    Continuous {
+        events: Vec<DependencyEvent>,
+        next_checkpoint: Option<u64>,
+    },
+    Gap,
 }
 
 fn issue_number_from_url(value: &str) -> Option<u64> {
@@ -550,6 +740,94 @@ struct GitHubBlocker {
     state: String,
 }
 
+#[derive(Deserialize)]
+struct GitHubIssueEvent {
+    id: u64,
+    event: String,
+    created_at: String,
+    issue: Option<GitHubEventIssueReference>,
+    blocked_by: Option<GitHubEventIssueReference>,
+    blocking: Option<GitHubEventIssueReference>,
+}
+
+#[derive(Deserialize)]
+struct GitHubEventIdentity {
+    id: u64,
+}
+
+impl GitHubIssueEvent {
+    fn normalize(self, repository: &str) -> Result<DependencyEvent, GitHubError> {
+        Ok(DependencyEvent::classify(RawEvent {
+            kind: self.event,
+            created_at: self.created_at,
+            issue: self
+                .issue
+                .map(|issue| issue.normalize(Some(repository)))
+                .transpose()?,
+            blocked_by: self
+                .blocked_by
+                .map(|issue| issue.normalize(None))
+                .transpose()?,
+            blocking: self
+                .blocking
+                .map(|issue| issue.normalize(None))
+                .transpose()?,
+        }))
+    }
+}
+
+#[derive(Deserialize)]
+struct GitHubEventIssueReference {
+    number: u64,
+    #[serde(default)]
+    state: String,
+    repository: Option<GitHubEventRepository>,
+    repository_url: Option<String>,
+}
+
+impl GitHubEventIssueReference {
+    fn normalize(self, default_repository: Option<&str>) -> Result<RawIssueReference, GitHubError> {
+        let repository = match (self.repository, self.repository_url) {
+            (Some(repository), _) => Some(repository.full_name),
+            (None, Some(url)) => Some(repository_from_api_url(&url)?),
+            (None, None) => default_repository.map(str::to_owned),
+        };
+        Ok(RawIssueReference {
+            repository,
+            number: self.number,
+            state: self.state,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct GitHubEventRepository {
+    full_name: String,
+}
+
+#[derive(Deserialize)]
+struct GitHubIssueCountResponse {
+    data: Option<GitHubIssueCountData>,
+    #[serde(default)]
+    errors: Vec<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct GitHubIssueCountData {
+    repository: Option<GitHubIssueCountRepository>,
+}
+
+#[derive(Deserialize)]
+struct GitHubIssueCountRepository {
+    issues: GitHubIssueCountConnection,
+}
+
+#[derive(Deserialize)]
+struct GitHubIssueCountConnection {
+    #[serde(rename = "totalCount")]
+    total_count: u64,
+}
+
 #[derive(Debug, Error)]
 pub(crate) enum GitHubError {
     #[error("the GitHub token cannot be represented as an HTTP header")]
@@ -569,8 +847,6 @@ pub(crate) enum GitHubError {
     },
     #[error("GitHub returned invalid JSON for a paginated response: {0}")]
     Decode(reqwest::Error),
-    #[error("GitHub returned 304 Not Modified without a scoped conditional request")]
-    UnexpectedNotModified,
     #[error("the stored GitHub ETag cannot be represented as an HTTP header")]
     InvalidEtag,
     #[error("GitHub returned an invalid pagination Link header")]
@@ -583,4 +859,6 @@ pub(crate) enum GitHubError {
     InvalidUrl { source: url::ParseError },
     #[error("a dependency contained an invalid repository URL")]
     InvalidRepositoryUrl,
+    #[error("GitHub GraphQL did not return the Repository Issue count")]
+    GraphQl,
 }
