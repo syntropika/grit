@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use crate::repository::IssueReference;
+
 pub(crate) const REPLICA_SCHEMA_VERSION: &str = "grit.local-replica/v1";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -50,6 +52,25 @@ impl LocalReplica {
             return Err(ReplicaError::HashMismatch);
         }
         Ok(())
+    }
+
+    pub(crate) fn has_dependency(
+        &self,
+        blocked: &IssueReference,
+        blocker: &IssueReference,
+    ) -> bool {
+        self.dependencies.iter().any(|dependency| {
+            dependency
+                .blocked
+                .repository
+                .eq_ignore_ascii_case(blocked.repository().full_name())
+                && dependency.blocked.number == blocked.number()
+                && dependency
+                    .blocker
+                    .repository
+                    .eq_ignore_ascii_case(blocker.repository().full_name())
+                && dependency.blocker.number == blocker.number()
+        })
     }
 }
 
