@@ -330,14 +330,18 @@ fn pagination_failure_preserves_the_previous_complete_replica() {
 
     let mut failing_github = mockito::Server::new();
     let next = format!(
-        "<{}/repos/acme/widgets/issues?state=all&sort=created&direction=asc&per_page=100&page=2>; rel=\"next\"",
+        "<{}/repos/acme/widgets/issues?state=all&sort=updated&direction=asc&since=2026-08-02T10:59:00Z&per_page=100&page=2>; rel=\"next\"",
         failing_github.url()
     );
     let first_page = failing_github
         .mock("GET", "/repos/acme/widgets/issues")
-        .match_query(Matcher::Exact(
-            "state=all&sort=created&direction=asc&per_page=100".into(),
-        ))
+        .match_query(Matcher::AllOf(vec![
+            Matcher::UrlEncoded("state".into(), "all".into()),
+            Matcher::UrlEncoded("sort".into(), "updated".into()),
+            Matcher::UrlEncoded("direction".into(), "asc".into()),
+            Matcher::UrlEncoded("since".into(), "2026-08-02T10:59:00Z".into()),
+            Matcher::UrlEncoded("per_page".into(), "100".into()),
+        ]))
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_header("link", &next)
@@ -345,9 +349,14 @@ fn pagination_failure_preserves_the_previous_complete_replica() {
         .create();
     let failed_page = failing_github
         .mock("GET", "/repos/acme/widgets/issues")
-        .match_query(Matcher::Exact(
-            "state=all&sort=created&direction=asc&per_page=100&page=2".into(),
-        ))
+        .match_query(Matcher::AllOf(vec![
+            Matcher::UrlEncoded("state".into(), "all".into()),
+            Matcher::UrlEncoded("sort".into(), "updated".into()),
+            Matcher::UrlEncoded("direction".into(), "asc".into()),
+            Matcher::UrlEncoded("since".into(), "2026-08-02T10:59:00Z".into()),
+            Matcher::UrlEncoded("per_page".into(), "100".into()),
+            Matcher::UrlEncoded("page".into(), "2".into()),
+        ]))
         .with_status(500)
         .with_header("content-type", "application/json")
         .with_body("{\"message\":\"temporary failure\"}")

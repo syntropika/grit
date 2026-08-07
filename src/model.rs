@@ -4,20 +4,23 @@ use thiserror::Error;
 
 pub(crate) const REPLICA_SCHEMA_VERSION: &str = "grit.local-replica/v1";
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct LocalReplica {
     pub(crate) schema_version: String,
     pub(crate) repository: String,
     pub(crate) synced_at: String,
     pub(crate) input_hash: String,
+    #[serde(default)]
+    pub(crate) sync: SyncMetadata,
     pub(crate) issues: Vec<Issue>,
     pub(crate) dependencies: Vec<Dependency>,
 }
 
 impl LocalReplica {
-    pub(crate) fn build(
+    pub(crate) fn build_with_sync(
         repository: String,
         synced_at: String,
+        sync: SyncMetadata,
         issues: Vec<Issue>,
         dependencies: Vec<Dependency>,
     ) -> Result<Self, ReplicaError> {
@@ -27,6 +30,7 @@ impl LocalReplica {
             repository,
             synced_at,
             input_hash,
+            sync,
             issues,
             dependencies,
         })
@@ -44,6 +48,10 @@ impl LocalReplica {
         }
         chrono::DateTime::parse_from_rfc3339(&self.synced_at)
             .map_err(|_| ReplicaError::InvalidSyncedAt)?;
+        if let Some(cursor) = &self.sync.ordinary_issues {
+            chrono::DateTime::parse_from_rfc3339(&cursor.watermark)
+                .map_err(|_| ReplicaError::InvalidOrdinaryIssueWatermark)?;
+        }
         let expected_hash =
             calculate_input_hash(&self.repository, &self.issues, &self.dependencies)?;
         if self.input_hash != expected_hash {
@@ -51,6 +59,21 @@ impl LocalReplica {
         }
         Ok(())
     }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct SyncMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) ordinary_issues: Option<OrdinaryIssueCursor>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct OrdinaryIssueCursor {
+    pub(crate) watermark: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) issues_etag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) comments_etag: Option<String>,
 }
 
 fn calculate_input_hash(
@@ -86,11 +109,13 @@ pub(crate) enum ReplicaError {
     RepositoryMismatch { expected: String, actual: String },
     #[error("Local replica has an invalid synced_at timestamp")]
     InvalidSyncedAt,
+    #[error("Local replica has an invalid ordinary-Issue watermark")]
+    InvalidOrdinaryIssueWatermark,
     #[error("Local replica input_hash does not match its normalized contents")]
     HashMismatch,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct Issue {
     pub(crate) id: u64,
     pub(crate) node_id: String,
@@ -125,7 +150,7 @@ pub(crate) struct Label {
     pub(crate) description: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct Comment {
     pub(crate) id: u64,
     pub(crate) node_id: String,
@@ -137,13 +162,13 @@ pub(crate) struct Comment {
     pub(crate) updated_at: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct Dependency {
     pub(crate) blocked: IssueIdentity,
     pub(crate) blocker: BlockerIdentity,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct IssueIdentity {
     pub(crate) repository: String,
     pub(crate) number: u64,
@@ -151,7 +176,7 @@ pub(crate) struct IssueIdentity {
     pub(crate) node_id: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct BlockerIdentity {
     pub(crate) repository: String,
     pub(crate) number: u64,
@@ -163,7 +188,7 @@ pub(crate) struct BlockerIdentity {
     pub(crate) node_id: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum BlockerScope {
     Internal,

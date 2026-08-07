@@ -1,9 +1,12 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
+use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use reqwest::{
     StatusCode,
     blocking::{Client, Response},
-    header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, LINK, USER_AGENT},
+    header::{
+        ACCEPT, AUTHORIZATION, ETAG, HeaderMap, HeaderValue, IF_NONE_MATCH, LINK, USER_AGENT,
+    },
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use thiserror::Error;
@@ -13,6 +16,7 @@ use crate::{
     auth::AuthToken,
     model::{
         Actor, BlockerIdentity, BlockerScope, Comment, Dependency, Issue, IssueIdentity, Label,
+        LocalReplica, OrdinaryIssueCursor, SyncMetadata,
     },
     repository::Repository,
 };
@@ -27,6 +31,7 @@ pub(crate) struct GitHubClient {
 pub(crate) struct RepositoryData {
     pub(crate) issues: Vec<Issue>,
     pub(crate) dependencies: Vec<Dependency>,
+    pub(crate) sync: SyncMetadata,
 }
 
 impl GitHubClient {
@@ -58,7 +63,17 @@ impl GitHubClient {
     pub(crate) fn fetch_repository(
         &self,
         repository: &Repository,
+        previous: Option<&LocalReplica>,
     ) -> Result<RepositoryData, GitHubError> {
+        if let Some(previous) = previous
+            && let Some(cursor) = previous.sync.ordinary_issues.as_ref()
+        {
+            return self.fetch_incremental(repository, previous, cursor);
+        }
+        self.fetch_full(repository)
+    }
+
+    fn fetch_full(&self, repository: &Repository) -> Result<RepositoryData, GitHubError> {
         let owner = repository.owner();
         let repo = repository.name();
         let issue_url = self.endpoint(&format!("repos/{owner}/{repo}/issues"))?;
@@ -100,17 +115,154 @@ impl GitHubClient {
             }
         }
 
+        let watermark = latest_watermark(&issues)?
+            .unwrap_or_else(|| Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true));
         Ok(RepositoryData {
             issues,
             dependencies: dependencies.into_values().collect(),
+            sync: SyncMetadata {
+                ordinary_issues: Some(OrdinaryIssueCursor {
+                    watermark,
+                    issues_etag: None,
+                    comments_etag: None,
+                }),
+            },
         })
     }
 
-    fn paginate<T>(
+    fn fetch_incremental(
+        &self,
+        repository: &Repository,
+        previous: &LocalReplica,
+        cursor: &OrdinaryIssueCursor,
+    ) -> Result<RepositoryData, GitHubError> {
+        let owner = repository.owner();
+        let repo = repository.name();
+        let since = overlapped_since(&cursor.watermark)?;
+
+        let issue_url = self.endpoint(&format!("repos/{owner}/{repo}/issues"))?;
+        let issue_delta: ConditionalPages<GitHubIssue> = self.paginate_conditional(
+            issue_url,
+            &[
+                ("state", "all"),
+                ("sort", "updated"),
+                ("direction", "asc"),
+                ("since", since.as_str()),
+                ("per_page", "100"),
+            ],
+            cursor.issues_etag.as_deref(),
+        )?;
+
+        let comments_url = self.endpoint(&format!("repos/{owner}/{repo}/issues/comments"))?;
+        let comment_delta: ConditionalPages<GitHubComment> = self.paginate_conditional(
+            comments_url,
+            &[
+                ("sort", "updated"),
+                ("direction", "asc"),
+                ("since", since.as_str()),
+                ("per_page", "100"),
+            ],
+            cursor.comments_etag.as_deref(),
+        )?;
+
+        let mut issues = previous.issues.clone();
+        let mut changed_issue_numbers = BTreeSet::new();
+        let issue_etag = match issue_delta {
+            ConditionalPages::NotModified => cursor.issues_etag.clone(),
+            ConditionalPages::Modified(page) => {
+                for raw in page
+                    .items
+                    .into_iter()
+                    .filter(|issue| issue.pull_request.is_none())
+                {
+                    let mut incoming = raw.normalize();
+                    match issues.iter().position(|issue| issue.id == incoming.id) {
+                        Some(index) => {
+                            incoming.comments = issues[index].comments.clone();
+                            if issues[index] != incoming {
+                                changed_issue_numbers.insert(incoming.number);
+                                issues[index] = incoming;
+                            }
+                        }
+                        None => {
+                            changed_issue_numbers.insert(incoming.number);
+                            issues.push(incoming);
+                        }
+                    }
+                }
+                page.safe_etag
+            }
+        };
+
+        let comments_etag = match comment_delta {
+            ConditionalPages::NotModified => cursor.comments_etag.clone(),
+            ConditionalPages::Modified(page) => {
+                attach_comments(&mut issues, page.items);
+                page.safe_etag
+            }
+        };
+        issues.sort_by_key(|issue| (issue.number, issue.id));
+
+        let mut dependencies: BTreeMap<_, _> = previous
+            .dependencies
+            .iter()
+            .cloned()
+            .map(|dependency| (DependencyKey::from(&dependency), dependency))
+            .collect();
+        for number in &changed_issue_numbers {
+            dependencies.retain(|key, _| key.blocked_number != *number);
+            let issue = issues
+                .iter()
+                .find(|issue| issue.number == *number)
+                .expect("changed Issue remains in the merged inventory");
+            let dependency_url = self.endpoint(&format!(
+                "repos/{owner}/{repo}/issues/{number}/dependencies/blocked_by"
+            ))?;
+            let blockers: Vec<GitHubBlocker> =
+                self.paginate(dependency_url, &[("per_page", "100")])?;
+            for blocker in blockers {
+                let dependency = normalize_dependency(repository.full_name(), issue, blocker)?;
+                dependencies
+                    .entry(DependencyKey::from(&dependency))
+                    .or_insert(dependency);
+            }
+        }
+
+        let watermark = latest_watermark(&issues)?
+            .map(|latest| later_timestamp(&cursor.watermark, &latest))
+            .transpose()?
+            .unwrap_or_else(|| cursor.watermark.clone());
+        let watermark_advanced = watermark != cursor.watermark;
+
+        Ok(RepositoryData {
+            issues,
+            dependencies: dependencies.into_values().collect(),
+            sync: SyncMetadata {
+                ordinary_issues: Some(OrdinaryIssueCursor {
+                    watermark,
+                    issues_etag: (!watermark_advanced).then_some(issue_etag).flatten(),
+                    comments_etag: (!watermark_advanced).then_some(comments_etag).flatten(),
+                }),
+            },
+        })
+    }
+
+    fn paginate<T>(&self, url: Url, initial_query: &[(&str, &str)]) -> Result<Vec<T>, GitHubError>
+    where
+        T: DeserializeOwned,
+    {
+        match self.paginate_conditional(url, initial_query, None)? {
+            ConditionalPages::Modified(page) => Ok(page.items),
+            ConditionalPages::NotModified => Err(GitHubError::UnexpectedNotModified),
+        }
+    }
+
+    fn paginate_conditional<T>(
         &self,
         mut url: Url,
         initial_query: &[(&str, &str)],
-    ) -> Result<Vec<T>, GitHubError>
+        etag: Option<&str>,
+    ) -> Result<ConditionalPages<T>, GitHubError>
     where
         T: DeserializeOwned,
     {
@@ -118,23 +270,50 @@ impl GitHubClient {
             .extend_pairs(initial_query.iter().copied());
         let mut results = Vec::new();
         let mut visited = HashSet::new();
+        let mut first_response_etag = None;
+        let mut first_page_len = 0;
+        let mut first_page_had_next = false;
 
         loop {
+            let first_page = visited.is_empty();
             if !visited.insert(url.as_str().to_owned()) {
                 return Err(GitHubError::PaginationLoop);
             }
             self.require_same_origin(&url)?;
 
-            let response = self
-                .client
-                .get(url.clone())
-                .send()
-                .map_err(GitHubError::Request)?;
+            let mut request = self.client.get(url.clone());
+            if first_page && let Some(etag) = etag {
+                let value = HeaderValue::from_str(etag).map_err(|_| GitHubError::InvalidEtag)?;
+                request = request.header(IF_NONE_MATCH, value);
+            }
+            let response = request.send().map_err(GitHubError::Request)?;
+            if first_page && etag.is_some() && response.status() == StatusCode::NOT_MODIFIED {
+                return Ok(ConditionalPages::NotModified);
+            }
+            if first_page {
+                first_response_etag = response
+                    .headers()
+                    .get(ETAG)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned);
+            }
             let (page, next) = self.decode_page(response)?;
+            if first_page {
+                first_page_len = page.len();
+                first_page_had_next = next.is_some();
+            }
             results.extend(page);
             match next {
                 Some(next) => url = next,
-                None => return Ok(results),
+                None => {
+                    let safe_etag = (!first_page_had_next && first_page_len < 100)
+                        .then_some(first_response_etag)
+                        .flatten();
+                    return Ok(ConditionalPages::Modified(CompletePages {
+                        items: results,
+                        safe_etag,
+                    }));
+                }
             }
         }
     }
@@ -170,6 +349,54 @@ impl GitHubClient {
     }
 }
 
+enum ConditionalPages<T> {
+    NotModified,
+    Modified(CompletePages<T>),
+}
+
+struct CompletePages<T> {
+    items: Vec<T>,
+    safe_etag: Option<String>,
+}
+
+fn overlapped_since(watermark: &str) -> Result<String, GitHubError> {
+    let watermark = DateTime::parse_from_rfc3339(watermark)
+        .map_err(|_| GitHubError::InvalidTimestamp(watermark.to_owned()))?;
+    Ok((watermark - Duration::minutes(1)).to_rfc3339_opts(SecondsFormat::Secs, true))
+}
+
+fn latest_watermark(issues: &[Issue]) -> Result<Option<String>, GitHubError> {
+    let timestamps = issues.iter().flat_map(|issue| {
+        std::iter::once(issue.updated_at.as_str()).chain(
+            issue
+                .comments
+                .iter()
+                .map(|comment| comment.updated_at.as_str()),
+        )
+    });
+    let mut latest = None;
+    for value in timestamps {
+        let parsed = DateTime::parse_from_rfc3339(value)
+            .map_err(|_| GitHubError::InvalidTimestamp(value.to_owned()))?;
+        if latest.as_ref().is_none_or(|current| parsed > *current) {
+            latest = Some(parsed);
+        }
+    }
+    Ok(latest.map(|value| value.to_rfc3339_opts(SecondsFormat::Secs, true)))
+}
+
+fn later_timestamp(left: &str, right: &str) -> Result<String, GitHubError> {
+    let left_parsed = DateTime::parse_from_rfc3339(left)
+        .map_err(|_| GitHubError::InvalidTimestamp(left.to_owned()))?;
+    let right_parsed = DateTime::parse_from_rfc3339(right)
+        .map_err(|_| GitHubError::InvalidTimestamp(right.to_owned()))?;
+    Ok(if right_parsed > left_parsed {
+        right.to_owned()
+    } else {
+        left.to_owned()
+    })
+}
+
 #[derive(Eq, Ord, PartialEq, PartialOrd)]
 struct DependencyKey {
     blocked_number: u64,
@@ -198,7 +425,15 @@ fn attach_comments(issues: &mut [Issue], comments: Vec<GitHubComment>) {
         if let Some(number) = issue_number_from_url(&comment.issue_url)
             && let Some(index) = by_number.get(&number)
         {
-            issues[*index].comments.push(comment.normalize());
+            let comment = comment.normalize();
+            match issues[*index]
+                .comments
+                .iter()
+                .position(|existing| existing.id == comment.id)
+            {
+                Some(comment_index) => issues[*index].comments[comment_index] = comment,
+                None => issues[*index].comments.push(comment),
+            }
         }
     }
     for issue in issues {
@@ -479,6 +714,12 @@ pub(crate) enum GitHubError {
     },
     #[error("GitHub returned invalid JSON for a paginated response: {0}")]
     Decode(reqwest::Error),
+    #[error("GitHub returned 304 Not Modified without a scoped conditional request")]
+    UnexpectedNotModified,
+    #[error("the stored GitHub ETag cannot be represented as an HTTP header")]
+    InvalidEtag,
+    #[error("GitHub returned an invalid updated_at timestamp: {0}")]
+    InvalidTimestamp(String),
     #[error("GitHub returned an invalid pagination Link header")]
     InvalidLink,
     #[error("GitHub pagination attempted to revisit a page")]

@@ -23,7 +23,13 @@ fn ready_separates_readiness_from_default_and_assignee_execution_scopes() {
         "acme/widgets",
         issue_inventory().to_owned(),
         dependencies,
-        2,
+        1,
+    );
+    let delta_mocks = mock_unchanged_delta(
+        &mut github,
+        "acme/widgets",
+        "2026-07-31T23:59:00Z",
+        issue_inventory().to_owned(),
     );
 
     let state = TempDir::new().expect("temporary state directory");
@@ -68,6 +74,7 @@ fn ready_separates_readiness_from_default_and_assignee_execution_scopes() {
     assert_eq!(assigned["issues"][0]["assignees"][0], "alice");
 
     mocks.assert();
+    delta_mocks.assert();
 }
 
 #[test]
@@ -181,6 +188,18 @@ struct RepositoryMocks {
     dependencies: Vec<Mock>,
 }
 
+struct DeltaMocks {
+    issues: Mock,
+    comments: Mock,
+}
+
+impl DeltaMocks {
+    fn assert(self) {
+        self.issues.assert();
+        self.comments.assert();
+    }
+}
+
 impl RepositoryMocks {
     fn assert(self) {
         self.issues.assert();
@@ -243,6 +262,44 @@ fn mock_repository(
         comments,
         dependencies,
     }
+}
+
+fn mock_unchanged_delta(
+    github: &mut Server,
+    repository: &str,
+    since: &str,
+    issue_inventory: String,
+) -> DeltaMocks {
+    let issues_path = format!("/repos/{repository}/issues");
+    let issues = github
+        .mock("GET", issues_path.as_str())
+        .match_query(Matcher::AllOf(vec![
+            Matcher::UrlEncoded("state".into(), "all".into()),
+            Matcher::UrlEncoded("sort".into(), "updated".into()),
+            Matcher::UrlEncoded("direction".into(), "asc".into()),
+            Matcher::UrlEncoded("since".into(), since.into()),
+            Matcher::UrlEncoded("per_page".into(), "100".into()),
+        ]))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(issue_inventory)
+        .create();
+
+    let comments_path = format!("/repos/{repository}/issues/comments");
+    let comments = github
+        .mock("GET", comments_path.as_str())
+        .match_query(Matcher::AllOf(vec![
+            Matcher::UrlEncoded("sort".into(), "updated".into()),
+            Matcher::UrlEncoded("direction".into(), "asc".into()),
+            Matcher::UrlEncoded("since".into(), since.into()),
+            Matcher::UrlEncoded("per_page".into(), "100".into()),
+        ]))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("[]")
+        .create();
+
+    DeltaMocks { issues, comments }
 }
 
 fn ready_command_for(

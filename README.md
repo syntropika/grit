@@ -4,10 +4,11 @@ Grit treats the Issues and native Dependencies in one GitHub Repository as a
 graph. GitHub remains the source of truth; Grit keeps a disposable Local
 replica so later analysis can be fast and work offline.
 
-The current executable tracer implements full synchronization and Executable
-frontier enumeration from
+The current executable tracer implements full and incremental synchronization
+plus Executable frontier enumeration from
 [Issue #2](https://github.com/syntropika/grit/issues/2) and
-[Issue #3](https://github.com/syntropika/grit/issues/3).
+[Issue #3](https://github.com/syntropika/grit/issues/3), with ordinary Issue
+deltas from [Issue #4](https://github.com/syntropika/grit/issues/4).
 
 ## Build and test
 
@@ -38,11 +39,18 @@ Set `GRIT_STATE_DIR` to isolate it, for example in CI. `GRIT_GITHUB_API_URL`
 and `GRIT_GITHUB_HOST` support GitHub Enterprise and deterministic test
 servers; the API URL must be a credential-free HTTP(S) base URL.
 
-A synchronization retrieves every page of Issues and Repository Issue
+The first synchronization retrieves every page of Issues and Repository Issue
 comments, then the native `blocked_by` Dependencies for each Issue. Pull
-Requests returned by the Issues endpoint are excluded. Grit writes only a
-normalized model and atomically replaces the previous valid replica after the
-entire load succeeds.
+Requests returned by the Issues endpoint are excluded. Later runs request
+ordinary Issue and comment changes from an overlapped `updated_at` watermark,
+upsert them by stable GitHub identity, and refresh Dependencies only for Issues
+whose ordinary fields changed. A scoped ETag is reused only when the preceding
+delta proved that the complete representation fit in fewer than 100 items; it
+is never treated as a Repository-wide continuity guarantee.
+
+Grit writes only a normalized model and atomically replaces the previous valid
+replica after every required page has completed. A failed or rate-limited delta
+leaves the prior replica, internal watermark, and visible `synced_at` intact.
 
 The replica file format and location below `GRIT_STATE_DIR` are implementation
 details. Consumers should use Grit's versioned command output rather than read
