@@ -21,7 +21,9 @@ native-Dependency changes from
 recoverable Draft Issues from
 [Issue #26](https://github.com/syntropika/grit/issues/26). Title, body, state,
 and assignment edits use field-aware Pending mutations from
-[Issue #28](https://github.com/syntropika/grit/issues/28).
+[Issue #28](https://github.com/syntropika/grit/issues/28). Generic labels and
+parent/sub-Issue relationships use idempotent set mutations from
+[Issue #29](https://github.com/syntropika/grit/issues/29).
 
 ## Build and test
 
@@ -188,6 +190,32 @@ still matches its base, treats the desired remote value as already satisfied,
 and exposes incompatible base/local/remote values as a conflict. Resolve a
 conflict explicitly with `grit resolve OPERATION --repo OWNER/REPO --local` or
 `--remote`; resolution always performs a fresh GitHub read before any write.
+
+## Change generic labels and parent relationships
+
+Generic labels use independent add/remove set semantics:
+
+```bash
+grit label OWNER/REPO#42 --add area:backend
+grit label OWNER/REPO#42 --remove risk:high
+```
+
+Canonical `priority:p0` through `priority:p4` labels are rejected here; change
+them only through `grit update ISSUE --priority`. Both generic-label commands
+accept Draft keys and project Pending changes without editing the Local
+replica.
+
+Parent relationships use a separate sub-Issue command:
+
+```bash
+grit sub-issue OWNER/REPO#10 --add OWNER/REPO#42
+grit sub-issue OWNER/REPO#10 --remove OWNER/REPO#42
+```
+
+The first reference is the parent. Grit queues unresolved Draft identities and
+replays the relationship after GitHub assigns their Issue IDs. Parent/sub-Issue
+relationships are decomposition metadata: they are never projected as
+Dependencies and do not affect readiness or ranking topology.
 
 ## Change native Dependencies
 

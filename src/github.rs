@@ -14,7 +14,7 @@ use crate::{
     issue_field::{IssueField, IssueFieldValue},
     model::{
         Actor, BlockerIdentity, BlockerScope, Comment, Dependency, DependencyEdgeKey, Issue,
-        IssueIdentity, Label,
+        IssueIdentity, Label, SetPresence,
     },
     operation_marker,
     repository::{IssueReference, Repository},
@@ -90,6 +90,15 @@ impl DependencyIntent {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum DependencyChange {
     Created,
+    AlreadyPresent,
+    Removed,
+    AlreadyAbsent,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MetadataChange {
+    Added,
     AlreadyPresent,
     Removed,
     AlreadyAbsent,
@@ -410,7 +419,7 @@ impl GitHubClient {
             .json(&AddIssueLabelsRequest { labels: &labels })
             .send()
             .map_err(|source| GitHubError::MutationUncertain {
-                operation: "adding the requested Priority label",
+                operation: "adding the requested Issue label",
                 source,
             })?;
         let status = response.status();
@@ -420,7 +429,7 @@ impl GitHubClient {
         Err(mutation_status_error(
             status,
             response.headers(),
-            "adding the requested Priority label",
+            "adding the requested Issue label",
         ))
     }
 
@@ -443,7 +452,7 @@ impl GitHubClient {
                 .delete(url)
                 .send()
                 .map_err(|source| GitHubError::MutationUncertain {
-                    operation: "removing an obsolete Priority label",
+                    operation: "removing the requested Issue label",
                     source,
                 })?;
         let status = response.status();
@@ -453,8 +462,166 @@ impl GitHubClient {
         Err(mutation_status_error(
             status,
             response.headers(),
-            "removing an obsolete Priority label",
+            "removing the requested Issue label",
         ))
+    }
+
+    pub(crate) fn mutate_generic_label(
+        &self,
+        issue: &IssueReference,
+        label: &crate::metadata::GenericLabel,
+        desired: SetPresence,
+    ) -> Result<MetadataChange, GitHubError> {
+        let remote = self.fetch_issue(issue.repository(), issue.number())?;
+        let remote_label = remote
+            .labels
+            .iter()
+            .find(|candidate| label.matches(&candidate.name));
+        let present = remote_label.is_some();
+        if present == desired.is_present() {
+            return Ok(if present {
+                MetadataChange::AlreadyPresent
+            } else {
+                MetadataChange::AlreadyAbsent
+            });
+        }
+        let result = if desired.is_present() {
+            self.add_issue_label(issue.repository(), issue.number(), label.as_str())
+        } else {
+            self.remove_issue_label(
+                issue.repository(),
+                issue.number(),
+                &remote_label
+                    .expect("a removal is attempted only for an observed label")
+                    .name,
+            )
+        };
+        match result {
+            Ok(()) => Ok(if desired.is_present() {
+                MetadataChange::Added
+            } else {
+                MetadataChange::Removed
+            }),
+            Err(error) => {
+                let readback = self.fetch_issue(issue.repository(), issue.number())?;
+                let now_present = readback
+                    .labels
+                    .iter()
+                    .any(|candidate| label.matches(&candidate.name));
+                if now_present == desired.is_present() {
+                    Ok(if now_present {
+                        MetadataChange::AlreadyPresent
+                    } else {
+                        MetadataChange::AlreadyAbsent
+                    })
+                } else {
+                    Err(error)
+                }
+            }
+        }
+    }
+
+    pub(crate) fn mutate_parent_relationship(
+        &self,
+        parent: &IssueReference,
+        child: &IssueReference,
+        desired: SetPresence,
+    ) -> Result<MetadataChange, GitHubError> {
+        let child_id = self.fetch_issue_id(child)?;
+        let present = self.sub_issue_exists(parent, child_id)?;
+        if present == desired.is_present() {
+            return Ok(if present {
+                MetadataChange::AlreadyPresent
+            } else {
+                MetadataChange::AlreadyAbsent
+            });
+        }
+        match self.set_parent_relationship(parent, child_id, desired) {
+            Ok(change) => Ok(change),
+            Err(error) => {
+                if self.sub_issue_exists(parent, child_id)? == desired.is_present() {
+                    Ok(if desired.is_present() {
+                        MetadataChange::AlreadyPresent
+                    } else {
+                        MetadataChange::AlreadyAbsent
+                    })
+                } else {
+                    Err(error)
+                }
+            }
+        }
+    }
+
+    pub(crate) fn set_parent_relationship(
+        &self,
+        parent: &IssueReference,
+        child_id: u64,
+        desired: SetPresence,
+    ) -> Result<MetadataChange, GitHubError> {
+        let url = self.endpoint(&format!(
+            "repos/{}/{}/issues/{}/{}",
+            parent.repository().owner(),
+            parent.repository().name(),
+            parent.number(),
+            if desired.is_present() {
+                "sub_issues"
+            } else {
+                "sub_issue"
+            }
+        ))?;
+        let request = if desired.is_present() {
+            self.client.post(url)
+        } else {
+            self.client.delete(url)
+        };
+        let response = request
+            .json(&SubIssueRequest {
+                sub_issue_id: child_id,
+            })
+            .send()
+            .map_err(|source| GitHubError::MutationUncertain {
+                operation: "changing the parent/sub-Issue relationship",
+                source,
+            })?;
+        if response.status().is_success() {
+            return Ok(if desired.is_present() {
+                MetadataChange::Added
+            } else {
+                MetadataChange::Removed
+            });
+        }
+        let error = mutation_status_error(
+            response.status(),
+            response.headers(),
+            "changing the parent/sub-Issue relationship",
+        );
+        Err(error)
+    }
+
+    pub(crate) fn sub_issue_exists(
+        &self,
+        parent: &IssueReference,
+        child_id: u64,
+    ) -> Result<bool, GitHubError> {
+        Ok(self.sub_issue_ids(parent)?.contains(&child_id))
+    }
+
+    pub(crate) fn sub_issue_ids(
+        &self,
+        parent: &IssueReference,
+    ) -> Result<BTreeSet<u64>, GitHubError> {
+        let url = self.endpoint(&format!(
+            "repos/{}/{}/issues/{}/sub_issues",
+            parent.repository().owner(),
+            parent.repository().name(),
+            parent.number()
+        ))?;
+        let sub_issues: Vec<GitHubIssueLocator> = self.paginate(url, &[("per_page", "100")])?;
+        Ok(sub_issues
+            .iter()
+            .filter(|candidate| candidate.pull_request.is_none())
+            .map(|candidate| candidate.id)
+            .collect())
     }
 
     pub(crate) fn mutate_dependency(
@@ -978,6 +1145,11 @@ struct GitHubBlocker {
 #[derive(Serialize)]
 struct AddDependency {
     issue_id: u64,
+}
+
+#[derive(Serialize)]
+struct SubIssueRequest {
+    sub_issue_id: u64,
 }
 
 #[derive(Debug, Error)]
