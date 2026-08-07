@@ -16,11 +16,13 @@ use crate::{
     },
     repository::{Repository, RepositoryError},
     store::{ReplicaStore, StoreError},
+    triage::{self, TriageReport},
 };
 
 const SYNC_SCHEMA_VERSION: &str = "grit.sync/v1";
 const READY_SCHEMA_VERSION: &str = "grit.ready/v1";
 const INIT_SCHEMA_VERSION: &str = "grit.init/v1";
+const TRIAGE_SCHEMA_VERSION: &str = "grit.triage/v1";
 
 #[derive(Parser)]
 #[command(name = "grit", version, about)]
@@ -31,6 +33,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Surface actionable operational graph problems.
+    Triage {
+        /// Repository in OWNER/REPO form.
+        #[arg(long)]
+        repo: String,
+        /// Evaluate execution-scope membership for this GitHub login.
+        #[arg(long)]
+        assignee: Option<String>,
+        /// Emit versioned machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
     /// Create any missing canonical Priority labels.
     Init {
         /// Repository in OWNER/REPO form.
@@ -66,6 +80,11 @@ enum Command {
 pub(crate) fn execute() -> Result<(), CliError> {
     let cli = Cli::parse();
     match cli.command {
+        Command::Triage {
+            repo,
+            assignee,
+            json,
+        } => triage_command(&Repository::parse(&repo)?, assignee.as_deref(), json),
         Command::Init { repo, json } => initialize(&Repository::parse(&repo)?, json),
         Command::Sync { repo, json } => sync(&Repository::parse(&repo)?, json),
         Command::Ready {
@@ -120,6 +139,53 @@ fn initialize(repository: &Repository, json: bool) -> Result<(), CliError> {
             output.created_labels.join(", "),
             repository.full_name()
         );
+    }
+    Ok(())
+}
+
+fn triage_command(
+    repository: &Repository,
+    assignee: Option<&str>,
+    json: bool,
+) -> Result<(), CliError> {
+    let (replica, source) = refresh_or_local(repository)?;
+    let scope = assignee
+        .map(ExecutionScope::Assignee)
+        .unwrap_or(ExecutionScope::Available);
+    let report = triage::analyze(&replica, scope);
+    let warnings: Vec<_> = source.warning().into_iter().collect();
+    if json {
+        let output = TriageOutput {
+            schema_version: TRIAGE_SCHEMA_VERSION,
+            command: "triage",
+            repository: &replica.repository,
+            source,
+            synced_at: &replica.synced_at,
+            input_hash: &replica.input_hash,
+            execution_scope: execution_scope_output(assignee),
+            report,
+            warnings,
+        };
+        serde_json::to_writer(std::io::stdout().lock(), &output).map_err(CliError::EncodeOutput)?;
+        println!();
+    } else {
+        println!(
+            "Triage diagnostics in {} (scope {}, synced_at {}):",
+            replica.repository,
+            execution_scope_name(assignee),
+            replica.synced_at
+        );
+        let lines = report.human_lines();
+        if lines.is_empty() {
+            println!("No actionable graph problems");
+        } else {
+            for line in lines {
+                println!("{line}");
+            }
+        }
+        for warning in warnings {
+            eprintln!("warning: {}", warning.message);
+        }
     }
     Ok(())
 }
@@ -193,21 +259,7 @@ fn print_sync_result(replica: &LocalReplica, json: bool) -> Result<(), CliError>
 }
 
 fn ready(repository: &Repository, assignee: Option<&str>, json: bool) -> Result<(), CliError> {
-    let (replica, source) = match synchronize(repository) {
-        Ok(replica) => (replica, ReplicaSource::Live),
-        Err(refresh_error) => {
-            let store = ReplicaStore::discover(repository)?;
-            match store.load(repository) {
-                Ok(replica) => (replica, ReplicaSource::LocalFallback),
-                Err(replica_error) => {
-                    return Err(CliError::RefreshAndReplicaUnavailable {
-                        refresh: refresh_error.to_string(),
-                        replica: replica_error.to_string(),
-                    });
-                }
-            }
-        }
-    };
+    let (replica, source) = refresh_or_local(repository)?;
     let scope = assignee
         .map(ExecutionScope::Assignee)
         .unwrap_or(ExecutionScope::Available);
@@ -272,16 +324,7 @@ fn ready(repository: &Repository, assignee: Option<&str>, json: bool) -> Result<
         source,
         synced_at: &replica.synced_at,
         input_hash: &replica.input_hash,
-        execution_scope: match assignee {
-            Some(assignee) => ExecutionScopeOutput {
-                mode: "assignee",
-                assignee: Some(assignee),
-            },
-            None => ExecutionScopeOutput {
-                mode: "available",
-                assignee: None,
-            },
-        },
+        execution_scope: execution_scope_output(assignee),
         issues,
         summary: ReadySummary {
             operational_issue_count: analysis.operational_issue_count,
@@ -321,6 +364,41 @@ fn ready(repository: &Repository, assignee: Option<&str>, json: bool) -> Result<
         }
     }
     Ok(())
+}
+
+fn refresh_or_local(repository: &Repository) -> Result<(LocalReplica, ReplicaSource), CliError> {
+    match synchronize(repository) {
+        Ok(replica) => Ok((replica, ReplicaSource::Live)),
+        Err(refresh_error) => {
+            let store = ReplicaStore::discover(repository)?;
+            match store.load(repository) {
+                Ok(replica) => Ok((replica, ReplicaSource::LocalFallback)),
+                Err(replica_error) => Err(CliError::RefreshAndReplicaUnavailable {
+                    refresh: refresh_error.to_string(),
+                    replica: replica_error.to_string(),
+                }),
+            }
+        }
+    }
+}
+
+fn execution_scope_output(assignee: Option<&str>) -> ExecutionScopeOutput<'_> {
+    match assignee {
+        Some(assignee) => ExecutionScopeOutput {
+            mode: "assignee",
+            assignee: Some(assignee),
+        },
+        None => ExecutionScopeOutput {
+            mode: "available",
+            assignee: None,
+        },
+    }
+}
+
+fn execution_scope_name(assignee: Option<&str>) -> String {
+    assignee
+        .map(|assignee| format!("assignee:{assignee}"))
+        .unwrap_or_else(|| "available".to_owned())
 }
 
 fn api_base_url() -> Result<Url, CliError> {
@@ -369,6 +447,20 @@ struct InitOutput<'a> {
     repository: &'a str,
     created_labels: Vec<String>,
     already_present: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct TriageOutput<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    repository: &'a str,
+    source: ReplicaSource,
+    synced_at: &'a str,
+    input_hash: &'a str,
+    execution_scope: ExecutionScopeOutput<'a>,
+    #[serde(flatten)]
+    report: TriageReport,
+    warnings: Vec<ReadyWarning>,
 }
 
 #[derive(Serialize)]

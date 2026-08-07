@@ -6,6 +6,7 @@ mod operational;
 mod priority;
 mod repository;
 mod store;
+mod triage;
 
 use std::process::ExitCode;
 

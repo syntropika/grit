@@ -209,7 +209,7 @@ pub(crate) struct BlockerIdentity {
     pub(crate) node_id: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum BlockerScope {
     Internal,
