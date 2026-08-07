@@ -15,6 +15,7 @@ use thiserror::Error;
 use crate::{
     atomic_file::{self, AtomicFileError},
     draft_identity::DraftIdentity,
+    issue_field::{IssueField, IssueFieldValue},
     model::{DependencyEdgeKey, DependencyPresence, TemporaryIssueId},
     priority::LogicalPriority,
     repository::Repository,
@@ -79,6 +80,19 @@ impl PendingMutationOutbox {
             {
                 return Err(OutboxError::InvalidDraftIssue(operation.id().to_owned()));
             }
+            if let Some(update) = operation.issue_field_update_view()
+                && (!update.base.matches_field(update.field)
+                    || !update.desired.matches_field(update.field)
+                    || !update.base.is_canonical()
+                    || !update.desired.is_canonical()
+                    || update.state.remote_value().is_some_and(|remote| {
+                        !remote.matches_field(update.field) || !remote.is_canonical()
+                    }))
+            {
+                return Err(OutboxError::InvalidIssueFieldUpdate(
+                    operation.id().to_owned(),
+                ));
+            }
             if operation
                 .priority_values()
                 .is_some_and(|(_, desired)| matches!(desired, LogicalPriority::Conflict { .. }))
@@ -133,6 +147,22 @@ impl PendingMutationOutbox {
             })
             .map(PendingMutation::id)
     }
+
+    pub(crate) fn latest_field_operation_for_issue(
+        &self,
+        issue_number: u64,
+        field: IssueField,
+    ) -> Option<&str> {
+        self.operations
+            .iter()
+            .rev()
+            .find(|operation| {
+                operation.issue_field_update_view().is_some_and(|update| {
+                    update.issue_number == issue_number && update.field == field
+                })
+            })
+            .map(PendingMutation::id)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -176,6 +206,16 @@ enum MutationPayload {
         #[serde(default, skip_serializing_if = "DependencyMutationState::is_pending")]
         state: DependencyMutationState,
     },
+    IssueFieldUpdate {
+        issue_number: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        temporary_id: Option<TemporaryIssueId>,
+        field: IssueField,
+        base: IssueFieldValue,
+        desired: IssueFieldValue,
+        #[serde(default, skip_serializing_if = "IssueFieldMutationState::is_pending")]
+        state: IssueFieldMutationState,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -183,6 +223,7 @@ pub(crate) enum MutationKind {
     IssueCreate,
     PriorityUpdate,
     DependencyUpdate,
+    IssueFieldUpdate,
 }
 
 pub(crate) struct IssueCreateView<'a> {
@@ -193,6 +234,37 @@ pub(crate) struct IssueCreateView<'a> {
     pub(crate) created_at: &'a str,
     pub(crate) marker: &'a str,
     pub(crate) state: &'a IssueCreateState,
+}
+
+pub(crate) struct IssueFieldUpdateView<'a> {
+    pub(crate) issue_number: u64,
+    pub(crate) temporary_id: Option<TemporaryIssueId>,
+    pub(crate) field: IssueField,
+    pub(crate) base: &'a IssueFieldValue,
+    pub(crate) desired: &'a IssueFieldValue,
+    pub(crate) state: &'a IssueFieldMutationState,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum MutationPhase {
+    Pending,
+    InFlight,
+    Conflicting,
+    Succeeded,
+    Failed,
+    Blocked,
+}
+
+trait MutationLifecycle {
+    fn phase(&self) -> MutationPhase;
+
+    fn is_pending(&self) -> bool {
+        self.phase() == MutationPhase::Pending
+    }
+
+    fn is_successfully_terminal(&self) -> bool {
+        self.phase() == MutationPhase::Succeeded
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -218,6 +290,54 @@ impl IssueCreateState {
 
     fn permits_dependents(&self) -> bool {
         matches!(self, Self::Mapped { .. })
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub(crate) enum IssueFieldMutationState {
+    #[default]
+    Pending,
+    Conflicting {
+        remote: IssueFieldValue,
+    },
+    Applied,
+    AlreadySatisfied,
+    ResolvedRemote {
+        remote: IssueFieldValue,
+    },
+    Failed {
+        error: String,
+    },
+    TransitivelyBlocked {
+        blocked_by: Vec<String>,
+    },
+}
+
+impl IssueFieldMutationState {
+    fn remote_value(&self) -> Option<&IssueFieldValue> {
+        match self {
+            Self::Conflicting { remote } | Self::ResolvedRemote { remote } => Some(remote),
+            Self::Pending
+            | Self::Applied
+            | Self::AlreadySatisfied
+            | Self::Failed { .. }
+            | Self::TransitivelyBlocked { .. } => None,
+        }
+    }
+}
+
+impl MutationLifecycle for IssueFieldMutationState {
+    fn phase(&self) -> MutationPhase {
+        match self {
+            Self::Pending => MutationPhase::Pending,
+            Self::Conflicting { .. } => MutationPhase::Conflicting,
+            Self::Applied | Self::AlreadySatisfied | Self::ResolvedRemote { .. } => {
+                MutationPhase::Succeeded
+            }
+            Self::Failed { .. } => MutationPhase::Failed,
+            Self::TransitivelyBlocked { .. } => MutationPhase::Blocked,
+        }
     }
 }
 
@@ -249,15 +369,23 @@ pub(crate) enum PriorityMutationState {
 }
 
 impl PriorityMutationState {
-    fn is_pending(&self) -> bool {
-        matches!(self, Self::Pending)
-    }
-
     pub(crate) fn is_successfully_terminal(&self) -> bool {
-        matches!(
-            self,
-            Self::Applied | Self::AlreadySatisfied | Self::ResolvedRemote { .. }
-        )
+        MutationLifecycle::is_successfully_terminal(self)
+    }
+}
+
+impl MutationLifecycle for PriorityMutationState {
+    fn phase(&self) -> MutationPhase {
+        match self {
+            Self::Pending => MutationPhase::Pending,
+            Self::Conflicting { .. } => MutationPhase::Conflicting,
+            Self::Applying { .. } => MutationPhase::InFlight,
+            Self::Applied | Self::AlreadySatisfied | Self::ResolvedRemote { .. } => {
+                MutationPhase::Succeeded
+            }
+            Self::Failed { .. } => MutationPhase::Failed,
+            Self::TransitivelyBlocked { .. } => MutationPhase::Blocked,
+        }
     }
 }
 
@@ -280,13 +408,15 @@ pub(crate) enum DependencyMutationState {
     },
 }
 
-impl DependencyMutationState {
-    fn is_pending(&self) -> bool {
-        matches!(self, Self::Pending)
-    }
-
-    fn is_successfully_terminal(&self) -> bool {
-        matches!(self, Self::Applied | Self::AlreadySatisfied)
+impl MutationLifecycle for DependencyMutationState {
+    fn phase(&self) -> MutationPhase {
+        match self {
+            Self::Pending => MutationPhase::Pending,
+            Self::Applying { .. } => MutationPhase::InFlight,
+            Self::Applied | Self::AlreadySatisfied => MutationPhase::Succeeded,
+            Self::Failed { .. } => MutationPhase::Failed,
+            Self::TransitivelyBlocked { .. } => MutationPhase::Blocked,
+        }
     }
 }
 
@@ -404,6 +534,31 @@ impl PendingMutation {
         }
     }
 
+    pub(crate) fn issue_field_update(
+        repository: &Repository,
+        issue_number: u64,
+        temporary_id: Option<TemporaryIssueId>,
+        field: IssueField,
+        base: IssueFieldValue,
+        desired: IssueFieldValue,
+        depends_on: Vec<String>,
+    ) -> Self {
+        Self {
+            header: MutationHeader {
+                id: new_operation_id(repository, issue_number),
+                depends_on,
+            },
+            payload: MutationPayload::IssueFieldUpdate {
+                issue_number,
+                temporary_id,
+                field,
+                base,
+                desired,
+                state: IssueFieldMutationState::Pending,
+            },
+        }
+    }
+
     pub(crate) fn id(&self) -> &str {
         &self.header.id
     }
@@ -413,6 +568,7 @@ impl PendingMutation {
             MutationPayload::IssueCreate { .. } => MutationKind::IssueCreate,
             MutationPayload::PriorityUpdate { .. } => MutationKind::PriorityUpdate,
             MutationPayload::DependencyUpdate { .. } => MutationKind::DependencyUpdate,
+            MutationPayload::IssueFieldUpdate { .. } => MutationKind::IssueFieldUpdate,
         }
     }
 
@@ -428,6 +584,7 @@ impl PendingMutation {
             },
             MutationPayload::PriorityUpdate { issue_number, .. } => *issue_number,
             MutationPayload::DependencyUpdate { edge, .. } => edge.blocked_number(),
+            MutationPayload::IssueFieldUpdate { issue_number, .. } => *issue_number,
         }
     }
 
@@ -442,20 +599,25 @@ impl PendingMutation {
                 }
                 affected
             }
+            MutationPayload::IssueFieldUpdate { issue_number, .. } => vec![*issue_number],
         }
     }
 
     pub(crate) fn priority_values(&self) -> Option<(&LogicalPriority, &LogicalPriority)> {
         match &self.payload {
             MutationPayload::PriorityUpdate { base, desired, .. } => Some((base, desired)),
-            MutationPayload::IssueCreate { .. } | MutationPayload::DependencyUpdate { .. } => None,
+            MutationPayload::IssueCreate { .. }
+            | MutationPayload::DependencyUpdate { .. }
+            | MutationPayload::IssueFieldUpdate { .. } => None,
         }
     }
 
     pub(crate) fn dependency_values(&self) -> Option<(&DependencyEdgeKey, DependencyPresence)> {
         match &self.payload {
             MutationPayload::DependencyUpdate { edge, desired, .. } => Some((edge, *desired)),
-            MutationPayload::IssueCreate { .. } | MutationPayload::PriorityUpdate { .. } => None,
+            MutationPayload::IssueCreate { .. }
+            | MutationPayload::PriorityUpdate { .. }
+            | MutationPayload::IssueFieldUpdate { .. } => None,
         }
     }
 
@@ -466,23 +628,27 @@ impl PendingMutation {
     pub(crate) fn priority_state(&self) -> Option<&PriorityMutationState> {
         match &self.payload {
             MutationPayload::PriorityUpdate { state, .. } => Some(state),
-            MutationPayload::IssueCreate { .. } | MutationPayload::DependencyUpdate { .. } => None,
+            MutationPayload::IssueCreate { .. }
+            | MutationPayload::DependencyUpdate { .. }
+            | MutationPayload::IssueFieldUpdate { .. } => None,
         }
     }
 
     pub(crate) fn dependency_state(&self) -> Option<&DependencyMutationState> {
         match &self.payload {
             MutationPayload::DependencyUpdate { state, .. } => Some(state),
-            MutationPayload::IssueCreate { .. } | MutationPayload::PriorityUpdate { .. } => None,
+            MutationPayload::IssueCreate { .. }
+            | MutationPayload::PriorityUpdate { .. }
+            | MutationPayload::IssueFieldUpdate { .. } => None,
         }
     }
 
     pub(crate) fn issue_create_state(&self) -> Option<&IssueCreateState> {
         match &self.payload {
             MutationPayload::IssueCreate { state, .. } => Some(state),
-            MutationPayload::PriorityUpdate { .. } | MutationPayload::DependencyUpdate { .. } => {
-                None
-            }
+            MutationPayload::PriorityUpdate { .. }
+            | MutationPayload::DependencyUpdate { .. }
+            | MutationPayload::IssueFieldUpdate { .. } => None,
         }
     }
 
@@ -505,9 +671,32 @@ impl PendingMutation {
                 marker,
                 state,
             }),
-            MutationPayload::PriorityUpdate { .. } | MutationPayload::DependencyUpdate { .. } => {
-                None
-            }
+            MutationPayload::PriorityUpdate { .. }
+            | MutationPayload::DependencyUpdate { .. }
+            | MutationPayload::IssueFieldUpdate { .. } => None,
+        }
+    }
+
+    pub(crate) fn issue_field_update_view(&self) -> Option<IssueFieldUpdateView<'_>> {
+        match &self.payload {
+            MutationPayload::IssueFieldUpdate {
+                issue_number,
+                temporary_id,
+                field,
+                base,
+                desired,
+                state,
+            } => Some(IssueFieldUpdateView {
+                issue_number: *issue_number,
+                temporary_id: *temporary_id,
+                field: *field,
+                base,
+                desired,
+                state,
+            }),
+            MutationPayload::IssueCreate { .. }
+            | MutationPayload::PriorityUpdate { .. }
+            | MutationPayload::DependencyUpdate { .. } => None,
         }
     }
 
@@ -516,6 +705,7 @@ impl PendingMutation {
             MutationPayload::IssueCreate { state, .. } => state.permits_dependents(),
             MutationPayload::PriorityUpdate { state, .. } => state.is_successfully_terminal(),
             MutationPayload::DependencyUpdate { state, .. } => state.is_successfully_terminal(),
+            MutationPayload::IssueFieldUpdate { state, .. } => state.is_successfully_terminal(),
         }
     }
 
@@ -533,8 +723,28 @@ impl PendingMutation {
                 PriorityMutationState::ResolvedRemote { remote } => Some(remote),
                 _ => Some(desired),
             },
-            MutationPayload::IssueCreate { .. } | MutationPayload::DependencyUpdate { .. } => None,
+            MutationPayload::IssueCreate { .. }
+            | MutationPayload::DependencyUpdate { .. }
+            | MutationPayload::IssueFieldUpdate { .. } => None,
         }
+    }
+
+    pub(crate) fn effective_field_update(&self) -> Option<(u64, IssueField, &IssueFieldValue)> {
+        let MutationPayload::IssueFieldUpdate {
+            issue_number,
+            field,
+            desired,
+            state,
+            ..
+        } = &self.payload
+        else {
+            return None;
+        };
+        let value = match state {
+            IssueFieldMutationState::ResolvedRemote { remote } => remote,
+            _ => desired,
+        };
+        Some((*issue_number, *field, value))
     }
 
     fn has_safe_write_plan(&self) -> bool {
@@ -554,6 +764,7 @@ impl PendingMutation {
                         .is_some_and(|canonical| canonical == *remaining_writes)
             }
             MutationPayload::DependencyUpdate { .. } => true,
+            MutationPayload::IssueFieldUpdate { .. } => true,
         }
     }
 
@@ -578,6 +789,7 @@ impl PendingMutation {
                 Ok(())
             }
             MutationPayload::DependencyUpdate { .. } => Err(()),
+            MutationPayload::IssueFieldUpdate { .. } => Err(()),
         }
     }
 }
@@ -658,6 +870,7 @@ pub(crate) struct OutboxTransaction<'a> {
 pub(crate) enum MutationStateUpdate {
     Priority(PriorityMutationState),
     Dependency(DependencyMutationState),
+    IssueField(IssueFieldMutationState),
 }
 
 impl OutboxTransaction<'_> {
@@ -696,7 +909,9 @@ impl OutboxTransaction<'_> {
                 *current = state;
                 Ok(())
             }
-            MutationPayload::IssueCreate { .. } | MutationPayload::DependencyUpdate { .. } => {
+            MutationPayload::IssueCreate { .. }
+            | MutationPayload::DependencyUpdate { .. }
+            | MutationPayload::IssueFieldUpdate { .. } => {
                 Err(OutboxError::InvalidMutationKind(id.to_owned()))
             }
         }
@@ -731,6 +946,15 @@ impl OutboxTransaction<'_> {
             if let MutationPayload::DependencyUpdate { edge, .. } = &mut operation.payload {
                 edge.resolve_temporary_id(identity.temporary_id, identity.issue_number);
             }
+            if let MutationPayload::IssueFieldUpdate {
+                issue_number,
+                temporary_id,
+                ..
+            } = &mut operation.payload
+                && *temporary_id == Some(identity.temporary_id)
+            {
+                *issue_number = identity.issue_number;
+            }
         }
         self.publish(repository)
     }
@@ -745,7 +969,9 @@ impl OutboxTransaction<'_> {
                 *current = state;
                 Ok(())
             }
-            MutationPayload::PriorityUpdate { .. } | MutationPayload::DependencyUpdate { .. } => {
+            MutationPayload::PriorityUpdate { .. }
+            | MutationPayload::DependencyUpdate { .. }
+            | MutationPayload::IssueFieldUpdate { .. } => {
                 Err(OutboxError::InvalidMutationKind(id.to_owned()))
             }
         }
@@ -771,7 +997,9 @@ impl OutboxTransaction<'_> {
                 *current = state;
                 Ok(())
             }
-            MutationPayload::IssueCreate { .. } | MutationPayload::PriorityUpdate { .. } => {
+            MutationPayload::IssueCreate { .. }
+            | MutationPayload::PriorityUpdate { .. }
+            | MutationPayload::IssueFieldUpdate { .. } => {
                 Err(OutboxError::InvalidMutationKind(id.to_owned()))
             }
         }
@@ -784,6 +1012,68 @@ impl OutboxTransaction<'_> {
         state: DependencyMutationState,
     ) -> Result<(), OutboxError> {
         self.stage_dependency_state(id, state)?;
+        self.publish(repository)
+    }
+
+    pub(crate) fn stage_issue_field_state(
+        &mut self,
+        id: &str,
+        state: IssueFieldMutationState,
+    ) -> Result<(), OutboxError> {
+        match &mut self.operation_mut(id)?.payload {
+            MutationPayload::IssueFieldUpdate { state: current, .. } => {
+                *current = state;
+                Ok(())
+            }
+            MutationPayload::IssueCreate { .. }
+            | MutationPayload::PriorityUpdate { .. }
+            | MutationPayload::DependencyUpdate { .. } => {
+                Err(OutboxError::InvalidMutationKind(id.to_owned()))
+            }
+        }
+    }
+
+    pub(crate) fn checkpoint_issue_field_state(
+        &mut self,
+        repository: &Repository,
+        id: &str,
+        state: IssueFieldMutationState,
+    ) -> Result<(), OutboxError> {
+        self.stage_issue_field_state(id, state)?;
+        self.publish(repository)
+    }
+
+    pub(crate) fn rebase_issue_field(
+        &mut self,
+        repository: &Repository,
+        id: &str,
+        base: IssueFieldValue,
+    ) -> Result<(), OutboxError> {
+        match &mut self.operation_mut(id)?.payload {
+            MutationPayload::IssueFieldUpdate {
+                base: current_base,
+                state,
+                ..
+            } => {
+                *current_base = base;
+                *state = IssueFieldMutationState::Pending;
+            }
+            MutationPayload::IssueCreate { .. }
+            | MutationPayload::PriorityUpdate { .. }
+            | MutationPayload::DependencyUpdate { .. } => {
+                return Err(OutboxError::InvalidMutationKind(id.to_owned()));
+            }
+        }
+        self.publish(repository)
+    }
+
+    pub(crate) fn resolve_issue_field_remote(
+        &mut self,
+        repository: &Repository,
+        id: &str,
+        remote: IssueFieldValue,
+    ) -> Result<(), OutboxError> {
+        self.stage_issue_field_state(id, IssueFieldMutationState::ResolvedRemote { remote })?;
         self.publish(repository)
     }
 
@@ -828,6 +1118,9 @@ impl OutboxTransaction<'_> {
                 }
                 MutationStateUpdate::Dependency(state) => {
                     self.stage_dependency_state(&operation_id, state)?;
+                }
+                MutationStateUpdate::IssueField(state) => {
+                    self.stage_issue_field_state(&operation_id, state)?;
                 }
             }
         }
@@ -914,6 +1207,8 @@ pub(crate) enum OutboxError {
     InvalidDependencyEdge(String),
     #[error("Pending mutation operation {0:?} contains an invalid Draft Issue")]
     InvalidDraftIssue(String),
+    #[error("Pending mutation operation {0:?} contains an invalid Issue-field update")]
+    InvalidIssueFieldUpdate(String),
     #[error("Pending mutation operation {0:?} does not exist")]
     UnknownOperation(String),
     #[error("Pending mutation operation {0:?} is not a Priority update")]

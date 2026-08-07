@@ -35,6 +35,7 @@ impl<'a> WorkingGraph<'a> {
         let mut effective_replica = Cow::Borrowed(replica);
         let mut priority_overrides = BTreeMap::new();
         let mut dependency_intents = Vec::new();
+        let mut field_updates = Vec::new();
         let mut operation_ids = Vec::with_capacity(outbox.operations().len());
         let mut operation_ids_by_issue = BTreeMap::<u64, Vec<(usize, String)>>::new();
         let mut topology_operation_ids = Vec::new();
@@ -45,6 +46,9 @@ impl<'a> WorkingGraph<'a> {
             }
             if let Some((edge, desired)) = operation.dependency_values() {
                 dependency_intents.push((edge.clone(), desired));
+            }
+            if let Some((issue_number, field, value)) = operation.effective_field_update() {
+                field_updates.push((issue_number, field, value.clone()));
             }
             if !operation.is_pending_intent() {
                 continue;
@@ -75,6 +79,9 @@ impl<'a> WorkingGraph<'a> {
                 .to_mut()
                 .issues
                 .sort_by_key(|issue| issue.stable_node_key());
+        }
+        if !field_updates.is_empty() {
+            apply_field_updates(&mut effective_replica.to_mut().issues, field_updates)?;
         }
         if !dependency_intents.is_empty() {
             project_dependency_intents(effective_replica.to_mut(), dependency_intents)?;
@@ -151,6 +158,30 @@ impl<'a> WorkingGraph<'a> {
         indexed_operation_ids.extend(self.topology_operation_ids.iter().cloned());
         PendingProvenance::from_indexed(indexed_operation_ids)
     }
+}
+
+fn apply_field_updates(
+    issues: &mut [Issue],
+    updates: Vec<(
+        u64,
+        crate::issue_field::IssueField,
+        crate::issue_field::IssueFieldValue,
+    )>,
+) -> Result<(), WorkingGraphError> {
+    let issue_indices: BTreeMap<_, _> = issues
+        .iter()
+        .enumerate()
+        .map(|(index, issue)| (issue.number, index))
+        .collect();
+    for (issue_number, field, value) in updates {
+        let index = issue_indices
+            .get(&issue_number)
+            .copied()
+            .ok_or(WorkingGraphError::MissingIssue(issue_number))?;
+        debug_assert_eq!(value.field(), field);
+        value.apply_to(&mut issues[index]);
+    }
+    Ok(())
 }
 
 fn validated_issue_numbers(
@@ -320,4 +351,57 @@ pub(crate) enum WorkingGraphError {
     EncodeHashInput(serde_json::Error),
     #[error("Pending mutations reference Issue #{0}, which is absent from the Local replica")]
     MissingIssue(u64),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        issue_field::{IssueField, IssueFieldValue},
+        model::IssueIdentityState,
+    };
+
+    #[test]
+    fn field_projection_scales_by_indexing_issues_once_and_preserves_operation_order() {
+        let mut issues: Vec<_> = (1..=5_000).map(issue).collect();
+        let mut updates = Vec::new();
+        for number in 1..=5_000 {
+            updates.push((
+                number,
+                IssueField::Title,
+                IssueFieldValue::title(format!("first-{number}")),
+            ));
+            updates.push((
+                number,
+                IssueField::Title,
+                IssueFieldValue::title(format!("last-{number}")),
+            ));
+        }
+
+        apply_field_updates(&mut issues, updates).expect("project field updates");
+
+        assert_eq!(issues[0].title, "last-1");
+        assert_eq!(issues[4_999].title, "last-5000");
+    }
+
+    fn issue(number: u64) -> Issue {
+        Issue {
+            id: number,
+            node_id: format!("I_{number}"),
+            number,
+            url: format!("https://github.com/acme/widgets/issues/{number}"),
+            title: format!("Issue {number}"),
+            body: String::new(),
+            state: "open".to_owned(),
+            state_reason: None,
+            author: None,
+            assignees: Vec::new(),
+            labels: Vec::new(),
+            comments: Vec::new(),
+            created_at: "2026-08-07T00:00:00Z".to_owned(),
+            updated_at: "2026-08-07T00:00:00Z".to_owned(),
+            closed_at: None,
+            identity: IssueIdentityState::GitHub,
+        }
+    }
 }

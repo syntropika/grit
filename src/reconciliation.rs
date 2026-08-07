@@ -4,27 +4,44 @@ use serde::Serialize;
 use thiserror::Error;
 
 mod dependency;
+mod field;
 mod issue_create;
 mod priority;
-
-#[cfg(test)]
-use priority::{PendingClassification, classify_priority};
 
 use crate::{
     draft_identity::{
         DraftIdentity, DraftIdentityError, DraftIdentityStore, DraftIdentityTransaction,
     },
     github::{DependencyIntent, GitHubClient, GitHubError},
+    issue_field::{IssueField, IssueFieldValue},
     model::{DependencyEdgeKey, DependencyPresence, Issue, LocalReplica},
     outbox::{
-        DependencyMutationState, IssueCreateState, MutationKind, MutationStateUpdate, OutboxError,
-        OutboxStore, PendingMutation, PriorityMutationState, PriorityWrite,
+        DependencyMutationState, IssueCreateState, IssueFieldMutationState, MutationKind,
+        MutationStateUpdate, OutboxError, OutboxStore, PendingMutation, PriorityMutationState,
+        PriorityWrite,
     },
     priority::{DeclaredPriority, LogicalPriority, PrioritySelection, PriorityState},
     replica_sync::{self, ReplicaSyncError},
     repository::{IssueReference, Repository},
     store::{ReplicaStore, StoreError},
 };
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScalarClassification {
+    Applicable,
+    AlreadySatisfied,
+    Conflicting,
+}
+
+fn classify_scalar<T: Eq>(base: &T, desired: &T, remote: &T) -> ScalarClassification {
+    if remote == desired {
+        ScalarClassification::AlreadySatisfied
+    } else if remote == base {
+        ScalarClassification::Applicable
+    } else {
+        ScalarClassification::Conflicting
+    }
+}
 
 pub(crate) const OUTPUT_SCHEMA_VERSION: &str = "grit.reconcile/v1";
 
@@ -87,6 +104,13 @@ pub(crate) enum OperationDetails {
         desired_present: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         remote_present: Option<bool>,
+    },
+    IssueFieldUpdate {
+        field: IssueField,
+        base: IssueFieldValue,
+        local: IssueFieldValue,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        remote: Option<IssueFieldValue>,
     },
 }
 
@@ -184,6 +208,12 @@ pub(crate) fn reconcile(
     let preflight = replica_sync::fetch(client, repository)?;
     let identity_store = DraftIdentityStore::discover(repository)?;
     let mut identity_transaction = identity_store.begin_transaction(repository)?;
+    let remote_issues: BTreeMap<_, _> = preflight
+        .issues
+        .iter()
+        .cloned()
+        .map(|issue| (issue.number, issue))
+        .collect();
     let markers_to_recover: BTreeSet<_> = transaction
         .operations()
         .iter()
@@ -206,6 +236,7 @@ pub(crate) fn reconcile(
         transaction: &mut transaction,
         remote: priority::remote_priorities(&preflight),
         remote_dependencies: dependency::remote_dependencies(&preflight),
+        remote_issues,
         identity_transaction: &mut identity_transaction,
         marker_matches,
         results: Vec::new(),
@@ -242,6 +273,7 @@ struct ReconciliationPass<'client, 'transaction, 'store, 'identity> {
     transaction: &'transaction mut crate::outbox::OutboxTransaction<'store>,
     remote: BTreeMap<u64, RemotePriority>,
     remote_dependencies: BTreeSet<DependencyEdgeKey>,
+    remote_issues: BTreeMap<u64, Issue>,
     identity_transaction: &'identity mut DraftIdentityTransaction<'identity>,
     marker_matches: BTreeMap<String, Vec<crate::github::CreatedIssueIdentity>>,
     results: Vec<OperationResult>,
@@ -285,6 +317,9 @@ impl ReconciliationPass<'_, '_, '_, '_> {
                     .dependency_values()
                     .expect("Dependency-update kind has Dependency values");
                 self.reconcile_dependency_operation(&operation, edge.clone(), desired, blocked_by)
+            }
+            MutationKind::IssueFieldUpdate => {
+                self.reconcile_issue_field_operation(&operation, blocked_by)
             }
         }
     }
@@ -358,6 +393,9 @@ fn retire_verified_operations(
                 results,
                 &mut state_updates,
             ),
+            MutationKind::IssueFieldUpdate => {
+                field::verify_terminal(&operation, final_replica, results, &mut state_updates)
+            }
         };
         if verified {
             retired.insert(operation_id);
@@ -394,6 +432,7 @@ enum MutationTarget {
     IssueCreate(crate::model::TemporaryIssueId),
     Priority(u64),
     Dependency(DependencyEdgeKey),
+    IssueField(u64, IssueField),
 }
 
 fn mutation_target(operation: &PendingMutation) -> MutationTarget {
@@ -412,6 +451,12 @@ fn mutation_target(operation: &PendingMutation) -> MutationTarget {
                 .0
                 .clone(),
         ),
+        MutationKind::IssueFieldUpdate => {
+            let update = operation
+                .issue_field_update_view()
+                .expect("Issue-field kind has Issue-field values");
+            MutationTarget::IssueField(update.issue_number, update.field)
+        }
     }
 }
 
@@ -426,8 +471,25 @@ pub(crate) fn resolve(
     let operation = transaction
         .operation(operation_id)
         .ok_or_else(|| ReconciliationError::UnknownOperation(operation_id.to_owned()))?;
-    let Some(PriorityMutationState::Conflicting { remote }) = operation.priority_state().cloned()
-    else {
+    enum ConflictValue {
+        Priority(LogicalPriority),
+        IssueField(IssueFieldValue),
+    }
+    let conflict = if let Some(PriorityMutationState::Conflicting { remote }) =
+        operation.priority_state().cloned()
+    {
+        Some(ConflictValue::Priority(remote))
+    } else if let Some(update) = operation.issue_field_update_view() {
+        match update.state {
+            IssueFieldMutationState::Conflicting { remote } => {
+                Some(ConflictValue::IssueField(remote.clone()))
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let Some(conflict) = conflict else {
         return Err(ReconciliationError::OperationNotConflicting(
             operation_id.to_owned(),
         ));
@@ -437,19 +499,32 @@ pub(crate) fn resolve(
         ResolutionChoice::Local => "local",
         ResolutionChoice::Replacement(_) => "priority",
     };
-    match choice {
-        ResolutionChoice::Remote => {
+    match (choice, conflict) {
+        (ResolutionChoice::Remote, ConflictValue::Priority(remote)) => {
             transaction.resolve_remote(repository, operation_id, remote)?;
         }
-        ResolutionChoice::Local => {
+        (ResolutionChoice::Local, ConflictValue::Priority(remote)) => {
             transaction.rebase_priority(repository, operation_id, remote, None)?;
         }
-        ResolutionChoice::Replacement(selection) => transaction.rebase_priority(
-            repository,
-            operation_id,
-            remote,
-            Some(LogicalPriority::from_selection(selection)),
-        )?,
+        (ResolutionChoice::Replacement(selection), ConflictValue::Priority(remote)) => {
+            transaction.rebase_priority(
+                repository,
+                operation_id,
+                remote,
+                Some(LogicalPriority::from_selection(selection)),
+            )?;
+        }
+        (ResolutionChoice::Remote, ConflictValue::IssueField(remote)) => {
+            transaction.resolve_issue_field_remote(repository, operation_id, remote)?;
+        }
+        (ResolutionChoice::Local, ConflictValue::IssueField(remote)) => {
+            transaction.rebase_issue_field(repository, operation_id, remote)?;
+        }
+        (ResolutionChoice::Replacement(_), ConflictValue::IssueField(_)) => {
+            return Err(ReconciliationError::PriorityReplacementForIssueField(
+                operation_id.to_owned(),
+            ));
+        }
     }
     drop(transaction);
 
@@ -472,21 +547,25 @@ pub(crate) enum ReconciliationError {
     DraftIdentity(#[from] DraftIdentityError),
     #[error(transparent)]
     GitHub(#[from] GitHubError),
+    #[error(transparent)]
+    IssueField(#[from] crate::issue_field::IssueFieldError),
     #[error("final Synchronization after Mutation reconciliation failed: {0}")]
     FinalSynchronization(ReplicaSyncError),
     #[error("accepted GitHub state could not be published to the Local replica: {0}")]
     FinalPublication(StoreError),
     #[error("Pending mutation operation {0:?} does not exist")]
     UnknownOperation(String),
-    #[error("Pending mutation operation {0:?} is not a Priority conflict")]
+    #[error("Pending mutation operation {0:?} is not a resolvable field conflict")]
     OperationNotConflicting(String),
+    #[error("Pending mutation operation {0:?} is not a Priority conflict")]
+    PriorityReplacementForIssueField(String),
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
 
-    use super::{PendingClassification, classify_priority, superseded_terminal_ids};
+    use super::{ScalarClassification, classify_scalar, superseded_terminal_ids};
     use crate::{
         outbox::{PendingMutation, PriorityWrite},
         priority::{DeclaredPriority, LogicalPriority},
@@ -499,16 +578,16 @@ mod tests {
         let desired = declared(DeclaredPriority::P0);
 
         assert_eq!(
-            classify_priority(&base, &desired, &desired),
-            PendingClassification::AlreadySatisfied
+            classify_scalar(&base, &desired, &desired),
+            ScalarClassification::AlreadySatisfied
         );
         assert_eq!(
-            classify_priority(&base, &desired, &base),
-            PendingClassification::Applicable
+            classify_scalar(&base, &desired, &base),
+            ScalarClassification::Applicable
         );
         assert_eq!(
-            classify_priority(&base, &desired, &declared(DeclaredPriority::P3)),
-            PendingClassification::Conflicting
+            classify_scalar(&base, &desired, &declared(DeclaredPriority::P3)),
+            ScalarClassification::Conflicting
         );
     }
 

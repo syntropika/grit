@@ -1,6 +1,6 @@
 use std::env;
 
-use clap::{ArgGroup, Parser, Subcommand};
+use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use thiserror::Error;
 use url::Url;
@@ -13,6 +13,7 @@ use crate::{
         LabelCreation,
     },
     issue_create::{self, PendingIssueCreateError},
+    issue_field::{self, IssueField, IssueFieldUpdateError, IssueFieldValue, IssueStateValue},
     model::{DependencyPresence, LocalReplica, ReplicaError, TemporaryIssueId},
     operational::{ExecutionScope, analyze_ready},
     outbox::{OutboxError, OutboxStore, PendingMutation},
@@ -39,6 +40,7 @@ const PRIORITY_UPDATE_SCHEMA_VERSION: &str = "grit.priority-update/v1";
 const RESOLVE_SCHEMA_VERSION: &str = "grit.resolve/v1";
 const DEPENDENCY_MUTATION_SCHEMA_VERSION: &str = "grit.dependency-mutation/v1";
 const ISSUE_CREATE_SCHEMA_VERSION: &str = "grit.issue-create/v1";
+const ISSUE_FIELD_UPDATE_SCHEMA_VERSION: &str = "grit.issue-field-update/v1";
 
 #[derive(Parser)]
 #[command(name = "grit", version, about)]
@@ -79,13 +81,34 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Update one Issue's logical Declared priority.
+    /// Update one logical Issue field.
+    #[command(group(
+        ArgGroup::new("issue_update")
+            .required(true)
+            .multiple(false)
+            .args(["priority", "title", "body", "state", "assignee", "clear_assignees"])
+    ))]
     Update {
-        /// Issue in OWNER/REPO#NUMBER form.
+        /// Issue in OWNER/REPO#NUMBER or OWNER/REPO#draft:TEMPORARY_ID form.
         issue: String,
         /// Desired logical Priority, or none to remove it.
         #[arg(long)]
-        priority: PrioritySelection,
+        priority: Option<PrioritySelection>,
+        /// Replace the Issue title.
+        #[arg(long)]
+        title: Option<String>,
+        /// Replace the Issue body Markdown.
+        #[arg(long)]
+        body: Option<String>,
+        /// Open or close the Issue.
+        #[arg(long)]
+        state: Option<IssueStateArgument>,
+        /// Replace the assignee set with these logins; repeat for multiple assignees.
+        #[arg(long, action = clap::ArgAction::Append)]
+        assignee: Vec<String>,
+        /// Remove every assignee.
+        #[arg(long)]
+        clear_assignees: bool,
         /// Emit versioned machine-readable output.
         #[arg(long)]
         json: bool,
@@ -151,7 +174,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Resolve one Pending Priority conflict explicitly.
+    /// Resolve one Pending scalar-field conflict explicitly.
     #[command(group(
         ArgGroup::new("resolution")
             .required(true)
@@ -170,13 +193,28 @@ enum Command {
         /// Reaffirm the local value against the last observed GitHub value.
         #[arg(long)]
         local: bool,
-        /// Replace the local value and rebase it on the last observed GitHub value.
+        /// Replace a conflicting Priority and rebase it on the last observed GitHub value.
         #[arg(long)]
         priority: Option<PrioritySelection>,
         /// Emit versioned machine-readable output.
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum IssueStateArgument {
+    Open,
+    Closed,
+}
+
+impl From<IssueStateArgument> for IssueStateValue {
+    fn from(value: IssueStateArgument) -> Self {
+        match value {
+            IssueStateArgument::Open => Self::Open,
+            IssueStateArgument::Closed => Self::Closed,
+        }
+    }
 }
 
 pub(crate) fn execute() -> Result<(), CliError> {
@@ -202,8 +240,21 @@ pub(crate) fn execute() -> Result<(), CliError> {
         Command::Update {
             issue,
             priority,
+            title,
+            body,
+            state,
+            assignee,
+            clear_assignees,
             json,
-        } => update_priority(&issue, priority, json),
+        } => {
+            if let Some(priority) = priority {
+                update_priority(&issue, priority, json)
+            } else {
+                let (field, desired) =
+                    issue_field_request(title, body, state, assignee, clear_assignees);
+                update_issue_field(&issue, field, desired, json)
+            }
+        }
         Command::Init { repo, json } => initialize(&Repository::parse(&repo)?, json),
         Command::Block { issue, by, json } => {
             mutate_dependency(&issue, &by, DependencyIntent::Block, json)
@@ -225,7 +276,7 @@ pub(crate) fn execute() -> Result<(), CliError> {
             local,
             priority,
             json,
-        } => resolve_priority_conflict(
+        } => resolve_conflict(
             &Repository::parse(&repo)?,
             &operation,
             resolution_choice(remote, local, priority),
@@ -272,6 +323,31 @@ fn create_issue(
     Ok(())
 }
 
+fn issue_field_request(
+    title: Option<String>,
+    body: Option<String>,
+    state: Option<IssueStateArgument>,
+    assignees: Vec<String>,
+    clear_assignees: bool,
+) -> (IssueField, IssueFieldValue) {
+    if let Some(title) = title {
+        (IssueField::Title, IssueFieldValue::title(title))
+    } else if let Some(body) = body {
+        (IssueField::Body, IssueFieldValue::body(body))
+    } else if let Some(state) = state {
+        (IssueField::State, IssueFieldValue::state(state.into()))
+    } else if !assignees.is_empty() {
+        (IssueField::Assignees, IssueFieldValue::assignees(assignees))
+    } else if clear_assignees {
+        (
+            IssueField::Assignees,
+            IssueFieldValue::assignees(Vec::new()),
+        )
+    } else {
+        unreachable!("clap requires exactly one Issue-field update")
+    }
+}
+
 fn resolution_choice(
     remote: bool,
     local: bool,
@@ -291,7 +367,7 @@ fn reconcile(repository: &Repository, json: bool) -> Result<(), CliError> {
     print_reconciliation(&result, "reconcile", json)
 }
 
-fn resolve_priority_conflict(
+fn resolve_conflict(
     repository: &Repository,
     operation_id: &str,
     choice: ResolutionChoice,
@@ -355,28 +431,48 @@ fn print_reconciliation(
         );
         for operation in &result.operations {
             if operation.classification == reconciliation::Classification::Conflicting {
-                let reconciliation::OperationDetails::PriorityUpdate {
-                    base,
-                    local,
-                    remote,
-                } = &operation.details
-                else {
-                    continue;
-                };
-                println!(
-                    "{} Issue #{} conflict: base {}, local {}, remote {}",
-                    operation.id,
-                    operation
-                        .issue_number
-                        .expect("Priority conflicts have a GitHub Issue number"),
-                    base.to_state().display_name(),
-                    local.to_state().display_name(),
-                    remote
-                        .as_ref()
-                        .map(LogicalPriority::to_state)
-                        .map(|priority| priority.display_name())
-                        .unwrap_or("missing")
-                );
+                match &operation.details {
+                    reconciliation::OperationDetails::PriorityUpdate {
+                        base,
+                        local,
+                        remote,
+                    } => println!(
+                        "{} Issue #{} conflict: base {}, local {}, remote {}",
+                        operation.id,
+                        operation
+                            .issue_number
+                            .expect("Priority conflicts have a GitHub Issue number"),
+                        base.to_state().display_name(),
+                        local.to_state().display_name(),
+                        remote
+                            .as_ref()
+                            .map(LogicalPriority::to_state)
+                            .map(|priority| priority.display_name())
+                            .unwrap_or("missing")
+                    ),
+                    reconciliation::OperationDetails::IssueFieldUpdate {
+                        field,
+                        base,
+                        local,
+                        remote,
+                    } => println!(
+                        "{} Issue #{} {} conflict: base {}, local {}, remote {}",
+                        operation.id,
+                        operation
+                            .issue_number
+                            .expect("Issue-field conflicts have an Issue number"),
+                        field.name(),
+                        serde_json::to_string(base).expect("Issue-field values serialize"),
+                        serde_json::to_string(local).expect("Issue-field values serialize"),
+                        remote
+                            .as_ref()
+                            .map(|value| serde_json::to_string(value)
+                                .expect("Issue-field values serialize"))
+                            .unwrap_or_else(|| "missing".to_owned())
+                    ),
+                    reconciliation::OperationDetails::IssueCreate { .. }
+                    | reconciliation::OperationDetails::DependencyUpdate { .. } => {}
+                }
             }
         }
     }
@@ -427,6 +523,87 @@ fn initialize(repository: &Repository, json: bool) -> Result<(), CliError> {
             output.created_labels.join(", "),
             repository.full_name()
         );
+    }
+    Ok(())
+}
+
+fn update_issue_field(
+    issue: &str,
+    field: IssueField,
+    desired: IssueFieldValue,
+    json: bool,
+) -> Result<(), CliError> {
+    let reference = PendingIssueReference::parse(issue)?;
+    let client = match github_client() {
+        Ok(client) => Some(client),
+        Err(CliError::Auth(_)) => None,
+        Err(error) => return Err(error),
+    };
+    let result = issue_field::update_or_queue(client.as_ref(), &reference, field, desired)?;
+    print_issue_field_update(&result, json)
+}
+
+fn print_issue_field_update(
+    result: &issue_field::IssueFieldUpdateResult,
+    json: bool,
+) -> Result<(), CliError> {
+    let (status, pending, issue_url, operation, working_graph) = match &result.outcome {
+        issue_field::IssueFieldUpdateOutcome::Synchronized { issue_url } => {
+            ("synchronized", false, Some(issue_url.as_str()), None, None)
+        }
+        issue_field::IssueFieldUpdateOutcome::Queued {
+            issue_url,
+            operation,
+            working_input_hash,
+        } => (
+            "pending",
+            true,
+            issue_url.as_deref(),
+            Some(IssueFieldOperationOutput {
+                id: operation.id(),
+                kind: "issue_field_update",
+                depends_on: operation.depends_on().to_vec(),
+            }),
+            Some(WorkingGraphSummary {
+                input_hash: working_input_hash,
+            }),
+        ),
+    };
+    let output = IssueFieldUpdateOutput {
+        schema_version: ISSUE_FIELD_UPDATE_SCHEMA_VERSION,
+        command: "update",
+        status,
+        pending,
+        repository: &result.replica.repository,
+        issue: IssueFieldIssueOutput {
+            key: &result.issue_key,
+            number: issue_url.map(|_| result.issue_number),
+            temporary_id: result.temporary_id,
+            url: issue_url,
+        },
+        field: result.field,
+        base: &result.base,
+        local: &result.desired,
+        operation,
+        working_graph,
+        snapshot: snapshot_summary(&result.replica),
+    };
+    if json {
+        serde_json::to_writer(std::io::stdout().lock(), &output).map_err(CliError::EncodeOutput)?;
+        println!();
+    } else if pending {
+        println!(
+            "Queued {} {} update as Pending mutation {}",
+            output.issue.key,
+            output.field.name(),
+            output
+                .operation
+                .as_ref()
+                .expect("Pending field output includes an operation")
+                .id
+        );
+    } else {
+        println!("Updated {} {}", output.issue.key, output.field.name());
     }
     Ok(())
 }
@@ -1060,6 +1237,43 @@ struct PriorityUpdateOutput<'a> {
     snapshot: SnapshotSummary<'a>,
 }
 
+#[derive(Serialize)]
+struct IssueFieldUpdateOutput<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    status: &'static str,
+    pending: bool,
+    repository: &'a str,
+    issue: IssueFieldIssueOutput<'a>,
+    field: IssueField,
+    base: &'a IssueFieldValue,
+    local: &'a IssueFieldValue,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    operation: Option<IssueFieldOperationOutput<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    working_graph: Option<WorkingGraphSummary<'a>>,
+    snapshot: SnapshotSummary<'a>,
+}
+
+#[derive(Serialize)]
+struct IssueFieldIssueOutput<'a> {
+    key: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    number: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temporary_id: Option<TemporaryIssueId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct IssueFieldOperationOutput<'a> {
+    id: &'a str,
+    kind: &'static str,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    depends_on: Vec<String>,
+}
+
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum PriorityUpdateStatus {
@@ -1308,6 +1522,8 @@ pub(crate) enum CliError {
     ReplicaSync(#[from] ReplicaSyncError),
     #[error(transparent)]
     PriorityUpdate(#[from] PriorityUpdateError),
+    #[error(transparent)]
+    IssueFieldUpdate(#[from] IssueFieldUpdateError),
     #[error(transparent)]
     Reconciliation(#[from] ReconciliationError),
     #[error(transparent)]

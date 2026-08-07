@@ -19,7 +19,9 @@ It also reconciles ordered Pending mutations from
 native-Dependency changes from
 [Issue #24](https://github.com/syntropika/grit/issues/24), and creates safely
 recoverable Draft Issues from
-[Issue #26](https://github.com/syntropika/grit/issues/26).
+[Issue #26](https://github.com/syntropika/grit/issues/26). Title, body, state,
+and assignment edits use field-aware Pending mutations from
+[Issue #28](https://github.com/syntropika/grit/issues/28).
 
 ## Build and test
 
@@ -163,6 +165,29 @@ before the request. Grit embeds it in an invisible Markdown comment, removes it
 from normalized and user-facing data, and uses it only to recover an ambiguous
 response. Exactly one remote match is accepted; zero or multiple matches stay
 unresolved and are never retried blindly.
+
+## Edit Issue fields
+
+`update` changes exactly one logical field per invocation:
+
+```bash
+grit update OWNER/REPO#42 --title "A clearer title"
+grit update OWNER/REPO#42 --body "Revised Markdown"
+grit update OWNER/REPO#42 --state closed
+grit update OWNER/REPO#42 --assignee alice --assignee bob
+grit update OWNER/REPO#42 --clear-assignees
+grit update OWNER/REPO#42 --priority p1
+```
+
+Title, body, state, and assignment also accept a Draft key such as
+`OWNER/REPO#draft:TEMPORARY_ID`. Canonical Issues are updated online when
+GitHub is available; otherwise Grit records the base and desired values in the
+outbox and projects the desired field into `ready` and `next` without changing
+the Local replica. `grit reconcile` applies a Pending field only when GitHub
+still matches its base, treats the desired remote value as already satisfied,
+and exposes incompatible base/local/remote values as a conflict. Resolve a
+conflict explicitly with `grit resolve OPERATION --repo OWNER/REPO --local` or
+`--remote`; resolution always performs a fresh GitHub read before any write.
 
 ## Change native Dependencies
 

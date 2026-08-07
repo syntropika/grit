@@ -11,6 +11,7 @@ use url::Url;
 
 use crate::{
     auth::AuthToken,
+    issue_field::{IssueField, IssueFieldValue},
     model::{
         Actor, BlockerIdentity, BlockerScope, Comment, Dependency, DependencyEdgeKey, Issue,
         IssueIdentity, Label,
@@ -242,7 +243,7 @@ impl GitHubClient {
             return Err(GitHubError::IssueIdentityMismatch);
         }
         if issue.pull_request.is_some() {
-            return Err(GitHubError::PullRequestPriority(format!(
+            return Err(GitHubError::PullRequestIssueMutation(format!(
                 "{}#{number}",
                 repository.full_name()
             )));
@@ -292,6 +293,53 @@ impl GitHubClient {
             number: issue.number,
             url: issue.html_url,
         })
+    }
+
+    pub(crate) fn patch_issue_field(
+        &self,
+        repository: &Repository,
+        issue_number: u64,
+        field: IssueField,
+        desired: &IssueFieldValue,
+    ) -> Result<(), GitHubError> {
+        let url = self.endpoint(&format!(
+            "repos/{}/{}/issues/{issue_number}",
+            repository.owner(),
+            repository.name()
+        ))?;
+        let body = match (field, desired) {
+            (IssueField::Title, IssueFieldValue::Title { value }) => {
+                serde_json::json!({"title": value})
+            }
+            (IssueField::Body, IssueFieldValue::Body { value }) => {
+                serde_json::json!({"body": value})
+            }
+            (IssueField::State, IssueFieldValue::State { value }) => {
+                serde_json::json!({"state": value.as_str()})
+            }
+            (IssueField::Assignees, IssueFieldValue::Assignees { logins }) => {
+                serde_json::json!({"assignees": logins})
+            }
+            _ => return Err(GitHubError::InvalidIssueFieldValue),
+        };
+        let response = self
+            .client
+            .request(reqwest::Method::PATCH, url)
+            .json(&body)
+            .send()
+            .map_err(|source| GitHubError::MutationUncertain {
+                operation: "updating the Issue field",
+                source,
+            })?;
+        let status = response.status();
+        if status != StatusCode::OK {
+            return Err(mutation_status_error(
+                status,
+                response.headers(),
+                "updating the Issue field",
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) fn find_issues_with_markers(
@@ -979,8 +1027,10 @@ pub(crate) enum GitHubError {
     InvalidLabelUrl,
     #[error("GitHub returned an Issue different from the requested Issue")]
     IssueIdentityMismatch,
-    #[error("{0} is a Pull Request; Declared priority updates require an Issue")]
-    PullRequestPriority(String),
+    #[error("Issue-field value does not match the requested field")]
+    InvalidIssueFieldValue,
+    #[error("{0} is a Pull Request; Issue mutations require an Issue")]
+    PullRequestIssueMutation(String),
     #[error("{0} is a Pull Request; native Dependencies require Issues")]
     PullRequestDependency(String),
 }
@@ -1004,7 +1054,8 @@ impl GitHubError {
             | Self::InvalidRepositoryUrl
             | Self::InvalidLabelUrl
             | Self::IssueIdentityMismatch
-            | Self::PullRequestPriority(_)
+            | Self::InvalidIssueFieldValue
+            | Self::PullRequestIssueMutation(_)
             | Self::PullRequestDependency(_) => false,
         }
     }

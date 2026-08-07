@@ -165,6 +165,29 @@ impl ReconciliationPass<'_, '_, '_, '_> {
                 logical: LogicalPriority::Unspecified,
                 canonical_labels: Vec::new(),
             });
+        let create = operation
+            .issue_create_view()
+            .expect("Draft mapping belongs to an Issue-create mutation");
+        self.remote_issues
+            .entry(identity.issue_number)
+            .or_insert_with(|| Issue {
+                id: identity.issue_id,
+                node_id: identity.issue_node_id.clone(),
+                number: identity.issue_number,
+                url: identity.issue_url.clone(),
+                title: create.title.to_owned(),
+                body: create.body.to_owned(),
+                state: "open".to_owned(),
+                state_reason: None,
+                author: None,
+                assignees: Vec::new(),
+                labels: Vec::new(),
+                comments: Vec::new(),
+                created_at: create.created_at.to_owned(),
+                updated_at: create.created_at.to_owned(),
+                closed_at: None,
+                identity: crate::model::IssueIdentityState::MappedDraft(create.temporary_id),
+            });
         self.transaction
             .checkpoint_draft_mapping(self.repository, operation.id(), identity)?;
         self.record_issue_create(
