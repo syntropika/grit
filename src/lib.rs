@@ -4,6 +4,9 @@ mod github;
 mod graph;
 mod model;
 mod operational;
+mod plan;
+mod priority;
+mod ranking;
 mod repository;
 mod store;
 
