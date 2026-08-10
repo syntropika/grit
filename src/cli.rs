@@ -44,6 +44,12 @@ enum Command {
         /// Target directory for the complete static site.
         #[arg(long)]
         output: PathBuf,
+        /// Select Ready work assigned to this GitHub login.
+        #[arg(long)]
+        assignee: Option<String>,
+        /// Ranking horizon embedded in the static analysis.
+        #[arg(long, default_value_t = ranking::DEFAULT_HORIZON)]
+        horizon: u8,
         /// Emit versioned machine-readable output.
         #[arg(long)]
         json: bool,
@@ -116,7 +122,19 @@ enum Command {
 pub(crate) fn execute() -> Result<(), CliError> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Graph { repo, output, json } => graph(&Repository::parse(&repo)?, &output, json),
+        Command::Graph {
+            repo,
+            output,
+            assignee,
+            horizon,
+            json,
+        } => graph(
+            &Repository::parse(&repo)?,
+            &output,
+            assignee.as_deref(),
+            horizon,
+            json,
+        ),
         Command::Next {
             repo,
             assignee,
@@ -151,9 +169,21 @@ pub(crate) fn execute() -> Result<(), CliError> {
     }
 }
 
-fn graph(repository: &Repository, output: &std::path::Path, json: bool) -> Result<(), CliError> {
+fn graph(
+    repository: &Repository,
+    output: &std::path::Path,
+    assignee: Option<&str>,
+    horizon: u8,
+    json: bool,
+) -> Result<(), CliError> {
+    if !(ranking::MIN_HORIZON..=ranking::MAX_HORIZON).contains(&horizon) {
+        return Err(CliError::UnsupportedNextHorizon(horizon));
+    }
     let (replica, source) = refresh_or_local(repository)?;
-    let site = publish_site(&replica, output)?;
+    let scope = assignee
+        .map(ExecutionScope::Assignee)
+        .unwrap_or(ExecutionScope::Available);
+    let site = publish_site(&replica, scope, horizon, output)?;
     let output_path = output.display().to_string();
     let result = GraphOutput {
         schema_version: GRAPH_SCHEMA_VERSION,
@@ -206,8 +236,9 @@ fn plan(
         .map(ExecutionScope::Assignee)
         .unwrap_or(ExecutionScope::Available);
     let prepared = PreparedRepository::prepare(&replica);
-    let decision = ranking::analyze_prepared(&prepared, scope, horizon).into_plan_decision();
-    let structural = crate::plan::analyze(prepared.graph(), scope);
+    let analysis = ranking::analyze_prepared_bundle(&prepared, scope, horizon);
+    let structural = crate::plan::analyze_with_ready(prepared.graph(), scope, &analysis.ready);
+    let decision = analysis.next.into_plan_decision();
     let parallel_now = structural.parallel_now;
     let dependency_layers = structural.dependency_layers;
     let warnings = analysis_warnings(&replica, source);
@@ -234,8 +265,8 @@ fn plan(
             "plan/v1 for {} (synced_at {}):",
             replica.repository, replica.synced_at
         );
-        match decision.recommendation() {
-            Some(recommendation) => println!("{}", recommendation.human_summary()),
+        match decision.human_recommendation_summary() {
+            Some(recommendation) => println!("{recommendation}"),
             None => println!("{}", decision.summary().human_empty_summary()),
         }
         println!("parallel_now:");
@@ -344,8 +375,8 @@ fn next(
             "next/v1 recommendation in {} (synced_at {}):",
             replica.repository, replica.synced_at
         );
-        match analysis.recommendation() {
-            Some(recommendation) => println!("{}", recommendation.human_summary()),
+        match analysis.human_recommendation_summary() {
+            Some(recommendation) => println!("{recommendation}"),
             None => println!("{}", analysis.summary().human_empty_summary()),
         }
         if let Some(warning) = analysis.truncation_warning() {
@@ -659,8 +690,8 @@ struct PlanOutput<'a> {
     replica_snapshot_hash: &'a str,
     execution_scope: ExecutionScopeOutput<'a>,
     decision: PlanDecision,
-    parallel_now: Vec<PlanIssue<'a>>,
-    dependency_layers: DependencyLayers<'a>,
+    parallel_now: Vec<PlanIssue>,
+    dependency_layers: DependencyLayers,
     warnings: Vec<ReadyWarning>,
 }
 

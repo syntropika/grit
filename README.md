@@ -113,6 +113,7 @@ browser-side GitHub client:
 ```bash
 grit graph --repo OWNER/REPO --output site/
 grit graph --repo OWNER/REPO --output site/ --json
+grit graph --repo OWNER/REPO --output site/ --assignee LOGIN --horizon 3
 ```
 
 The target contains `index.html`, `app.css`, `app.js`, `graph.json`, and
@@ -120,6 +121,16 @@ The target contains `index.html`, `app.css`, `app.js`, `graph.json`, and
 edge roles, normalized Issue fields, precomputed layered positions,
 operational counts, hashes, and provenance. Bodies, comments, raw API records,
 and Operation markers are not part of the artifact.
+
+The `grit.graph-artifact/v2` artifact also carries the exact precomputed `next/v1` analysis and the
+matching structural `plan` for its Execution scope and horizon. Its summary
+shows the recommendation, decisive reason, distinct runner-up, search
+completeness, immediate parallel work, unresolved cycles, and unknown External
+blockers. Selecting the recommendation highlights its rollout, relevant
+blockers, and unlocked outcomes. Node size can display ranked Unlock behavior
+or PageRank buckets; node color can display readiness, state, or Declared
+priority. The browser only presents values produced by the binary and never
+recalculates ranking or PageRank.
 
 The browser explorer searches by Issue number or title, renders the precomputed
 dependency layers, and keeps graph selection synchronized with an accessible
@@ -163,11 +174,11 @@ at horizons two or three similarly reports `p0_frontier` instead of making an
 unsupported optimum claim.
 
 Robot output reports both snapshot and effective-input hashes, metric states,
-the global runner-up comparison, structured reasons, and whether the result is
-a close structural tie. If no Issue is Executable, the command succeeds with a
-null recommendation and categorized blocker counts. Like `ready`, it attempts
-a pull Synchronization and falls back to the latest valid Local replica without
-mutating GitHub.
+the global runner-up comparison with its canonical presentation message,
+mode-specific supporting reasons, and whether the result is a close structural
+tie. If no Issue is Executable, the command succeeds with a null recommendation
+and categorized blocker counts. Like `ready`, it attempts a pull Synchronization
+and falls back to the latest valid Local replica without mutating GitHub.
 
 ## Inspect a structural plan
 

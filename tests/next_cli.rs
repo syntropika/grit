@@ -842,7 +842,10 @@ fn executable_p0_gate_prefers_the_p0_that_unlocks_more_critical_work() {
     );
     assert_eq!(output["alternatives"][0]["first_issue"]["number"], 1);
     assert!(reason_codes(&output).contains(&"ready_p0"));
-    assert!(reason_codes(&output).contains(&"unlocks_more_p0"));
+    assert_eq!(
+        output["comparison_to_runner_up"]["reason_code"],
+        "unlocks_more_p0"
+    );
     mocks.assert();
 }
 
@@ -1187,6 +1190,6 @@ fn reason_codes(output: &Value) -> Vec<&str> {
         .as_array()
         .expect("recommendation reasons")
         .iter()
-        .map(|reason| reason["code"].as_str().expect("reason code"))
+        .map(|reason| reason["reason"]["code"].as_str().expect("reason code"))
         .collect()
 }

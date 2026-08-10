@@ -9,16 +9,19 @@ use sha2::{Digest, Sha256};
 
 use super::GraphError;
 use crate::{
-    model::{BlockerScope, LocalReplica},
-    operational::{ExecutionScope, analyze_ready},
+    model::{BlockerScope, LocalReplica, strip_operation_markers},
+    operational::{ExecutionScope, PreparedRepository},
+    plan::{DependencyLayers, PlanIssue},
+    priority::PriorityState,
+    ranking::{self, NextAnalysis, PlanDecision},
 };
 
-pub(crate) const ARTIFACT_SCHEMA_VERSION: &str = "grit.graph-artifact/v1";
+pub(crate) const ARTIFACT_SCHEMA_VERSION: &str = "grit.graph-artifact/v2";
 
 #[derive(Clone, Copy, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 enum ArtifactSchemaVersion {
-    #[serde(rename = "grit.graph-artifact/v1")]
-    V1,
+    #[serde(rename = "grit.graph-artifact/v2")]
+    V2,
 }
 
 #[derive(Clone, Copy, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -39,6 +42,7 @@ pub(super) struct GraphArtifact {
     pub(super) artifact_hash: String,
     provenance: ArtifactProvenance,
     operational_counts: OperationalCounts,
+    analysis: GraphAnalysis,
     pub(super) nodes: Vec<ArtifactNode>,
     pub(super) edges: Vec<ArtifactEdge>,
 }
@@ -61,7 +65,7 @@ enum ProvenanceState {
 
 #[derive(Clone, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(deny_unknown_fields)]
-struct ElementProvenance {
+pub(super) struct ElementProvenance {
     state: ProvenanceState,
     operation_ids: Vec<String>,
 }
@@ -87,52 +91,217 @@ struct OperationalCounts {
 
 #[derive(Clone, Deserialize, JsonSchema, Serialize)]
 #[serde(deny_unknown_fields)]
+struct GraphAnalysis {
+    policy_version: AnalysisPolicyVersion,
+    execution_scope: ArtifactExecutionScope,
+    next: NextAnalysis,
+    plan: ArtifactPlan,
+}
+
+#[derive(Clone, Copy, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+enum AnalysisPolicyVersion {
+    #[serde(rename = "next/v1")]
+    NextV1,
+}
+
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+enum ArtifactExecutionScope {
+    Available,
+    Assignee { assignee: String },
+}
+
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ArtifactPlan {
+    decision: PlanDecision,
+    parallel_now: Vec<PlanIssue>,
+    dependency_layers: DependencyLayers,
+}
+
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 #[schemars(rename = "node")]
-pub(super) struct ArtifactNode {
+pub(super) enum ArtifactNode {
+    Issue {
+        common: NodeCommon,
+        status: IssueNodeStatus,
+        url: String,
+        title: String,
+        assignees: Vec<String>,
+        labels: Vec<String>,
+        priority: PriorityState,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pagerank_bucket: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        unlock_count: Option<usize>,
+    },
+    ExternalBlocker {
+        common: NodeCommon,
+        status: ExternalNodeStatus,
+    },
+}
+
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct NodeCommon {
     #[schemars(with = "String")]
-    pub(super) key: NodeKey,
+    key: NodeKey,
     repository: String,
     number: u64,
-    pub(super) kind: NodeKind,
-    pub(super) url: Option<String>,
-    pub(super) title: Option<String>,
-    pub(super) state: String,
-    pub(super) readiness: Readiness,
-    pub(super) assignees: Vec<String>,
-    pub(super) labels: Vec<String>,
-    pub(super) position: Position,
+    position: Position,
     provenance: ElementProvenance,
 }
 
 #[derive(Clone, Copy, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum NodeKind {
-    Issue,
-    ExternalBlocker,
-}
-
-#[derive(Clone, Copy, Deserialize, JsonSchema, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum Readiness {
+pub(super) enum IssueNodeStatus {
     Ready,
     Blocked,
     Closed,
     Unknown,
-    ExternalOpen,
-    ExternalClosed,
-    ExternalUnknown,
 }
 
-impl Readiness {
-    pub(super) fn as_str(self) -> &'static str {
+#[derive(Clone, Copy, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum ExternalNodeStatus {
+    #[serde(rename = "external_open")]
+    Open,
+    #[serde(rename = "external_closed")]
+    Closed,
+    #[serde(rename = "external_unknown")]
+    Unknown,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum LayerRole {
+    Satisfied,
+    OpenIssue,
+    Opaque,
+}
+
+impl ArtifactNode {
+    pub(super) fn key(&self) -> &NodeKey {
+        &self.common().key
+    }
+
+    fn repository(&self) -> &str {
+        &self.common().repository
+    }
+
+    fn number(&self) -> u64 {
+        self.common().number
+    }
+
+    pub(super) fn common(&self) -> &NodeCommon {
+        match self {
+            Self::Issue { common, .. } | Self::ExternalBlocker { common, .. } => common,
+        }
+    }
+
+    fn common_mut(&mut self) -> &mut NodeCommon {
+        match self {
+            Self::Issue { common, .. } | Self::ExternalBlocker { common, .. } => common,
+        }
+    }
+
+    pub(super) fn is_open_issue(&self) -> bool {
+        match self {
+            Self::Issue { status, .. } => {
+                matches!(status, IssueNodeStatus::Ready | IssueNodeStatus::Blocked)
+            }
+            Self::ExternalBlocker { .. } => false,
+        }
+    }
+
+    pub(super) fn layer_role(&self) -> LayerRole {
+        match self {
+            Self::Issue {
+                status: IssueNodeStatus::Closed,
+                ..
+            }
+            | Self::ExternalBlocker {
+                status: ExternalNodeStatus::Closed,
+                ..
+            } => LayerRole::Satisfied,
+            Self::Issue {
+                status: IssueNodeStatus::Ready | IssueNodeStatus::Blocked,
+                ..
+            } => LayerRole::OpenIssue,
+            Self::Issue {
+                status: IssueNodeStatus::Unknown,
+                ..
+            }
+            | Self::ExternalBlocker { .. } => LayerRole::Opaque,
+        }
+    }
+
+    pub(super) fn lifecycle(&self) -> &'static str {
+        match self {
+            Self::Issue {
+                status: IssueNodeStatus::Ready | IssueNodeStatus::Blocked,
+                ..
+            }
+            | Self::ExternalBlocker {
+                status: ExternalNodeStatus::Open,
+                ..
+            } => "open",
+            Self::Issue {
+                status: IssueNodeStatus::Closed,
+                ..
+            }
+            | Self::ExternalBlocker {
+                status: ExternalNodeStatus::Closed,
+                ..
+            } => "closed",
+            Self::Issue {
+                status: IssueNodeStatus::Unknown,
+                ..
+            }
+            | Self::ExternalBlocker {
+                status: ExternalNodeStatus::Unknown,
+                ..
+            } => "unknown",
+        }
+    }
+
+    pub(super) fn status(&self) -> &'static str {
+        match self {
+            Self::Issue { status, .. } => status.as_str(),
+            Self::ExternalBlocker { status, .. } => status.as_str(),
+        }
+    }
+
+    pub(super) fn position(&self) -> &Position {
+        &self.common().position
+    }
+
+    pub(super) fn position_mut(&mut self) -> &mut Position {
+        &mut self.common_mut().position
+    }
+
+    fn provenance(&self) -> &ElementProvenance {
+        &self.common().provenance
+    }
+}
+
+impl IssueNodeStatus {
+    fn as_str(self) -> &'static str {
         match self {
             Self::Ready => "ready",
             Self::Blocked => "blocked",
             Self::Closed => "closed",
             Self::Unknown => "unknown",
-            Self::ExternalOpen => "external_open",
-            Self::ExternalClosed => "external_closed",
-            Self::ExternalUnknown => "external_unknown",
+        }
+    }
+}
+
+impl ExternalNodeStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "external_open",
+            Self::Closed => "external_closed",
+            Self::Unknown => "external_unknown",
         }
     }
 }
@@ -216,9 +385,38 @@ impl<'de> Deserialize<'de> for NodeKey {
     }
 }
 
-pub(super) fn build(replica: &LocalReplica) -> Result<GraphArtifact, GraphError> {
-    let analysis = analyze_ready(replica, ExecutionScope::Available);
-    let ready_numbers: BTreeSet<_> = analysis.ready.iter().map(|issue| issue.number).collect();
+pub(super) fn build(
+    replica: &LocalReplica,
+    scope: ExecutionScope<'_>,
+    horizon: u8,
+) -> Result<GraphArtifact, GraphError> {
+    let prepared = PreparedRepository::prepare(replica);
+    let ranking::AnalysisBundle {
+        next,
+        ready,
+        candidate_unlock_counts: unlock_counts,
+        pagerank_buckets,
+    } = ranking::analyze_prepared_bundle(&prepared, scope, horizon);
+    let ready_numbers: BTreeSet<_> = ready.ready.iter().map(|issue| issue.number).collect();
+    let effective_input_hash = next.input_hash().to_owned();
+    let decision = next.clone().into_plan_decision();
+    let structural = crate::plan::analyze_with_ready(prepared.graph(), scope, &ready);
+    let execution_scope = match scope {
+        ExecutionScope::Available => ArtifactExecutionScope::Available,
+        ExecutionScope::Assignee(assignee) => ArtifactExecutionScope::Assignee {
+            assignee: assignee.to_owned(),
+        },
+    };
+    let analysis = GraphAnalysis {
+        policy_version: AnalysisPolicyVersion::NextV1,
+        execution_scope,
+        next,
+        plan: ArtifactPlan {
+            decision,
+            parallel_now: structural.parallel_now,
+            dependency_layers: structural.dependency_layers,
+        },
+    };
     let mut nodes = Vec::new();
     let mut node_keys = BTreeSet::new();
 
@@ -228,14 +426,14 @@ pub(super) fn build(replica: &LocalReplica) -> Result<GraphArtifact, GraphError>
             return Err(GraphError::DuplicateNode(key.to_string()));
         }
         let state = normalized_state(&issue.state);
-        let readiness = if state == "closed" {
-            Readiness::Closed
+        let status = if state == "closed" {
+            IssueNodeStatus::Closed
         } else if state != "open" {
-            Readiness::Unknown
+            IssueNodeStatus::Unknown
         } else if ready_numbers.contains(&issue.number) {
-            Readiness::Ready
+            IssueNodeStatus::Ready
         } else {
-            Readiness::Blocked
+            IssueNodeStatus::Blocked
         };
         let mut assignees: Vec<_> = issue
             .assignees
@@ -249,19 +447,23 @@ pub(super) fn build(replica: &LocalReplica) -> Result<GraphArtifact, GraphError>
             .map(|label| strip_operation_markers(&label.name))
             .collect();
         sort_and_deduplicate(&mut labels);
-        nodes.push(ArtifactNode {
-            key,
-            repository: replica.repository.clone(),
-            number: issue.number,
-            kind: NodeKind::Issue,
-            url: Some(issue.url.clone()),
-            title: Some(strip_operation_markers(&issue.title)),
-            state: state.to_owned(),
-            readiness,
+        let unlock_count = unlock_counts.get(&issue.number).copied();
+        nodes.push(ArtifactNode::Issue {
+            common: NodeCommon {
+                key,
+                repository: replica.repository.clone(),
+                number: issue.number,
+                position: unresolved_position(),
+                provenance: ElementProvenance::synchronized(),
+            },
+            status,
+            url: issue.url.clone(),
+            title: strip_operation_markers(&issue.title),
             assignees,
             labels,
-            position: unresolved_position(),
-            provenance: ElementProvenance::synchronized(),
+            priority: PriorityState::from_issue_labels(&issue.labels),
+            pagerank_bucket: pagerank_buckets.get(&issue.number).copied(),
+            unlock_count,
         });
     }
 
@@ -323,28 +525,24 @@ pub(super) fn build(replica: &LocalReplica) -> Result<GraphArtifact, GraphError>
         if node_keys.contains(&key) {
             return Err(GraphError::DuplicateNode(key.to_string()));
         }
-        nodes.push(ArtifactNode {
-            repository: key.repository.clone(),
-            number: key.number,
-            key: key.clone(),
-            kind: NodeKind::ExternalBlocker,
-            url: None,
-            title: None,
-            state: state.clone(),
-            readiness: match state.as_str() {
-                "open" => Readiness::ExternalOpen,
-                "closed" => Readiness::ExternalClosed,
-                _ => Readiness::ExternalUnknown,
+        nodes.push(ArtifactNode::ExternalBlocker {
+            common: NodeCommon {
+                repository: key.repository.clone(),
+                number: key.number,
+                key: key.clone(),
+                position: unresolved_position(),
+                provenance: ElementProvenance::synchronized(),
             },
-            assignees: Vec::new(),
-            labels: Vec::new(),
-            position: unresolved_position(),
-            provenance: ElementProvenance::synchronized(),
+            status: match state.as_str() {
+                "open" => ExternalNodeStatus::Open,
+                "closed" => ExternalNodeStatus::Closed,
+                _ => ExternalNodeStatus::Unknown,
+            },
         });
         node_keys.insert(key);
     }
 
-    nodes.sort_by(|left, right| left.key.cmp(&right.key));
+    nodes.sort_by(|left, right| left.key().cmp(right.key()));
     let edges: Vec<_> = edges.into_iter().collect();
     super::layout::assign_dependency_layers(&mut nodes, &edges)?;
     let provenance = ArtifactProvenance {
@@ -354,22 +552,23 @@ pub(super) fn build(replica: &LocalReplica) -> Result<GraphArtifact, GraphError>
         pending_operation_ids: Vec::new(),
     };
     let operational_counts = OperationalCounts {
-        operational_issue_count: analysis.operational_issue_count,
-        ready_count: analysis.ready_count,
-        executable_count: analysis.executable.len(),
-        assigned_ready_count: analysis.assigned_ready_count,
-        blocked_count: analysis.blocked_count,
+        operational_issue_count: ready.operational_issue_count,
+        ready_count: ready.ready_count,
+        executable_count: ready.executable.len(),
+        assigned_ready_count: ready.assigned_ready_count,
+        blocked_count: ready.blocked_count,
     };
     let mut artifact = GraphArtifact {
-        schema_version: ArtifactSchemaVersion::V1,
+        schema_version: ArtifactSchemaVersion::V2,
         schema_url: SchemaLocation::Local,
         repository: replica.repository.clone(),
         synced_at: replica.synced_at.clone(),
         input_hash: replica.input_hash.clone(),
-        effective_input_hash: replica.input_hash.clone(),
+        effective_input_hash,
         artifact_hash: String::new(),
         provenance,
         operational_counts,
+        analysis,
         nodes,
         edges,
     };
@@ -385,7 +584,7 @@ pub(super) fn validate_serialized(bytes: &[u8]) -> Result<(), GraphError> {
 }
 
 fn validate(artifact: &GraphArtifact) -> Result<(), GraphError> {
-    if artifact.schema_version != ArtifactSchemaVersion::V1
+    if artifact.schema_version != ArtifactSchemaVersion::V2
         || artifact.schema_url != SchemaLocation::Local
     {
         return Err(GraphError::InvalidSchemaIdentity);
@@ -416,6 +615,12 @@ fn validate(artifact: &GraphArtifact) -> Result<(), GraphError> {
     {
         return Err(GraphError::InvalidOperationalCounts);
     }
+    if artifact.analysis.policy_version != AnalysisPolicyVersion::NextV1
+        || artifact.analysis.next.input_hash() != artifact.effective_input_hash
+        || artifact.analysis.plan.decision.input_hash() != artifact.effective_input_hash
+    {
+        return Err(GraphError::InvalidField("analysis"));
+    }
     validate_provenance(
         artifact.provenance.state,
         &artifact.provenance.pending_operation_ids,
@@ -436,29 +641,24 @@ fn validate(artifact: &GraphArtifact) -> Result<(), GraphError> {
     if !artifact
         .nodes
         .windows(2)
-        .all(|pair| pair[0].key < pair[1].key)
+        .all(|pair| pair[0].key() < pair[1].key())
     {
         return Err(GraphError::NonDeterministicNodeOrder);
     }
-    let key_set: BTreeSet<_> = artifact.nodes.iter().map(|node| &node.key).collect();
+    let key_set: BTreeSet<_> = artifact.nodes.iter().map(ArtifactNode::key).collect();
     for node in &artifact.nodes {
-        if node.number != node.key.number || node.repository != node.key.repository {
-            return Err(GraphError::InvalidStableKey(node.key.to_string()));
+        if node.number() != node.key().number || node.repository() != node.key().repository {
+            return Err(GraphError::InvalidStableKey(node.key().to_string()));
         }
-        match node.kind {
-            NodeKind::Issue
-                if !node.repository.eq_ignore_ascii_case(&artifact.repository)
-                    || node.url.is_none()
-                    || node.title.is_none() =>
+        match node {
+            ArtifactNode::Issue { common, .. }
+                if !common.repository.eq_ignore_ascii_case(&artifact.repository) =>
             {
                 return Err(GraphError::InvalidField("nodes"));
             }
-            NodeKind::ExternalBlocker if node.url.is_some() || node.title.is_some() => {
-                return Err(GraphError::InvalidField("nodes"));
-            }
-            NodeKind::Issue | NodeKind::ExternalBlocker => {}
+            ArtifactNode::Issue { .. } | ArtifactNode::ExternalBlocker { .. } => {}
         }
-        validate_element_provenance(&node.provenance, &pending_ids)?;
+        validate_element_provenance(node.provenance(), &pending_ids)?;
     }
     for edge in &artifact.edges {
         if !key_set.contains(&edge.blocked) {
@@ -515,6 +715,7 @@ struct ArtifactHashInput<'a> {
     effective_input_hash: &'a str,
     provenance: &'a ArtifactProvenance,
     operational_counts: &'a OperationalCounts,
+    analysis: &'a GraphAnalysis,
     nodes: &'a [ArtifactNode],
     edges: &'a [ArtifactEdge],
 }
@@ -526,6 +727,7 @@ fn calculate_hash(artifact: &GraphArtifact) -> Result<String, GraphError> {
         effective_input_hash: &artifact.effective_input_hash,
         provenance: &artifact.provenance,
         operational_counts: &artifact.operational_counts,
+        analysis: &artifact.analysis,
         nodes: &artifact.nodes,
         edges: &artifact.edges,
     };
@@ -554,16 +756,4 @@ fn unresolved_position() -> Position {
 fn sort_and_deduplicate(values: &mut Vec<String>) {
     values.sort_by_key(|value| value.to_ascii_lowercase());
     values.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
-}
-
-fn strip_operation_markers(value: &str) -> String {
-    let mut sanitized = value.to_owned();
-    while let Some(start) = sanitized.find("<!-- grit:operation") {
-        let Some(relative_end) = sanitized[start..].find("-->") else {
-            sanitized.truncate(start);
-            break;
-        };
-        sanitized.replace_range(start..start + relative_end + 3, "");
-    }
-    sanitized
 }

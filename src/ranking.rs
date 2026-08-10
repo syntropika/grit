@@ -1,4 +1,4 @@
-use std::num::NonZeroUsize;
+use std::{collections::BTreeMap, num::NonZeroUsize};
 
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -11,7 +11,7 @@ mod search;
 
 use crate::{
     model::{Issue, LocalReplica},
-    operational::{ExecutionScope, PreparedRepository},
+    operational::{ExecutionScope, PreparedRepository, ReadyAnalysis},
     priority::{PriorityComparison, PriorityState},
 };
 use decision::{PriorityProfile, RankingMode, StepPriority};
@@ -116,14 +116,43 @@ pub(crate) fn analyze_prepared(
     scope: ExecutionScope<'_>,
     horizon: u8,
 ) -> NextAnalysis {
+    analyze_prepared_bundle(prepared, scope, horizon).next
+}
+
+pub(crate) struct AnalysisBundle<'a> {
+    pub(crate) next: NextAnalysis,
+    pub(crate) ready: ReadyAnalysis<'a>,
+    pub(crate) candidate_unlock_counts: BTreeMap<u64, usize>,
+    pub(crate) pagerank_buckets: BTreeMap<u64, u64>,
+}
+
+pub(crate) fn analyze_prepared_bundle<'a>(
+    prepared: &'a PreparedRepository<'a>,
+    scope: ExecutionScope<'_>,
+    horizon: u8,
+) -> AnalysisBundle<'a> {
     let replica = prepared.replica();
     let graph = prepared.graph();
     let ready = graph.analyze_ready(scope);
     let pagerank = PageRank::calculate(graph);
+    let pagerank_buckets = pagerank
+        .as_ref()
+        .map(|metric| metric.buckets().clone())
+        .unwrap_or_default();
     let search = search::evaluate(graph, scope, pagerank.as_ref(), horizon, STATE_BUDGET);
     let mode = search.mode;
     let candidate_count = search.candidate_count;
     let search_complete = search.truncated_by.is_empty();
+    let candidate_unlock_counts = search
+        .candidates
+        .iter()
+        .map(|candidate| {
+            (
+                candidate.data().issue.number,
+                candidate.data().unlocks.len(),
+            )
+        })
+        .collect();
     let truncated_by = search.truncated_by;
     let evaluated = select_top_candidates(search.candidates, ALTERNATIVE_LIMIT + 1);
     let decisive = evaluated
@@ -139,7 +168,6 @@ pub(crate) fn analyze_prepared(
     let close_call = decisive
         .as_ref()
         .is_some_and(decision::DecisiveComparison::is_close_call);
-    let mut comparison_reason = decisive.map(explanation::reason);
     let executable_p0_count = ready
         .executable
         .iter()
@@ -148,19 +176,15 @@ pub(crate) fn analyze_prepared(
 
     let mut ranked_results = evaluated.into_iter().enumerate().map(|(index, candidate)| {
         let mut reasons = explanation::mode_reasons(executable_p0_count, &candidate);
-        if index == 0 {
-            if let Some(reason) = comparison_reason.take() {
-                reasons.push(reason);
-            } else if candidate_count == 1 && reasons.is_empty() {
-                reasons.push(explanation::only_candidate_reason(candidate_count));
-            }
+        if index == 0 && candidate_count == 1 {
+            reasons.push(explanation::only_candidate_reason(candidate_count));
         }
         output::candidate_output(candidate, &replica.repository, reasons)
     });
     let recommendation = ranked_results.next();
     let alternatives: Vec<_> = ranked_results.take(ALTERNATIVE_LIMIT).collect();
     let summary = NextSummary::from_graph(&ready, candidate_count, graph);
-    NextAnalysis::from_search(NextResult {
+    let next = NextAnalysis::from_search(NextResult {
         input_hash: effective_input_hash(replica, scope),
         horizon,
         state_budget: STATE_BUDGET,
@@ -173,7 +197,13 @@ pub(crate) fn analyze_prepared(
         search_complete,
         truncated_by,
         summary,
-    })
+    });
+    AnalysisBundle {
+        next,
+        ready,
+        candidate_unlock_counts,
+        pagerank_buckets,
+    }
 }
 
 fn select_top_candidates<'a>(

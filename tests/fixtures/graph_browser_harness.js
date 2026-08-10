@@ -18,15 +18,58 @@ const exercise = () => {
     const panel = doc.querySelector("#issue-details");
     const panelText = panel.textContent;
     const canonicalLink = panel.querySelector("a");
-    const sourceNode = data.nodes.find((node) => node.key === "acme/widgets#2");
-    const cycleNode = data.nodes.find((node) => node.key === "acme/widgets#4");
+    const sourceNode = data.nodes.find((node) => node.common.key === "acme/widgets#2");
+    const cycleNode = data.nodes.find((node) => node.common.key === "acme/widgets#4");
     const cycleElement = doc.querySelector('#graph-nodes [data-node-key="acme/widgets#4"]');
-    const usesSccPosition = cycleNode.position.layer === null
+    const usesSccPosition = cycleNode.common.position.layer === null
       && cycleElement.classList.contains("unresolved")
-      && cycleElement.dataset.sourceX === String(cycleNode.position.x)
-      && cycleElement.dataset.sourceY === String(cycleNode.position.y)
+      && cycleElement.dataset.sourceX === String(cycleNode.common.position.x)
+      && cycleElement.dataset.sourceY === String(cycleNode.common.position.y)
       && [...doc.querySelectorAll(".layer-label")]
         .some((label) => label.textContent === "Unresolved / SCC");
+    const recommendation = data.analysis.next.recommendation;
+    const recommendationText = doc.querySelector("#recommendation-status").textContent;
+    const evidenceText = doc.querySelector("#recommendation-evidence").textContent;
+    const summaryMatches = recommendation.first_issue.number === 1
+      && recommendationText.includes("#1")
+      && data.analysis.next.comparison_to_runner_up.message.length > 0
+      && evidenceText.includes(`Reason${data.analysis.next.comparison_to_runner_up.message}`)
+      && evidenceText.includes("SearchComplete")
+      && evidenceText.includes("Parallel now#1, #6");
+    const distinctRunnerUp = data.analysis.next.comparison_to_runner_up.runner_up.number === 6
+      && evidenceText.includes("Runner-up#6 Runner-up");
+    const operationalDiagnostics = evidenceText.includes("Unresolved3")
+      && evidenceText.includes("Cycles2")
+      && evidenceText.includes("Unknown External blockers1");
+
+    doc.querySelector("#recommendation-select").click();
+    const causalPath = doc.querySelector('[data-node-key="acme/widgets#1"]')
+      .classList.contains("causal-path")
+      && doc.querySelector('[data-node-key="acme/widgets#7"]')
+        .classList.contains("unlocked-outcome")
+      && doc.querySelector('.graph-edge[data-blocker="acme/widgets#1"][data-blocked="acme/widgets#7"]')
+        .classList.contains("causal-path")
+      && doc.querySelectorAll("tbody tr.causal-evidence").length >= 2;
+
+    const sizeControl = doc.querySelector("#node-size-metric");
+    sizeControl.value = "unlock_count";
+    sizeControl.dispatchEvent(new Event("change", { bubbles: true }));
+    const recommendationNode = doc.querySelector('[data-node-key="acme/widgets#1"]');
+    const unlockSizeControl = recommendationNode.dataset.sizeMetric === "unlock_count"
+      && recommendationNode.dataset.sizeValue === String(
+        data.nodes.find((node) => node.common.number === 1).unlock_count
+      );
+    sizeControl.value = "pagerank_bucket";
+    sizeControl.dispatchEvent(new Event("change", { bubbles: true }));
+    const pagerankSizeControl = recommendationNode.dataset.sizeMetric === "pagerank_bucket"
+      && recommendationNode.dataset.sizeValue === String(
+        data.nodes.find((node) => node.common.number === 1).pagerank_bucket
+      );
+
+    const colorControl = doc.querySelector("#node-color-metric");
+    colorControl.value = "priority";
+    colorControl.dispatchEvent(new Event("change", { bubbles: true }));
+    const priorityColorControl = recommendationNode.classList.contains("color-priority-p1");
 
     search.value = "#4";
     search.dispatchEvent(new Event("input", { bubbles: true }));
@@ -64,14 +107,21 @@ const exercise = () => {
         side_panel: panelText.includes("acme/widgets#1")
           && panelText.includes("partners/platform#42"),
         canonical_link: canonicalLink.href === "https://github.com/acme/widgets/issues/2",
-        precomputed_position: graphNode.dataset.sourceX === String(sourceNode.position.x)
-          && graphNode.dataset.sourceY === String(sourceNode.position.y),
+        precomputed_position: graphNode.dataset.sourceX === String(sourceNode.common.position.x)
+          && graphNode.dataset.sourceY === String(sourceNode.common.position.y),
         scc_position: usesSccPosition,
         labels_hidden_by_default: labelsInitiallyHidden,
         selected_label_only: selectedLabels.length === 1,
         keyboard_navigation: keyboardMoved
           && doc.querySelector("#issue-details").dataset.selectedKey === "acme/widgets#1",
         zoom: zoomed,
+        recommendation_summary: summaryMatches,
+        distinct_runner_up: distinctRunnerUp,
+        operational_diagnostics: operationalDiagnostics,
+        causal_path: causalPath,
+        unlock_size_control: unlockSizeControl,
+        pagerank_size_control: pagerankSizeControl,
+        priority_color_control: priorityColorControl,
         hostile_text_is_literal: literalTitle && literalLabel,
         no_injected_elements: doc.querySelectorAll("script").length === 2
           && doc.querySelectorAll("img").length === 0

@@ -71,6 +71,10 @@ impl PageRank {
     pub(super) fn bucket(&self, issue_number: u64) -> Option<u64> {
         self.buckets.get(&issue_number).copied()
     }
+
+    pub(super) fn buckets(&self) -> &BTreeMap<u64, u64> {
+        &self.buckets
+    }
 }
 
 #[cfg(test)]

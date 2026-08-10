@@ -1,4 +1,7 @@
-use serde::{Serialize, Serializer};
+use std::borrow::Cow;
+
+use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
+use serde::{Deserialize, Deserializer, Serialize, de};
 
 use crate::model::Label;
 
@@ -8,7 +11,7 @@ pub(crate) struct PriorityLabelSpec {
     pub(crate) description: &'static str,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum DeclaredPriority {
     P0,
@@ -60,9 +63,19 @@ impl DeclaredPriority {
     fn canonical_label(self) -> &'static str {
         self.spec().name
     }
+
+    fn comparison(self) -> PriorityComparison {
+        match self {
+            Self::P0 => PriorityComparison::P0,
+            Self::P1 => PriorityComparison::P1,
+            Self::P2 => PriorityComparison::Neutral,
+            Self::P3 => PriorityComparison::P3,
+            Self::P4 => PriorityComparison::P4,
+        }
+    }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum PriorityComparison {
     P0,
@@ -72,11 +85,23 @@ pub(crate) enum PriorityComparison {
     P4,
 }
 
+impl PriorityComparison {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::P0 => "p0",
+            Self::P1 => "p1",
+            Self::Neutral => "neutral",
+            Self::P3 => "p3",
+            Self::P4 => "p4",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PriorityState {
     Declared { value: DeclaredPriority },
     Unspecified,
-    Conflict { labels: Vec<String> },
+    Conflict { values: Vec<DeclaredPriority> },
 }
 
 impl PriorityState {
@@ -89,41 +114,26 @@ impl PriorityState {
         priorities.dedup();
         match priorities.as_slice() {
             [] => Self::Unspecified,
-            [priority] => Self::Declared { value: *priority },
-            _ => Self::Conflict {
-                labels: priorities
-                    .into_iter()
-                    .map(|priority| priority.canonical_label().to_owned())
-                    .collect(),
-            },
+            [value] => Self::Declared { value: *value },
+            _ => Self::Conflict { values: priorities },
         }
     }
 
     pub(crate) fn comparison(&self) -> PriorityComparison {
         match self {
-            Self::Declared {
-                value: DeclaredPriority::P0,
-            } => PriorityComparison::P0,
-            Self::Declared {
-                value: DeclaredPriority::P1,
-            } => PriorityComparison::P1,
-            Self::Declared {
-                value: DeclaredPriority::P3,
-            } => PriorityComparison::P3,
-            Self::Declared {
-                value: DeclaredPriority::P4,
-            } => PriorityComparison::P4,
-            Self::Declared {
-                value: DeclaredPriority::P2,
-            }
-            | Self::Unspecified
-            | Self::Conflict { .. } => PriorityComparison::Neutral,
+            Self::Declared { value } => value.comparison(),
+            Self::Unspecified | Self::Conflict { .. } => PriorityComparison::Neutral,
         }
     }
 
-    pub(crate) fn conflict_labels(&self) -> Option<&[String]> {
+    pub(crate) fn conflict_labels(&self) -> Option<Vec<String>> {
         match self {
-            Self::Conflict { labels } => Some(labels),
+            Self::Conflict { values } => Some(
+                values
+                    .iter()
+                    .map(|value| value.canonical_label().to_owned())
+                    .collect(),
+            ),
             Self::Declared { .. } | Self::Unspecified => None,
         }
     }
@@ -141,17 +151,39 @@ impl PriorityState {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum PriorityStatus {
+    Declared,
+    Unspecified,
+    Conflict,
+}
+
 impl Serialize for PriorityState {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
-        S: Serializer,
+        S: serde::Serializer,
     {
+        #[derive(Serialize)]
+        struct Wire<'a> {
+            state: PriorityStatus,
+            comparison: PriorityComparison,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            value: Option<DeclaredPriority>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            labels: Option<Vec<&'a str>>,
+        }
+
         let (state, value, labels) = match self {
-            Self::Declared { value } => ("declared", Some(*value), None),
-            Self::Unspecified => ("unspecified", None, None),
-            Self::Conflict { labels } => ("conflict", None, Some(labels.as_slice())),
+            Self::Declared { value } => (PriorityStatus::Declared, Some(*value), None),
+            Self::Unspecified => (PriorityStatus::Unspecified, None, None),
+            Self::Conflict { values } => (
+                PriorityStatus::Conflict,
+                None,
+                Some(values.iter().map(|value| value.canonical_label()).collect()),
+            ),
         };
-        PriorityStateOutput {
+        Wire {
             state,
             comparison: self.comparison(),
             value,
@@ -161,14 +193,107 @@ impl Serialize for PriorityState {
     }
 }
 
-#[derive(Serialize)]
-struct PriorityStateOutput<'a> {
-    state: &'static str,
-    comparison: PriorityComparison,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    value: Option<DeclaredPriority>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    labels: Option<&'a [String]>,
+impl<'de> Deserialize<'de> for PriorityState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            state: PriorityStatus,
+            comparison: PriorityComparison,
+            value: Option<DeclaredPriority>,
+            labels: Option<Vec<String>>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let state = match (wire.state, wire.value, wire.labels) {
+            (PriorityStatus::Declared, Some(value), None) => Self::Declared { value },
+            (PriorityStatus::Unspecified, None, None) => Self::Unspecified,
+            (PriorityStatus::Conflict, None, Some(labels)) => {
+                let mut values: Vec<_> = labels
+                    .iter()
+                    .map(|label| {
+                        DeclaredPriority::parse(label)
+                            .filter(|value| value.canonical_label() == label)
+                    })
+                    .collect::<Option<_>>()
+                    .ok_or_else(|| de::Error::custom("invalid Priority state"))?;
+                values.sort_by_key(|value| *value as u8);
+                values.dedup();
+                if values.len() != labels.len() || values.len() < 2 {
+                    return Err(de::Error::custom("invalid Priority state"));
+                }
+                Self::Conflict { values }
+            }
+            _ => return Err(de::Error::custom("invalid Priority state")),
+        };
+        if wire.comparison != state.comparison() {
+            return Err(de::Error::custom("invalid Priority state"));
+        }
+        Ok(state)
+    }
+}
+
+impl JsonSchema for PriorityState {
+    fn schema_name() -> Cow<'static, str> {
+        "PriorityState".into()
+    }
+
+    fn schema_id() -> Cow<'static, str> {
+        concat!(module_path!(), "::PriorityState").into()
+    }
+
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        let mut variants: Vec<_> = DeclaredPriority::ALL
+            .into_iter()
+            .map(|value| {
+                let value_name = value.canonical_label().trim_start_matches("priority:");
+                let comparison = value.comparison().as_str();
+                json_schema!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["state", "comparison", "value"],
+                "properties": {
+                    "state": { "const": "declared" },
+                        "comparison": { "const": comparison },
+                        "value": { "const": value_name }
+                    }
+                })
+            })
+            .collect();
+        let labels: Vec<_> = DeclaredPriority::ALL
+            .into_iter()
+            .map(DeclaredPriority::canonical_label)
+            .collect();
+        variants.push(json_schema!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["state", "comparison"],
+            "properties": {
+                "state": { "const": "unspecified" },
+                "comparison": { "const": "neutral" }
+            }
+        }));
+        variants.push(json_schema!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["state", "comparison", "labels"],
+            "properties": {
+                "state": { "const": "conflict" },
+                "comparison": { "const": "neutral" },
+                "labels": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 5,
+                    "uniqueItems": true,
+                    "items": { "enum": labels }
+                }
+            }
+        }));
+        json_schema!({ "oneOf": variants })
+    }
 }
 
 pub(crate) fn present_canonical_labels(labels: &[Label]) -> Vec<&'static str> {
@@ -197,6 +322,9 @@ pub(crate) fn missing_canonical_labels(labels: &[Label]) -> Vec<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    use schemars::schema_for;
+    use serde_json::{Value, json};
+
     use super::{DeclaredPriority, PriorityComparison, PriorityState};
 
     #[test]
@@ -210,7 +338,40 @@ mod tests {
         ];
 
         for (value, expected) in cases {
-            assert_eq!(PriorityState::Declared { value }.comparison(), expected);
+            let labels = [crate::model::Label {
+                id: Some(1),
+                node_id: Some("L_1".to_owned()),
+                name: value.spec().name.to_owned(),
+                color: Some("000000".to_owned()),
+                description: None,
+            }];
+            assert_eq!(
+                PriorityState::from_issue_labels(&labels).comparison(),
+                expected
+            );
         }
+    }
+
+    #[test]
+    fn priority_schema_and_deserializer_reject_invalid_state_combinations() {
+        let schema = serde_json::to_value(schema_for!(PriorityState)).expect("Priority schema");
+        assert_eq!(
+            schema["oneOf"].as_array().expect("Priority variants").len(),
+            7
+        );
+        for variant in schema["oneOf"].as_array().expect("Priority variants") {
+            assert_eq!(variant["additionalProperties"], false);
+        }
+
+        let invalid = json!({"state": "declared", "comparison": "neutral", "value": "p0"});
+        assert!(serde_json::from_value::<PriorityState>(invalid).is_err());
+        let valid: PriorityState = serde_json::from_value(json!({
+            "state": "conflict",
+            "comparison": "neutral",
+            "labels": ["priority:p4", "priority:p0"]
+        }))
+        .expect("schema-valid conflict");
+        let normalized: Value = serde_json::to_value(valid).expect("normalized Priority");
+        assert_eq!(normalized["labels"], json!(["priority:p0", "priority:p4"]));
     }
 }

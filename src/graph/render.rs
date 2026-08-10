@@ -3,7 +3,10 @@ use std::collections::BTreeMap;
 use schemars::schema_for;
 use serde::Serialize;
 
-use super::{GraphError, artifact::GraphArtifact};
+use super::{
+    GraphError,
+    artifact::{ArtifactNode, GraphArtifact},
+};
 
 pub(super) fn graph_json(artifact: &GraphArtifact) -> Result<Vec<u8>, GraphError> {
     pretty_json(artifact)
@@ -28,17 +31,38 @@ pub(super) fn html(artifact: &GraphArtifact) -> Result<String, GraphError> {
 
     let mut rows = String::new();
     for node in &artifact.nodes {
-        let key = node.key.to_string();
+        let key = node.key().to_string();
         let escaped_key = escape_html(&key);
-        let title = escape_html(node.title.as_deref().unwrap_or(&key));
+        let (title, url, priority, unlock_count, pagerank, assignees, labels) = match node {
+            ArtifactNode::Issue {
+                title,
+                url,
+                priority,
+                unlock_count,
+                pagerank_bucket,
+                assignees,
+                labels,
+                ..
+            } => (
+                title.as_str(),
+                Some(url.as_str()),
+                priority.display_name(),
+                unlock_count.map(|value| value.to_string()),
+                pagerank_bucket.map(|value| value.to_string()),
+                assignees.as_slice(),
+                labels.as_slice(),
+            ),
+            ArtifactNode::ExternalBlocker { .. } => {
+                (key.as_str(), None, "—", None, None, &[][..], &[][..])
+            }
+        };
+        let title = escape_html(title);
         let layer = node
-            .position
+            .position()
             .layer
             .map(|value| value.to_string())
             .unwrap_or_else(|| "unresolved / SCC".to_owned());
-        let github_link = node
-            .url
-            .as_deref()
+        let github_link = url
             .map(|url| {
                 format!(
                     " <a class=\"canonical-link\" href=\"{}\" aria-label=\"Open {} on GitHub\">GitHub</a>",
@@ -47,11 +71,14 @@ pub(super) fn html(artifact: &GraphArtifact) -> Result<String, GraphError> {
             })
             .unwrap_or_default();
         rows.push_str(&format!(
-            "<tr data-node-key=\"{escaped_key}\"><td><button type=\"button\" class=\"table-node\" data-node-key=\"{escaped_key}\" aria-pressed=\"false\">{escaped_key}</button>{github_link}</td><td>{title}</td><td>{state}</td><td>{readiness}</td><td>{layer}</td><td>{assignees}</td><td>{labels}</td><td>{blockers}</td><td>{dependents}</td></tr>",
-            state = escape_html(&node.state),
-            readiness = node.readiness.as_str(),
-            assignees = escape_html(&node.assignees.join(", ")),
-            labels = escape_html(&node.labels.join(", ")),
+            "<tr data-node-key=\"{escaped_key}\"><td><button type=\"button\" class=\"table-node\" data-node-key=\"{escaped_key}\" aria-pressed=\"false\">{escaped_key}</button>{github_link}</td><td>{title}</td><td>{state}</td><td>{readiness}</td><td>{priority}</td><td>{unlock_count}</td><td>{pagerank}</td><td>{layer}</td><td>{assignees}</td><td>{labels}</td><td>{blockers}</td><td>{dependents}</td></tr>",
+            state = escape_html(node.lifecycle()),
+            readiness = node.status(),
+            priority = priority,
+            unlock_count = unlock_count.unwrap_or_else(|| "—".to_owned()),
+            pagerank = pagerank.unwrap_or_else(|| "—".to_owned()),
+            assignees = escape_html(&assignees.join(", ")),
+            labels = escape_html(&labels.join(", ")),
             blockers = escape_html(&joined_relations(&blockers, &key)),
             dependents = escape_html(&joined_relations(&dependents, &key)),
         ));

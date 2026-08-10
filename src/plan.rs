@@ -1,39 +1,44 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use serde::Serialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 use crate::{
-    model::Issue,
-    operational::{BlockerResolution, ExecutionScope, OperationalGraph},
+    model::{Issue, strip_operation_markers},
+    operational::{BlockerResolution, ExecutionScope, OperationalGraph, ReadyAnalysis},
     priority::PriorityState,
 };
 
-pub(crate) struct StructuralPlan<'a> {
-    pub(crate) parallel_now: Vec<PlanIssue<'a>>,
-    pub(crate) dependency_layers: DependencyLayers<'a>,
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StructuralPlan {
+    pub(crate) parallel_now: Vec<PlanIssue>,
+    pub(crate) dependency_layers: DependencyLayers,
 }
 
-#[derive(Serialize)]
-pub(crate) struct PlanIssue<'a> {
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PlanIssue {
     pub(crate) number: u64,
-    pub(crate) url: &'a str,
-    pub(crate) title: &'a str,
+    pub(crate) url: String,
+    pub(crate) title: String,
     pub(crate) ready_now: bool,
     pub(crate) assigned: bool,
     pub(crate) execution_scope_eligible: bool,
     pub(crate) executable: bool,
     pub(crate) priority: PriorityState,
-    pub(crate) assignees: Vec<&'a str>,
+    pub(crate) assignees: Vec<String>,
 }
 
-#[derive(Serialize)]
-pub(crate) struct DependencyLayers<'a> {
-    interpretation: &'static str,
-    layers: Vec<DependencyLayer<'a>>,
-    unresolved: Vec<UnresolvedIssue<'a>>,
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DependencyLayers {
+    interpretation: String,
+    layers: Vec<DependencyLayer>,
+    unresolved: Vec<UnresolvedIssue>,
 }
 
-impl DependencyLayers<'_> {
+impl DependencyLayers {
     pub(crate) fn human_lines(&self) -> Vec<String> {
         let mut lines: Vec<_> = self
             .layers
@@ -72,19 +77,21 @@ impl DependencyLayers<'_> {
     }
 }
 
-#[derive(Serialize)]
-struct DependencyLayer<'a> {
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DependencyLayer {
     index: usize,
-    issues: Vec<PlanIssue<'a>>,
+    issues: Vec<PlanIssue>,
 }
 
-#[derive(Serialize)]
-struct UnresolvedIssue<'a> {
-    issue: PlanIssue<'a>,
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
+struct UnresolvedIssue {
+    issue: PlanIssue,
     reasons: Vec<UnresolvedReason>,
 }
 
-#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Copy, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum UnresolvedReason {
     Cycle,
@@ -93,11 +100,11 @@ enum UnresolvedReason {
     DependsOnUnresolved,
 }
 
-pub(crate) fn analyze<'a>(
-    graph: &OperationalGraph<'a>,
+pub(crate) fn analyze_with_ready(
+    graph: &OperationalGraph<'_>,
     scope: ExecutionScope<'_>,
-) -> StructuralPlan<'a> {
-    let ready = graph.analyze_ready(scope);
+    ready: &ReadyAnalysis<'_>,
+) -> StructuralPlan {
     let parallel_now = ready
         .executable
         .iter()
@@ -109,10 +116,7 @@ pub(crate) fn analyze<'a>(
     }
 }
 
-fn dependency_layers<'a>(
-    graph: &OperationalGraph<'a>,
-    scope: ExecutionScope<'_>,
-) -> DependencyLayers<'a> {
+fn dependency_layers(graph: &OperationalGraph<'_>, scope: ExecutionScope<'_>) -> DependencyLayers {
     let mut unresolved = initial_unresolved(graph);
     propagate_unresolved(graph, &mut unresolved);
 
@@ -168,7 +172,7 @@ fn dependency_layers<'a>(
         }
     }
 
-    let mut by_layer = BTreeMap::<usize, Vec<PlanIssue<'a>>>::new();
+    let mut by_layer = BTreeMap::<usize, Vec<PlanIssue>>::new();
     for (number, layer) in finite_layers {
         let issue = graph
             .issue(number)
@@ -193,7 +197,7 @@ fn dependency_layers<'a>(
         .collect();
 
     DependencyLayers {
-        interpretation: "counterfactual_dependency_layers",
+        interpretation: "counterfactual_dependency_layers".to_owned(),
         layers,
         unresolved,
     }
@@ -247,17 +251,13 @@ fn propagate_unresolved(
     }
 }
 
-fn plan_issue<'a>(
-    graph: &OperationalGraph<'a>,
-    issue: &'a Issue,
-    scope: ExecutionScope<'_>,
-) -> PlanIssue<'a> {
+fn plan_issue(graph: &OperationalGraph<'_>, issue: &Issue, scope: ExecutionScope<'_>) -> PlanIssue {
     let ready_now = graph.is_ready(issue.number);
     let execution_scope_eligible = scope.contains(issue);
     PlanIssue {
         number: issue.number,
-        url: &issue.url,
-        title: &issue.title,
+        url: issue.url.clone(),
+        title: strip_operation_markers(&issue.title),
         ready_now,
         assigned: !issue.assignees.is_empty(),
         execution_scope_eligible,
@@ -266,7 +266,7 @@ fn plan_issue<'a>(
         assignees: issue
             .assignees
             .iter()
-            .map(|actor| actor.login.as_str())
+            .map(|actor| actor.login.clone())
             .collect(),
     }
 }

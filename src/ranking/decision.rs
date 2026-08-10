@@ -1,12 +1,15 @@
 use std::cmp::Ordering;
 
-use serde::Serialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::EvaluatedCandidate;
 use crate::priority::PriorityComparison;
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum RankingMode {
     None,
@@ -15,7 +18,9 @@ pub(super) enum RankingMode {
     Normal,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum StepPriority {
     NoStep,
@@ -44,7 +49,8 @@ impl RankingMode {
     }
 }
 
-#[derive(Clone, Copy, Default, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct PriorityProfile {
     p1: usize,
     neutral: usize,

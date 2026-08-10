@@ -1,6 +1,7 @@
 use std::{cmp::Ordering, collections::BTreeMap, collections::BTreeSet, num::NonZeroUsize};
 
-use serde::Serialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 use super::{
     CandidateData, CriticalRouteOutcome, EvaluatedCandidate, EvaluatedStep, StepSelection,
@@ -20,7 +21,7 @@ pub(super) struct SearchResult<'a> {
     pub(super) truncated_by: Vec<SearchRestriction>,
 }
 
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Copy, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum SearchRestriction {
     StateBudget,

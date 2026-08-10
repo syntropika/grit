@@ -5,6 +5,97 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 #[test]
+fn graph_embeds_the_exact_next_and_plan_evidence_for_one_effective_input() {
+    let mut github = Server::new();
+    let state = TempDir::new().expect("temporary state directory");
+    let workspace = TempDir::new().expect("temporary graph workspace");
+    let output_directory = workspace.path().join("site");
+    let issues = json!([
+        priority_issue(1, "Unlocking root", "open", "priority:p1"),
+        priority_issue(2, "Independent runner-up", "open", "priority:p4"),
+        issue(3, "Unlocked outcome", "open"),
+        issue(4, "Cycle A", "open"),
+        issue(5, "Cycle B", "open"),
+        issue(6, "Opaque boundary", "open")
+    ])
+    .to_string();
+    let mocks = mock_repository(
+        &mut github,
+        issues,
+        vec![
+            (1, "[]".to_owned()),
+            (2, "[]".to_owned()),
+            (3, internal_blocker(1)),
+            (4, internal_blocker(5)),
+            (5, internal_blocker(4)),
+            (
+                6,
+                json!([blocker(
+                    9900,
+                    "I_99",
+                    "https://api.github.com/repos/partners/private",
+                    99,
+                    "unknown"
+                )])
+                .to_string(),
+            ),
+        ],
+    );
+
+    let generated = graph_command(&state, &github.url(), &output_directory)
+        .output()
+        .expect("graph command");
+    assert_success(&generated);
+    mocks.assert();
+    let graph: Value = serde_json::from_slice(
+        &fs::read(output_directory.join("graph.json")).expect("graph artifact"),
+    )
+    .expect("graph JSON");
+    let next = offline_analysis_command(&state, &github.url(), "next")
+        .output()
+        .expect("offline next command");
+    assert_success(&next);
+    let next: Value = serde_json::from_slice(&next.stdout).expect("next JSON");
+    let plan = offline_analysis_command(&state, &github.url(), "plan")
+        .output()
+        .expect("offline plan command");
+    assert_success(&plan);
+    let plan: Value = serde_json::from_slice(&plan.stdout).expect("plan JSON");
+
+    assert_eq!(graph["effective_input_hash"], next["input_hash"]);
+    assert_eq!(graph["analysis"]["policy_version"], next["policy_version"]);
+    assert_eq!(graph["analysis"]["next"], analysis_projection(&next));
+    assert_eq!(graph["analysis"]["plan"]["decision"], plan["decision"]);
+    assert_eq!(
+        graph["analysis"]["plan"]["parallel_now"],
+        plan["parallel_now"]
+    );
+    assert_eq!(
+        graph["analysis"]["plan"]["dependency_layers"],
+        plan["dependency_layers"]
+    );
+    assert_eq!(
+        graph["analysis"]["next"]["recommendation"]["first_issue"]["number"],
+        1
+    );
+    assert_eq!(
+        graph["analysis"]["next"]["comparison_to_runner_up"]["runner_up"]["number"],
+        2
+    );
+    assert_eq!(
+        graph["analysis"]["next"]["comparison_to_runner_up"]["message"],
+        "it unlocks work earlier"
+    );
+    assert_eq!(
+        graph["analysis"]["plan"]["dependency_layers"]["unresolved"]
+            .as_array()
+            .expect("unresolved Issues")
+            .len(),
+        3
+    );
+}
+
+#[test]
 fn graph_generates_a_deterministic_valid_offline_site_without_raw_records() {
     let mut github = Server::new();
     let state = TempDir::new().expect("temporary state directory");
@@ -42,12 +133,16 @@ fn graph_generates_a_deterministic_valid_offline_site_without_raw_records() {
     let javascript_bytes = fs::read(output_directory.join("app.js")).expect("graph JavaScript");
     let schema_bytes = fs::read(output_directory.join("graph.schema.json")).expect("graph schema");
     let graph: Value = serde_json::from_slice(&graph_bytes).expect("artifact JSON");
-    assert_eq!(graph["schema_version"], "grit.graph-artifact/v1");
+    assert_eq!(graph["schema_version"], "grit.graph-artifact/v2");
     assert_eq!(graph["schema_url"], "./graph.schema.json");
     assert_eq!(graph["repository"], "acme/widgets");
     assert!(graph["synced_at"].as_str().is_some());
     assert!(graph["input_hash"].as_str().is_some());
-    assert_eq!(graph["effective_input_hash"], graph["input_hash"]);
+    assert_ne!(graph["effective_input_hash"], graph["input_hash"]);
+    assert_eq!(
+        graph["effective_input_hash"],
+        graph["analysis"]["next"]["input_hash"]
+    );
     assert!(graph["artifact_hash"].as_str().is_some());
     assert_eq!(graph["provenance"]["base"], "synchronized");
     assert_eq!(graph["provenance"]["pending_mutation_count"], 0);
@@ -65,13 +160,16 @@ fn graph_generates_a_deterministic_valid_offline_site_without_raw_records() {
             "partners/platform#42"
         ]
     );
-    assert_eq!(graph["nodes"][0]["readiness"], "ready");
-    assert_eq!(graph["nodes"][1]["readiness"], "blocked");
-    assert_eq!(graph["nodes"][2]["readiness"], "closed");
+    assert_eq!(graph["nodes"][0]["status"], "ready");
+    assert_eq!(graph["nodes"][1]["status"], "blocked");
+    assert_eq!(graph["nodes"][2]["status"], "closed");
     assert_eq!(graph["nodes"][3]["kind"], "external_blocker");
-    assert_eq!(graph["nodes"][3]["readiness"], "external_open");
-    assert_eq!(graph["nodes"][0]["position"]["layer"], 0);
-    assert_eq!(graph["nodes"][1]["position"]["layer"], Value::Null);
+    assert_eq!(graph["nodes"][3]["status"], "external_open");
+    assert_eq!(graph["nodes"][0]["common"]["position"]["layer"], 0);
+    assert_eq!(
+        graph["nodes"][1]["common"]["position"]["layer"],
+        Value::Null
+    );
     assert_eq!(
         graph["edges"],
         json!([
@@ -118,8 +216,56 @@ fn graph_generates_a_deterministic_valid_offline_site_without_raw_records() {
 
     let schema: Value = serde_json::from_slice(&schema_bytes).expect("schema JSON");
     assert_eq!(schema["additionalProperties"], false);
-    assert_eq!(schema["$defs"]["node"]["additionalProperties"], false);
+    let node_variants = schema["$defs"]["node"]["oneOf"]
+        .as_array()
+        .expect("node variants");
+    assert_eq!(node_variants.len(), 2);
+    for variant in node_variants {
+        assert_eq!(variant["additionalProperties"], false);
+    }
+    let issue_node = node_variants
+        .iter()
+        .find(|variant| variant["properties"]["kind"]["const"] == "issue")
+        .expect("Issue node variant");
+    let external_node = node_variants
+        .iter()
+        .find(|variant| variant["properties"]["kind"]["const"] == "external_blocker")
+        .expect("External blocker node variant");
+    assert!(issue_node["properties"].get("url").is_some());
+    assert!(external_node["properties"].get("url").is_none());
+    assert_eq!(
+        issue_node["properties"]["status"]["$ref"],
+        "#/$defs/IssueNodeStatus"
+    );
+    assert_eq!(
+        external_node["properties"]["status"]["$ref"],
+        "#/$defs/ExternalNodeStatus"
+    );
+    assert!(
+        node_variants
+            .iter()
+            .all(|variant| variant["properties"].get("common").is_some()
+                && variant["properties"].get("state").is_none()
+                && variant["properties"].get("readiness").is_none())
+    );
+    let scope_variants = schema["$defs"]["ArtifactExecutionScope"]["oneOf"]
+        .as_array()
+        .expect("execution-scope variants");
+    assert_eq!(scope_variants.len(), 2);
+    assert!(scope_variants.iter().all(|variant| {
+        variant["additionalProperties"] == false
+            && (variant["properties"]["mode"]["const"] != "available"
+                || variant["properties"].get("assignee").is_none())
+    }));
     assert_eq!(schema["$defs"]["edge"]["additionalProperties"], false);
+    for (name, definition) in schema["$defs"].as_object().expect("schema definitions") {
+        if definition.get("properties").is_some() {
+            assert_eq!(
+                definition["additionalProperties"], false,
+                "schema definition {name} must be closed"
+            );
+        }
+    }
     let schema_text = String::from_utf8(schema_bytes.clone()).expect("UTF-8 schema");
     assert!(schema_text.contains("pending"));
     assert!(schema_text.contains("operation_ids"));
@@ -222,10 +368,12 @@ fn generated_site_is_a_keyboard_accessible_offline_graph_explorer() {
         browser_issue_inventory(),
         vec![
             (1, "[]".to_owned()),
-            (2, blockers_for_two()),
+            (2, blockers_for_two_with_external_state("unknown")),
             (3, "[]".to_owned()),
             (4, internal_blocker(5)),
             (5, internal_blocker(4)),
+            (6, "[]".to_owned()),
+            (7, internal_blocker(1)),
         ],
     );
     let generated = graph_command(&state, &github.url(), &output_directory)
@@ -234,17 +382,80 @@ fn generated_site_is_a_keyboard_accessible_offline_graph_explorer() {
     assert_success(&generated);
     mocks.assert();
 
+    let result = run_browser_harness(
+        &workspace,
+        include_str!("fixtures/graph_browser_harness.js"),
+    );
+    assert!(result.get("error").is_none(), "browser result: {result}");
+    let checks = result["checks"].as_object().expect("browser checks");
+    let expected_checks = [
+        "title_search",
+        "number_search",
+        "side_panel",
+        "canonical_link",
+        "precomputed_position",
+        "scc_position",
+        "labels_hidden_by_default",
+        "selected_label_only",
+        "keyboard_navigation",
+        "zoom",
+        "recommendation_summary",
+        "distinct_runner_up",
+        "operational_diagnostics",
+        "causal_path",
+        "unlock_size_control",
+        "pagerank_size_control",
+        "priority_color_control",
+        "hostile_text_is_literal",
+        "no_injected_elements",
+    ];
+    assert_eq!(
+        checks.len(),
+        expected_checks.len(),
+        "browser result: {result}"
+    );
+    for name in expected_checks {
+        assert_eq!(
+            checks.get(name),
+            Some(&Value::Bool(true)),
+            "browser check {name} failed: {result}"
+        );
+    }
+    assert_single_candidate_browser_reason();
+}
+
+fn assert_single_candidate_browser_reason() {
+    let mut github = Server::new();
+    let state = TempDir::new().expect("temporary state directory");
+    let workspace = TempDir::new().expect("temporary graph workspace");
+    let output_directory = workspace.path().join("site");
+    let mocks = mock_repository(
+        &mut github,
+        json!([issue(1, "Only choice", "open")]).to_string(),
+        vec![(1, "[]".to_owned())],
+    );
+    let generated = graph_command(&state, &github.url(), &output_directory)
+        .output()
+        .expect("single-candidate graph command");
+    assert_success(&generated);
+    mocks.assert();
+
+    let result = run_browser_harness(
+        &workspace,
+        include_str!("fixtures/graph_single_candidate_harness.js"),
+    );
+    assert_eq!(result["canonical_reason"], true, "browser result: {result}");
+}
+
+fn run_browser_harness(workspace: &TempDir, script: &str) -> Value {
     let harness = workspace.path().join("browser-test.html");
     fs::write(
         &harness,
         "<!doctype html><html><body><iframe id=\"app\" src=\"./site/index.html\"></iframe><output id=\"result\">pending</output><script src=\"./browser-test.js\"></script></body></html>\n",
     )
     .expect("browser harness");
-    fs::write(
-        workspace.path().join("browser-test.js"),
-        include_str!("fixtures/graph_browser_harness.js"),
-    )
-    .expect("browser harness JavaScript");
+    fs::write(workspace.path().join("browser-test.js"), script)
+        .expect("browser harness JavaScript");
 
     let browser_profile = TempDir::new().expect("temporary browser profile");
     let browser_binary = std::env::var_os("GRIT_BROWSER").unwrap_or_else(|| "google-chrome".into());
@@ -274,36 +485,7 @@ fn generated_site_is_a_keyboard_accessible_offline_graph_explorer() {
         "Chrome stderr: {}",
         String::from_utf8_lossy(&browser.stderr)
     );
-    let dom = String::from_utf8(browser.stdout).expect("browser DOM");
-    let result = browser_result(&dom);
-    assert!(result.get("error").is_none(), "browser result: {result}");
-    let checks = result["checks"].as_object().expect("browser checks");
-    let expected_checks = [
-        "title_search",
-        "number_search",
-        "side_panel",
-        "canonical_link",
-        "precomputed_position",
-        "scc_position",
-        "labels_hidden_by_default",
-        "selected_label_only",
-        "keyboard_navigation",
-        "zoom",
-        "hostile_text_is_literal",
-        "no_injected_elements",
-    ];
-    assert_eq!(
-        checks.len(),
-        expected_checks.len(),
-        "browser result: {result}"
-    );
-    for name in expected_checks {
-        assert_eq!(
-            checks.get(name),
-            Some(&Value::Bool(true)),
-            "browser check {name} failed: {result}"
-        );
-    }
+    browser_result(&String::from_utf8(browser.stdout).expect("browser DOM"))
 }
 
 #[test]
@@ -347,6 +529,35 @@ fn graph_command(state: &TempDir, api_url: &str, output: &std::path::Path) -> Co
         .env("GRIT_STATE_DIR", state.path())
         .env("PATH", "");
     command
+}
+
+fn offline_analysis_command(state: &TempDir, api_url: &str, command_name: &str) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_grit"));
+    command.args([command_name, "--repo", "acme/widgets", "--json"]);
+    command
+        .env_remove("GH_TOKEN")
+        .env("GRIT_GITHUB_API_URL", api_url)
+        .env("GRIT_STATE_DIR", state.path())
+        .env("PATH", "");
+    command
+}
+
+fn analysis_projection(output: &Value) -> Value {
+    let mut projection = output.as_object().expect("analysis output").clone();
+    for envelope_field in [
+        "schema_version",
+        "policy_version",
+        "command",
+        "repository",
+        "source",
+        "synced_at",
+        "replica_snapshot_hash",
+        "execution_scope",
+        "warnings",
+    ] {
+        projection.remove(envelope_field);
+    }
+    Value::Object(projection)
 }
 
 struct RepositoryMocks {
@@ -436,15 +647,18 @@ fn issue_inventory() -> String {
 
 fn browser_issue_inventory() -> String {
     json!([
-        issue(
+        priority_issue(
             1,
             "Root <script>alert(1)</script><!-- grit:operation operation-123 -->",
-            "open"
+            "open",
+            "priority:p1"
         ),
         issue(2, "Dependent", "open"),
         issue(3, "Historical", "closed"),
         issue(4, "Cycle A", "open"),
-        issue(5, "Cycle B", "open")
+        issue(5, "Cycle B", "open"),
+        issue(6, "Runner-up", "open"),
+        issue(7, "Unlocked result", "open")
     ])
     .to_string()
 }
@@ -468,6 +682,21 @@ fn issue(number: u64, title: &str, state: &str) -> Value {
     })
 }
 
+fn priority_issue(number: u64, title: &str, state: &str, priority: &str) -> Value {
+    let mut issue = issue(number, title, state);
+    issue["labels"]
+        .as_array_mut()
+        .expect("Issue labels")
+        .push(json!({
+            "id": 20000 + number,
+            "node_id": format!("LP_{number}"),
+            "name": priority,
+            "color": "123456",
+            "description": null
+        }));
+    issue
+}
+
 fn comment(id: u64, issue_number: u64) -> Value {
     json!({
         "id": id,
@@ -483,6 +712,10 @@ fn comment(id: u64, issue_number: u64) -> Value {
 }
 
 fn blockers_for_two() -> String {
+    blockers_for_two_with_external_state("open")
+}
+
+fn blockers_for_two_with_external_state(state: &str) -> String {
     json!([
         blocker(
             100,
@@ -496,7 +729,7 @@ fn blockers_for_two() -> String {
             "I_42",
             "https://api.github.com/repos/partners/platform",
             42,
-            "open"
+            state
         )
     ])
     .to_string()
@@ -546,7 +779,7 @@ fn node_keys(graph: &Value) -> Vec<&str> {
         .as_array()
         .expect("nodes")
         .iter()
-        .map(|node| node["key"].as_str().expect("node key"))
+        .map(|node| node["common"]["key"].as_str().expect("node key"))
         .collect()
 }
 
@@ -555,9 +788,10 @@ fn layer(graph: &Value, number: u64) -> Option<u64> {
         .as_array()
         .expect("nodes")
         .iter()
-        .find(|node| node["number"] == number)
+        .find(|node| node["common"]["number"] == number)
         .expect("node")
-        .get("position")
+        .get("common")
+        .and_then(|common| common.get("position"))
         .and_then(|position| position.get("layer"))
         .and_then(Value::as_u64)
 }

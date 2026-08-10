@@ -7,7 +7,7 @@ use std::{io, path::Path};
 
 use thiserror::Error;
 
-use crate::model::LocalReplica;
+use crate::{model::LocalReplica, operational::ExecutionScope};
 
 pub(crate) use artifact::ARTIFACT_SCHEMA_VERSION;
 
@@ -19,9 +19,11 @@ pub(crate) struct SiteSummary {
 
 pub(crate) fn publish_site(
     replica: &LocalReplica,
+    scope: ExecutionScope<'_>,
+    horizon: u8,
     output: &Path,
 ) -> Result<SiteSummary, GraphError> {
-    let artifact = artifact::build(replica)?;
+    let artifact = artifact::build(replica, scope, horizon)?;
     let graph_bytes = render::graph_json(&artifact)?;
     artifact::validate_serialized(&graph_bytes)?;
     let schema_bytes = render::schema_json()?;

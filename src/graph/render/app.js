@@ -2,7 +2,17 @@
   "use strict";
 
   const svgNamespace = "http://www.w3.org/2000/svg";
-  const graph = JSON.parse(document.querySelector("#graph-data").textContent);
+  const artifact = JSON.parse(document.querySelector("#graph-data").textContent);
+  const graph = {
+    ...artifact,
+    nodes: artifact.nodes.map((node) => ({
+      ...node,
+      ...node.common,
+      state: lifecycleForStatus(node.status),
+      readiness: node.status
+    }))
+  };
+  const analysis = graph.analysis;
   const nodesByKey = new Map(graph.nodes.map((node) => [node.key, node]));
   const blockersByKey = relationIndex("blocked", "blocker");
   const dependentsByKey = relationIndex("blocker", "blocked");
@@ -13,6 +23,11 @@
   const layerLabels = document.querySelector("#layer-labels");
   const search = document.querySelector("#graph-search");
   const searchStatus = document.querySelector("#search-status");
+  const sizeMetric = document.querySelector("#node-size-metric");
+  const colorMetric = document.querySelector("#node-color-metric");
+  const recommendationStatus = document.querySelector("#recommendation-status");
+  const recommendationEvidence = document.querySelector("#recommendation-evidence");
+  const recommendationSelect = document.querySelector("#recommendation-select");
   const detailPanel = document.querySelector("#issue-details");
   const tableBody = document.querySelector("tbody");
   const graphElementsByKey = new Map();
@@ -22,7 +37,15 @@
   let zoom = 1;
 
   renderGraph();
+  renderAnalysis();
   bindControls();
+
+  function lifecycleForStatus(status) {
+    if (status === "ready" || status === "blocked" || status === "external_open") return "open";
+    if (status === "closed" || status === "external_closed") return "closed";
+    return "unknown";
+  }
+  applyVisualMetrics();
   applySearch("");
 
   function relationIndex(sourceField, targetField) {
@@ -129,6 +152,103 @@
     document.querySelector("#zoom-in").addEventListener("click", () => setZoom(zoom + 0.2));
     document.querySelector("#zoom-out").addEventListener("click", () => setZoom(zoom - 0.2));
     document.querySelector("#zoom-reset").addEventListener("click", () => setZoom(1));
+    sizeMetric.addEventListener("change", applyVisualMetrics);
+    colorMetric.addEventListener("change", applyVisualMetrics);
+    recommendationSelect.addEventListener("click", selectRecommendation);
+  }
+
+  function renderAnalysis() {
+    const decision = analysis.next;
+    const recommendation = decision.recommendation;
+    if (!recommendation) {
+      recommendationStatus.textContent = "No Issue is executable in this scope.";
+      recommendationSelect.hidden = true;
+    } else {
+      recommendationStatus.textContent = `Do #${recommendation.first_issue.number} ${recommendation.first_issue.title}`;
+    }
+    const runnerUp = decision.comparison_to_runner_up?.runner_up;
+    const onlyCandidate = recommendation?.reasons.find(
+      (reason) => reason.reason.code === "only_executable_candidate"
+    );
+    appendEvidence(
+      "Reason",
+      decision.comparison_to_runner_up?.message
+        || onlyCandidate?.message
+        || "No executable recommendation"
+    );
+    appendEvidence("Runner-up", runnerUp ? `#${runnerUp.number} ${runnerUp.title}` : "None");
+    appendEvidence("Search", decision.search_complete ? "Complete" : `Restricted: ${decision.truncated_by.join(", ")}`);
+    appendEvidence(
+      "Parallel now",
+      analysis.plan.parallel_now.map((issue) => `#${issue.number}`).join(", ") || "None"
+    );
+    appendEvidence("Unresolved", String(analysis.plan.dependency_layers.unresolved.length));
+    appendEvidence("Cycles", String(decision.summary.cyclic_issue_count));
+    appendEvidence(
+      "Unknown External blockers",
+      String(graph.nodes.filter((node) => node.readiness === "external_unknown").length)
+    );
+  }
+
+  function appendEvidence(term, value) {
+    const dt = document.createElement("dt");
+    dt.textContent = term;
+    const dd = document.createElement("dd");
+    dd.textContent = value;
+    recommendationEvidence.append(dt, dd);
+  }
+
+  function selectRecommendation() {
+    const recommendation = analysis.next.recommendation;
+    if (!recommendation) return;
+    const rolloutKeys = new Set(recommendation.rollout.steps.map((step) => step.issue.key));
+    const unlockedKeys = new Set(recommendation.outcome.unlocks.map((unlock) => unlock.issue.key));
+    const relevantKeys = new Set([...rolloutKeys, ...unlockedKeys]);
+    for (const key of [...relevantKeys]) {
+      for (const blocker of blockersByKey.get(key) || []) relevantKeys.add(blocker);
+    }
+    for (const [key, element] of graphElementsByKey) {
+      element.classList.toggle("causal-path", rolloutKeys.has(key));
+      element.classList.toggle("unlocked-outcome", unlockedKeys.has(key));
+      element.classList.toggle("relevant-blocker", relevantKeys.has(key) && !rolloutKeys.has(key) && !unlockedKeys.has(key));
+      tableRow(key).classList.toggle("causal-evidence", relevantKeys.has(key));
+    }
+    for (const edge of edgeLayer.children) {
+      edge.classList.toggle(
+        "causal-path",
+        relevantKeys.has(edge.dataset.blocker) && relevantKeys.has(edge.dataset.blocked)
+      );
+    }
+    selectNode(recommendation.first_issue.key);
+  }
+
+  function applyVisualMetrics() {
+    const metric = sizeMetric.value;
+    const values = graph.nodes.map((node) => Number(node[metric] || 0));
+    const maximum = Math.max(1, ...values);
+    for (const node of graph.nodes) {
+      const element = graphElement(node.key);
+      const circle = element.querySelector("circle");
+      const value = Number(node[metric] || 0);
+      const radius = metric === "uniform" ? 9 : 7 + 10 * Math.sqrt(value / maximum);
+      circle.setAttribute("r", radius.toFixed(2));
+      element.dataset.sizeMetric = metric;
+      element.dataset.sizeValue = String(value);
+      for (const className of [...element.classList]) {
+        if (className.startsWith("color-")) element.classList.remove(className);
+      }
+      element.classList.add(colorClass(node, colorMetric.value));
+    }
+  }
+
+  function colorClass(node, metric) {
+    if (metric === "state") return `color-state-${node.state}`;
+    if (metric === "priority") {
+      if (!node.priority) return "color-priority-none";
+      if (node.priority.state === "declared") return `color-priority-${node.priority.value}`;
+      return `color-priority-${node.priority.state}`;
+    }
+    return `color-readiness-${node.readiness}`;
   }
 
   function applySearch(rawQuery) {
@@ -181,8 +301,11 @@
     const details = document.createElement("dl");
     appendDetail(details, "State", node.state);
     appendDetail(details, "Layer", node.position.layer === null ? "unresolved / SCC" : String(node.position.layer));
-    appendDetail(details, "Assignees", node.assignees.join(", ") || "—");
-    appendDetail(details, "Labels", node.labels.join(", ") || "—");
+    appendDetail(details, "Assignees", (node.assignees || []).join(", ") || "—");
+    appendDetail(details, "Labels", (node.labels || []).join(", ") || "—");
+    appendDetail(details, "Declared priority", priorityLabel(node.priority));
+    appendDetail(details, "Unlock behavior", node.unlock_count == null ? "—" : String(node.unlock_count));
+    appendDetail(details, "PageRank bucket", node.pagerank_bucket == null ? "—" : String(node.pagerank_bucket));
     detailPanel.append(heading, key, badge, details);
     appendRelations("Blockers", blockersByKey.get(node.key) || []);
     appendRelations("Dependents", dependentsByKey.get(node.key) || []);
@@ -275,6 +398,12 @@
 
   function nodeLabel(node) {
     return `${node.key}: ${node.title || "External blocker"}; ${node.readiness}`;
+  }
+
+  function priorityLabel(priority) {
+    if (!priority) return "—";
+    if (priority.state === "declared") return priority.value;
+    return priority.state;
   }
 
   function svgElement(name) {

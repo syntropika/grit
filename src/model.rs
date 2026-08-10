@@ -4,6 +4,18 @@ use thiserror::Error;
 
 pub(crate) const REPLICA_SCHEMA_VERSION: &str = "grit.local-replica/v1";
 
+pub(crate) fn strip_operation_markers(value: &str) -> String {
+    let mut sanitized = value.to_owned();
+    while let Some(start) = sanitized.find("<!-- grit:operation") {
+        let Some(relative_end) = sanitized[start..].find("-->") else {
+            sanitized.truncate(start);
+            break;
+        };
+        sanitized.replace_range(start..start + relative_end + 3, "");
+    }
+    sanitized
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct LocalReplica {
     pub(crate) schema_version: String,
