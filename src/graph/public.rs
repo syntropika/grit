@@ -1,5 +1,6 @@
 mod render;
 mod repository;
+mod seal;
 mod validation;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -133,13 +134,15 @@ pub(super) fn publish(
     validation::validate_serialized(&graph_bytes, repository)?;
     let schema_bytes = render::schema_json(repository)?;
     let html_bytes = render::html(&artifact).into_bytes();
-    publication::publish(
+    let prohibited_values = seal::prohibited_values(replica, &artifact, repository)?;
+    publication::publish_validated(
         output,
         &[
             ("graph.json", graph_bytes),
             ("graph.schema.json", schema_bytes),
             ("index.html", html_bytes),
         ],
+        |staging| seal::validate(staging, repository, &prohibited_values),
     )?;
     Ok(SiteSummary {
         schema_version: PUBLIC_ARTIFACT_SCHEMA_VERSION,

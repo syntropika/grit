@@ -13,9 +13,17 @@ pub(super) fn validate_serialized(
     bytes: &[u8],
     repository: &ConfirmedPublicRepository,
 ) -> Result<(), GraphError> {
+    decode_and_validate(bytes, repository).map(|_| ())
+}
+
+pub(super) fn decode_and_validate(
+    bytes: &[u8],
+    repository: &ConfirmedPublicRepository,
+) -> Result<PublicGraph, GraphError> {
     let artifact: PublicGraph =
         serde_json::from_slice(bytes).map_err(GraphError::ValidateSchema)?;
-    validate(&artifact, repository)
+    validate(&artifact, repository)?;
+    Ok(artifact)
 }
 
 pub(super) fn validate(

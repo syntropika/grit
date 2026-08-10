@@ -30,6 +30,10 @@ binary (Google Chrome by default):
 ```bash
 GRIT_BROWSER=google-chrome cargo test --test graph_cli \
   generated_site_is_a_keyboard_accessible_offline_graph_explorer -- --ignored --exact
+GRIT_BROWSER=google-chrome cargo test --test public_graph_cli \
+  sealed_public_bundle_executes_no_user_markup_or_external_request -- --ignored --exact
+GRIT_BROWSER=google-chrome cargo test --test public_graph_cli \
+  browser_network_audit_detects_an_external_request_attempt -- --ignored --exact
 ```
 
 The test launches an ephemeral headless profile with background networking
@@ -138,6 +142,13 @@ the affected public Issue. Its owner, Repository, number, title, count, and
 topology never enter the public model. Changes to excluded history, private
 text, identities, assignees, labels, or External-blocker details cannot change
 the public hash, readiness, ordering, internal edges, or coordinates.
+
+Before publication, Grit reparses and validates every JSON document in the
+complete public staging directory, verifies its closed manifest and local
+runtime policy, scans every byte for excluded fixture values and common secret
+signatures, and only then atomically exchanges it with the previous sealed
+bundle. A failed gate leaves the previous bundle intact. Source maps, logs,
+remote assets, analytics, API clients, and service workers are rejected.
 
 ## Product decisions
 
