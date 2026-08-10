@@ -150,6 +150,22 @@ signatures, and only then atomically exchanges it with the previous sealed
 bundle. A failed gate leaves the previous bundle intact. Source maps, logs,
 remote assets, analytics, API clients, and service workers are rejected.
 
+### Deploy the sealed graph to GitHub Pages
+
+The bundled Pages workflow builds Grit and runs the same fail-closed public
+generation path on pushes to `main`, every six hours, and on explicit manual
+runs. Build and deployment use separate jobs. Only the build job can read
+Issues; its `GITHUB_TOKEN` is exposed to Grit as `GH_TOKEN` only for graph
+generation. The deployment job receives a separate job token that can write
+Pages but cannot read Issues.
+
+The workflow uploads exactly `site-public/`; it never uploads the Repository,
+Local replica, outbox, or build workspace. All Actions are pinned to immutable
+commit SHAs, and one cancelable concurrency group prevents an older run from
+replacing a newer bundle. The Repository must be publicly visible: generation
+fails before publication when GitHub reports private, internal, unknown, or
+unreachable visibility.
+
 ## Product decisions
 
 The canonical domain language and accepted decisions live in
