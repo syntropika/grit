@@ -13,8 +13,8 @@ use crate::{
     auth::AuthToken,
     issue_field::{IssueField, IssueFieldValue},
     model::{
-        Actor, BlockerIdentity, BlockerScope, Comment, Dependency, DependencyEdgeKey, Issue,
-        IssueIdentity, Label, SetPresence,
+        Actor, BlockerIdentity, BlockerScope, Comment, CommentIdentity, Dependency,
+        DependencyEdgeKey, Issue, IssueIdentity, Label, SetPresence,
     },
     operation_marker,
     repository::{IssueReference, Repository},
@@ -304,6 +304,46 @@ impl GitHubClient {
         })
     }
 
+    pub(crate) fn create_comment(
+        &self,
+        repository: &Repository,
+        issue_number: u64,
+        body: &str,
+        marker: &str,
+    ) -> Result<CommentIdentity, GitHubError> {
+        let url = self.endpoint(&format!(
+            "repos/{}/{}/issues/{issue_number}/comments",
+            repository.owner(),
+            repository.name()
+        ))?;
+        let response = self
+            .client
+            .post(url)
+            .json(&CreateCommentRequest {
+                body: operation_marker::embed(body, marker),
+            })
+            .send()
+            .map_err(|source| GitHubError::MutationUncertain {
+                operation: "creating the Issue comment",
+                source,
+            })?;
+        let status = response.status();
+        if status != StatusCode::CREATED {
+            return Err(mutation_status_error(
+                status,
+                response.headers(),
+                "creating the Issue comment",
+            ));
+        }
+        let comment: GitHubComment = response.json().map_err(GitHubError::Decode)?;
+        let actual_issue =
+            issue_number_from_url(&comment.issue_url).ok_or(GitHubError::IssueIdentityMismatch)?;
+        if actual_issue != issue_number {
+            return Err(GitHubError::IssueIdentityMismatch);
+        }
+        Ok(comment.identity(actual_issue))
+    }
+
     pub(crate) fn patch_issue_field(
         &self,
         repository: &Repository,
@@ -373,32 +413,50 @@ impl GitHubClient {
                 ("per_page", "100"),
             ],
         )?;
-        let mut matches = BTreeMap::<String, Vec<CreatedIssueIdentity>>::new();
-        for issue in issues
-            .into_iter()
-            .filter(|issue| issue.pull_request.is_none())
-        {
-            let identity = CreatedIssueIdentity {
-                id: issue.id,
-                node_id: issue.node_id,
-                number: issue.number,
-                url: issue.html_url,
-            };
-            for marker in issue
-                .body
-                .as_deref()
-                .into_iter()
-                .flat_map(operation_marker::values)
-            {
-                if markers.contains(marker) {
-                    matches
-                        .entry(marker.to_owned())
-                        .or_default()
-                        .push(identity.clone());
-                }
-            }
+        Ok(operation_marker::index(
+            issues,
+            markers,
+            |issue| {
+                issue
+                    .pull_request
+                    .is_none()
+                    .then_some(issue.body.as_deref())
+                    .flatten()
+            },
+            |issue| {
+                issue.pull_request.is_none().then(|| CreatedIssueIdentity {
+                    id: issue.id,
+                    node_id: issue.node_id.clone(),
+                    number: issue.number,
+                    url: issue.html_url.clone(),
+                })
+            },
+        ))
+    }
+
+    pub(crate) fn find_comments_with_markers(
+        &self,
+        repository: &Repository,
+        markers: &BTreeSet<String>,
+    ) -> Result<BTreeMap<String, Vec<CommentIdentity>>, GitHubError> {
+        if markers.is_empty() {
+            return Ok(BTreeMap::new());
         }
-        Ok(matches)
+        let url = self.endpoint(&format!(
+            "repos/{}/{}/issues/comments",
+            repository.owner(),
+            repository.name()
+        ))?;
+        let comments: Vec<GitHubComment> = self.paginate(url, &[("per_page", "100")])?;
+        Ok(operation_marker::index(
+            comments,
+            markers,
+            |comment| comment.body.as_deref(),
+            |comment| {
+                issue_number_from_url(&comment.issue_url)
+                    .map(|issue_number| comment.identity(issue_number))
+            },
+        ))
     }
 
     pub(crate) fn add_issue_label(
@@ -1119,6 +1177,15 @@ struct GitHubComment {
 }
 
 impl GitHubComment {
+    fn identity(&self, issue_number: u64) -> CommentIdentity {
+        CommentIdentity {
+            id: self.id,
+            node_id: self.node_id.clone(),
+            url: self.html_url.clone(),
+            issue_number,
+        }
+    }
+
     fn normalize(self) -> Comment {
         Comment {
             id: self.id,
@@ -1131,6 +1198,11 @@ impl GitHubComment {
             updated_at: self.updated_at,
         }
     }
+}
+
+#[derive(Serialize)]
+struct CreateCommentRequest {
+    body: String,
 }
 
 #[derive(Deserialize)]

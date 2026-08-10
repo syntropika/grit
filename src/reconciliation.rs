@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
 use thiserror::Error;
 
+mod comment_create;
 mod dependency;
 mod field;
 mod issue_create;
@@ -15,11 +16,13 @@ use crate::{
     },
     github::{DependencyIntent, GitHubClient, GitHubError},
     issue_field::{IssueField, IssueFieldValue},
-    model::{DependencyEdgeKey, DependencyPresence, Issue, LocalReplica, SetPresence},
+    model::{
+        CommentIdentity, DependencyEdgeKey, DependencyPresence, Issue, LocalReplica, SetPresence,
+    },
     outbox::{
-        DependencyMutationState, IssueCreateState, IssueFieldMutationState, MutationKind,
-        MutationStateUpdate, OutboxError, OutboxStore, PendingMutation, PriorityMutationState,
-        PriorityWrite,
+        CommentCreateState, DependencyMutationState, IssueCreateState, IssueFieldMutationState,
+        MutationKind, MutationStateUpdate, OutboxError, OutboxStore, PendingMutation,
+        PriorityMutationState, PriorityWrite,
     },
     priority::{DeclaredPriority, LogicalPriority, PrioritySelection, PriorityState},
     replica_sync::{self, ReplicaSyncError},
@@ -93,6 +96,10 @@ pub(crate) enum OperationDetails {
     IssueCreate {
         #[serde(skip_serializing_if = "Option::is_none")]
         remote: Option<DraftIssueResult>,
+    },
+    CommentCreate {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        remote: Option<CommentIdentity>,
     },
     PriorityUpdate {
         base: LogicalPriority,
@@ -237,6 +244,20 @@ pub(crate) fn reconcile(
         })
         .collect();
     let marker_matches = client.find_issues_with_markers(repository, &markers_to_recover)?;
+    let comment_markers_to_recover: BTreeSet<_> = transaction
+        .operations()
+        .iter()
+        .filter_map(|operation| {
+            operation
+                .comment_create_view()
+                .filter(|comment| {
+                    matches!(comment.state, CommentCreateState::AwaitingMarker { .. })
+                })
+                .map(|comment| comment.marker.to_owned())
+        })
+        .collect();
+    let comment_marker_matches =
+        client.find_comments_with_markers(repository, &comment_markers_to_recover)?;
     let pass = ReconciliationPass {
         client,
         repository,
@@ -248,6 +269,7 @@ pub(crate) fn reconcile(
         remote_sub_issues: BTreeMap::new(),
         identity_transaction: &mut identity_transaction,
         marker_matches,
+        comment_marker_matches,
         results: Vec::new(),
         requires_final_refresh: false,
     }
@@ -293,6 +315,7 @@ struct ReconciliationPass<'client, 'transaction, 'store, 'identity> {
     remote_sub_issues: BTreeMap<u64, BTreeSet<u64>>,
     identity_transaction: &'identity mut DraftIdentityTransaction<'identity>,
     marker_matches: BTreeMap<String, Vec<crate::github::CreatedIssueIdentity>>,
+    comment_marker_matches: BTreeMap<String, Vec<CommentIdentity>>,
     results: Vec<OperationResult>,
     requires_final_refresh: bool,
 }
@@ -325,6 +348,9 @@ impl ReconciliationPass<'_, '_, '_, '_> {
         match operation.kind() {
             MutationKind::IssueCreate => {
                 self.reconcile_issue_create_operation(&operation, blocked_by)
+            }
+            MutationKind::CommentCreate => {
+                self.reconcile_comment_create_operation(&operation, blocked_by)
             }
             MutationKind::PriorityUpdate => {
                 self.reconcile_priority_operation(&operation, blocked_by)
@@ -403,6 +429,12 @@ fn retire_verified_operations(
                 results,
                 &mut state_updates,
             ),
+            MutationKind::CommentCreate => comment_create::verify_terminal(
+                &operation,
+                final_replica,
+                results,
+                &mut state_updates,
+            ),
             MutationKind::DependencyUpdate => dependency::verify_terminal(
                 &operation,
                 &final_dependencies,
@@ -461,6 +493,7 @@ fn superseded_terminal_ids(
 #[derive(Clone, Eq, PartialEq)]
 enum MutationTarget {
     IssueCreate(crate::model::TemporaryIssueId),
+    CommentCreate(String),
     Priority(u64),
     Dependency(DependencyEdgeKey),
     IssueField(u64, IssueField),
@@ -475,6 +508,7 @@ fn mutation_target(operation: &PendingMutation) -> MutationTarget {
                 .expect("Issue-create kind has Issue-create values")
                 .temporary_id,
         ),
+        MutationKind::CommentCreate => MutationTarget::CommentCreate(operation.id().to_owned()),
         MutationKind::PriorityUpdate => MutationTarget::Priority(operation.issue_number()),
         MutationKind::DependencyUpdate => MutationTarget::Dependency(
             operation

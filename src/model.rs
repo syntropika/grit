@@ -314,6 +314,14 @@ pub(crate) struct Comment {
     pub(crate) updated_at: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct CommentIdentity {
+    pub(crate) id: u64,
+    pub(crate) node_id: String,
+    pub(crate) url: String,
+    pub(crate) issue_number: u64,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct Dependency {
     pub(crate) blocked: IssueIdentity,

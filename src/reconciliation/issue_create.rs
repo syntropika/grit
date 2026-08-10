@@ -1,4 +1,5 @@
 use super::*;
+use crate::operation_marker;
 
 impl ReconciliationPass<'_, '_, '_, '_> {
     pub(super) fn reconcile_issue_create_operation(
@@ -89,10 +90,11 @@ impl ReconciliationPass<'_, '_, '_, '_> {
         marker: &str,
     ) -> Result<(), ReconciliationError> {
         self.requires_final_refresh = true;
-        let matches = self.marker_matches.get(marker).cloned().unwrap_or_default();
-        match matches.as_slice() {
-            [remote] => self.accept_remote_mapping(operation, remote, Outcome::AlreadySatisfied),
-            [] => {
+        match operation_marker::classify(self.marker_matches.get(marker).map(Vec::as_slice)) {
+            operation_marker::Recovery::Unique(remote) => {
+                self.accept_remote_mapping(operation, &remote, Outcome::AlreadySatisfied)
+            }
+            operation_marker::Recovery::Missing => {
                 let message =
                     "no GitHub Issue contains the persisted Operation marker; create remains unresolved"
                         .to_owned();
@@ -106,10 +108,10 @@ impl ReconciliationPass<'_, '_, '_, '_> {
                 );
                 Ok(())
             }
-            _ => {
+            operation_marker::Recovery::Ambiguous(count) => {
                 let message = format!(
                     "{} GitHub Issues contain the persisted Operation marker; create remains unresolved",
-                    matches.len()
+                    count
                 );
                 self.record_issue_create(
                     operation,
