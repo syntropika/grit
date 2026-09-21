@@ -7,6 +7,7 @@ use super::{
     decision::DecisiveComparison,
     output::{IssueReference, issue_reference},
 };
+use crate::working_graph::{PendingProvenance, WorkingGraph};
 
 #[derive(Clone, Deserialize, JsonSchema, Serialize)]
 #[serde(tag = "code", rename_all = "snake_case", deny_unknown_fields)]
@@ -39,6 +40,8 @@ impl ModeReason {
 #[derive(Clone, Deserialize, JsonSchema, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ComparisonEvidence {
+    #[serde(flatten)]
+    provenance: PendingProvenance,
     reason_code: String,
     component: String,
     winner: IssueReference,
@@ -58,14 +61,27 @@ pub(super) fn evidence(
     decision: &DecisiveComparison,
     winner: &EvaluatedCandidate<'_>,
     runner_up: &EvaluatedCandidate<'_>,
-    repository: &str,
+    working: &WorkingGraph<'_>,
+    ranking_provenance_context: &[u64],
 ) -> ComparisonEvidence {
     let descriptor = decision.descriptor();
+    let provenance = working.provenance_for_issues(
+        winner
+            .data()
+            .steps
+            .iter()
+            .map(|step| step.issue.number)
+            .chain(winner.data().unlocks.iter().map(|issue| issue.number))
+            .chain(runner_up.data().steps.iter().map(|step| step.issue.number))
+            .chain(runner_up.data().unlocks.iter().map(|issue| issue.number))
+            .chain(ranking_provenance_context.iter().copied()),
+    );
     ComparisonEvidence {
+        provenance,
         reason_code: descriptor.reason_code.to_owned(),
         component: descriptor.component.to_owned(),
-        winner: issue_reference(repository, winner.data().issue),
-        runner_up: issue_reference(repository, runner_up.data().issue),
+        winner: issue_reference(working, winner.data().issue),
+        runner_up: issue_reference(working, runner_up.data().issue),
         winner_value: descriptor.winner_value,
         runner_up_value: descriptor.runner_up_value,
         message: descriptor.human_message.to_owned(),

@@ -1,6 +1,8 @@
 use super::*;
 
-impl<'graph, 'issues, 'scope, 'pagerank> Search<'graph, 'issues, 'scope, 'pagerank> {
+impl<'graph, 'issues, 'scope, 'pagerank, 'working>
+    Search<'graph, 'issues, 'scope, 'pagerank, 'working>
+{
     pub(super) fn probe(
         &mut self,
         parent: &SearchState<'graph, 'issues, 'scope>,

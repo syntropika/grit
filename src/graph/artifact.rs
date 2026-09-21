@@ -10,11 +10,12 @@ use super::{
     text::sort_and_deduplicate,
 };
 use crate::{
-    model::{BlockerScope, LocalReplica, strip_operation_markers},
+    model::{BlockerScope, strip_operation_markers},
     operational::{ExecutionScope, PreparedRepository},
     plan::{DependencyLayers, PlanIssue},
     priority::PriorityState,
     ranking::{self, NextAnalysis, PlanDecision},
+    working_graph::{PendingProvenance, WorkingGraph},
 };
 
 pub(crate) const ARTIFACT_SCHEMA_VERSION: &str = "grit.graph-artifact/v2";
@@ -72,6 +73,20 @@ pub(super) struct ElementProvenance {
 }
 
 impl ElementProvenance {
+    fn pending(provenance: PendingProvenance) -> Self {
+        let mut operation_ids = provenance.operation_ids().to_vec();
+        operation_ids.sort();
+        operation_ids.dedup();
+        Self {
+            state: if provenance.is_pending() {
+                ProvenanceState::Pending
+            } else {
+                ProvenanceState::Synchronized
+            },
+            operation_ids,
+        }
+    }
+
     fn synchronized() -> Self {
         Self {
             state: ProvenanceState::Synchronized,
@@ -334,12 +349,32 @@ enum EdgeKind {
     BlockedBy,
 }
 
+#[cfg(test)]
+use crate::model::LocalReplica;
+
+#[cfg(test)]
 pub(super) fn build(
     replica: &LocalReplica,
     scope: ExecutionScope<'_>,
     horizon: u8,
 ) -> Result<GraphArtifact, GraphError> {
-    let prepared = PreparedRepository::prepare(replica);
+    let outbox = serde_json::from_value(serde_json::json!({
+        "schema_version": "grit.pending-mutations/v1",
+        "repository": replica.repository,
+        "operations": [],
+    }))
+    .expect("empty fixture outbox");
+    let working = WorkingGraph::project(replica, &outbox).expect("synchronized fixture");
+    build_working(&working, scope, horizon)
+}
+
+pub(super) fn build_working(
+    working: &WorkingGraph<'_>,
+    scope: ExecutionScope<'_>,
+    horizon: u8,
+) -> Result<GraphArtifact, GraphError> {
+    let replica = working.replica();
+    let prepared = PreparedRepository::prepare(working);
     let ranking::AnalysisBundle {
         run,
         ready,
@@ -349,14 +384,13 @@ pub(super) fn build(
         &prepared,
         scope,
         horizon,
-        &[],
         &mut ranking::RankingCache::default(),
     );
     let next = run.analysis;
     let ready_numbers: BTreeSet<_> = ready.ready.iter().map(|issue| issue.number).collect();
     let effective_input_hash = next.input_hash().to_owned();
     let decision = next.clone().into_plan_decision();
-    let structural = crate::plan::analyze_with_ready(prepared.graph(), scope, &ready);
+    let structural = crate::plan::analyze_with_ready(&prepared, scope, &ready);
     let execution_scope = match scope {
         ExecutionScope::Available => ArtifactExecutionScope::Available,
         ExecutionScope::Assignee(assignee) => ArtifactExecutionScope::Assignee {
@@ -410,14 +444,14 @@ pub(super) fn build(
                 repository: replica.repository.clone(),
                 number: issue.number,
                 position: unresolved_position(),
-                provenance: ElementProvenance::synchronized(),
+                provenance: ElementProvenance::pending(working.provenance_for_issue(issue.number)),
             },
             status,
             url: issue.url.clone(),
             title: strip_operation_markers(&issue.title),
             assignees,
             labels,
-            priority: PriorityState::from_issue_labels(&issue.labels),
+            priority: working.priority(issue),
             pagerank_bucket: pagerank_buckets.get(&issue.number).copied(),
             unlock_count,
             projects: None,
@@ -502,11 +536,17 @@ pub(super) fn build(
     nodes.sort_by(|left, right| left.key().cmp(right.key()));
     let edges: Vec<_> = edges.into_iter().collect();
     super::layout::assign_artifact_dependency_layers(&mut nodes, &edges)?;
+    let mut pending_operation_ids = working.operation_ids();
+    pending_operation_ids.sort();
     let provenance = ArtifactProvenance {
         base: ProvenanceState::Synchronized,
-        state: ProvenanceState::Synchronized,
-        pending_mutation_count: 0,
-        pending_operation_ids: Vec::new(),
+        state: if working.is_pending() {
+            ProvenanceState::Pending
+        } else {
+            ProvenanceState::Synchronized
+        },
+        pending_mutation_count: pending_operation_ids.len() as u64,
+        pending_operation_ids,
     };
     let operational_counts = OperationalCounts {
         operational_issue_count: ready.operational_issue_count,

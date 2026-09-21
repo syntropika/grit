@@ -1,7 +1,7 @@
-use std::process::Command;
+use std::{fs, process::Command};
 
 use mockito::Server;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 mod support;
@@ -76,6 +76,8 @@ fn plan_reuses_next_decision_and_ready_execution_frontier() {
     assert_eq!(next["performance"]["cache_hit"], true);
     for field in [
         "input_hash",
+        "pending",
+        "pending_operation_ids",
         "mode",
         "metrics",
         "recommendation",
@@ -111,6 +113,109 @@ fn plan_reuses_next_decision_and_ready_execution_frontier() {
         issue_numbers(&ready["issues"])
     );
     assert_eq!(issue_numbers(&plan["parallel_now"]), vec![1, 2]);
+}
+
+#[test]
+fn pending_plan_and_next_share_cached_decisions_and_projected_structural_priorities() {
+    let repository = "acme/pending-plan";
+    let issues = vec![
+        issue_for(repository, 1, "open", &["priority:p4"], &[]),
+        issue_for(repository, 2, "open", &["priority:p1"], &[]),
+        issue_for(repository, 3, "open", &["priority:p4"], &[]),
+    ];
+    let dependencies = vec![
+        (1, vec![]),
+        (2, vec![]),
+        (3, vec![internal_blocker_for(repository, 1, "open")]),
+    ];
+    let (state, api_url) = seeded_replica(repository, issues, dependencies);
+    let baseline = grit_command_for(&state, &api_url, repository, "next", None)
+        .output()
+        .expect("rank synchronized priorities");
+    assert_success(&baseline);
+    let baseline: Value = serde_json::from_slice(&baseline.stdout).expect("baseline next JSON");
+    let repository_directory = state.path().join("repositories/acme/pending-plan");
+    let snapshot_path = repository_directory.join("replica.json");
+    let snapshot_before = fs::read(&snapshot_path).expect("synchronized snapshot");
+    let mut operation_ids = Vec::new();
+    for (number, priority) in [(3, "p0"), (2, "p2")] {
+        let output = Command::new(env!("CARGO_BIN_EXE_grit"))
+            .args([
+                "update",
+                &format!("{repository}#{number}"),
+                "--priority",
+                priority,
+                "--json",
+            ])
+            .env("GRIT_STATE_DIR", state.path())
+            .env("GRIT_GITHUB_API_URL", &api_url)
+            .env("GH_TOKEN", "test-token")
+            .output()
+            .expect("queue pending Priority");
+        assert_success(&output);
+        let output: Value = serde_json::from_slice(&output.stdout).expect("pending update JSON");
+        operation_ids.push(output["operation"]["id"].clone());
+    }
+    let outbox_path = repository_directory.join("outbox.json");
+    let outbox_before = fs::read(&outbox_path).expect("pending mutations");
+    let plan_command = || grit_command_for(&state, &api_url, repository, "plan", None);
+    let plan = plan_command().output().expect("plan pending graph");
+    let next = grit_command_for(&state, &api_url, repository, "next", None)
+        .arg("--profile")
+        .output()
+        .expect("reuse pending plan cache in next");
+    let repeated_plan = plan_command().output().expect("repeat cached pending plan");
+    assert_success(&plan);
+    assert_success(&next);
+    assert_success(&repeated_plan);
+    assert_eq!(plan.stdout, repeated_plan.stdout);
+    let plan: Value = serde_json::from_slice(&plan.stdout).expect("pending plan JSON");
+    let next: Value = serde_json::from_slice(&next.stdout).expect("pending next JSON");
+    assert_eq!(next["performance"]["cache_hit"], true);
+    for (field, value) in plan["decision"].as_object().expect("decision object") {
+        if field == "parameters" {
+            for (parameter, expected) in value.as_object().expect("parameters") {
+                assert_eq!(expected, &next[field][parameter], "shared {parameter}");
+            }
+        } else {
+            assert_eq!(value, &next[field], "shared {field}");
+        }
+    }
+    assert_ne!(next["input_hash"], baseline["input_hash"]);
+    assert_eq!(plan["decision"]["pending"], true);
+    assert_eq!(
+        plan["decision"]["pending_operation_ids"],
+        json!(operation_ids)
+    );
+    assert_eq!(plan["decision"]["mode"], "p0_route");
+    assert_eq!(
+        plan["decision"]["recommendation"]["first_issue"]["number"],
+        1
+    );
+    assert_eq!(
+        plan["decision"]["recommendation"]["operation_ids"],
+        json!(operation_ids)
+    );
+    assert_eq!(layer_numbers(&plan), vec![vec![1, 2], vec![3]]);
+    let target = &layer(&plan, 1)["issues"][0];
+    assert_eq!(target["priority"]["value"], "p0");
+    assert_eq!(target["operation_ids"], json!([operation_ids[0]]));
+    let parallel = plan["parallel_now"]
+        .as_array()
+        .expect("parallel Issues")
+        .iter()
+        .find(|issue| issue["number"] == 2)
+        .expect("pending parallel Issue");
+    assert_eq!(parallel["priority"]["value"], "p2");
+    assert_eq!(parallel["operation_ids"], json!([operation_ids[1]]));
+    assert_eq!(
+        fs::read(snapshot_path).expect("unchanged snapshot"),
+        snapshot_before
+    );
+    assert_eq!(
+        fs::read(outbox_path).expect("unchanged pending mutations"),
+        outbox_before
+    );
 }
 
 #[test]
