@@ -4,13 +4,10 @@ Grit treats the Issues and native Dependencies in one GitHub Repository as a
 graph. GitHub remains the source of truth; Grit keeps a disposable Local
 replica so later analysis can be fast and work offline.
 
-The current executable tracer implements full synchronization and Executable
-frontier enumeration from
-[Issue #2](https://github.com/syntropika/grit/issues/2) and
-[Issue #3](https://github.com/syntropika/grit/issues/3), plus canonical
-Declared priority support from
-[Issue #6](https://github.com/syntropika/grit/issues/6) and
-[Issue #9](https://github.com/syntropika/grit/issues/9).
+Grit supports full and incremental synchronization, Dependency-event continuity,
+Executable frontier enumeration, canonical Declared priority initialization,
+native Dependency mutations, Declared priority updates, and deterministic
+static graph artifacts.
 
 ## Build and test
 
@@ -41,11 +38,29 @@ Set `GRIT_STATE_DIR` to isolate it, for example in CI. `GRIT_GITHUB_API_URL`
 and `GRIT_GITHUB_HOST` support GitHub Enterprise and deterministic test
 servers; the API URL must be a credential-free HTTP(S) base URL.
 
-A synchronization retrieves every page of Issues and Repository Issue
+The first synchronization retrieves every page of Issues and Repository Issue
 comments, then the native `blocked_by` Dependencies for each Issue. Pull
-Requests returned by the Issues endpoint are excluded. Grit writes only a
-normalized model and atomically replaces the previous valid replica after the
-entire load succeeds.
+Requests returned by the Issues endpoint are excluded. Later runs request
+ordinary Issue and comment changes from an overlapped `updated_at` watermark,
+paginate them in stable creation order, upsert them by stable GitHub identity,
+and refresh Dependencies only for Issues whose ordinary fields changed. A
+scoped ETag is reused only when the preceding delta proved that the complete
+representation fit in fewer than 100 items; it is never treated as a
+Repository-wide continuity guarantee.
+
+Dependency additions and removals use a separate Repository event checkpoint.
+Grit canonicalizes the mirrored `blocked_by` and `blocking` events into one
+edge direction and fetches any referenced in-scope Issue absent from the Local
+replica. A one-request GraphQL count probe also detects Issues that disappeared
+without a REST delta tombstone. If that count diverges, the checkpoint
+disappears from the available event history, no event-ID anchor exists, an
+event cannot be interpreted safely, or an Issue was transferred or deleted,
+Grit discards the partial delta and performs a Full reconciliation before
+publishing anything.
+
+Grit writes only a normalized model and atomically replaces the previous valid
+replica after every required page has completed. A failed or rate-limited delta
+leaves the prior replica, internal watermark, and visible `synced_at` intact.
 
 The replica file format and location below `GRIT_STATE_DIR` are implementation
 details. Consumers should use Grit's versioned command output rather than read
@@ -99,6 +114,44 @@ If GitHub cannot be reached, `ready` uses the latest valid Local replica and
 reports its unchanged `synced_at`. A replica is accepted only when its schema,
 Repository scope, timestamp, and deterministic content hash validate. If no
 valid replica exists, the command fails instead of inventing an empty graph.
+
+## Change native Dependencies
+
+Use full Issue references so the direction remains explicit:
+
+```bash
+grit block OWNER/REPO#42 --by OWNER/REPO#7
+grit unblock OWNER/REPO#42 --by OWNER/REPO#7 --json
+```
+
+The first command means “Issue #42 is blocked by Issue #7.” Grit writes the
+native GitHub `blocked_by` relationship, then performs a complete synchronized
+readback before atomically replacing the Local replica. Repeating either
+operation uses set semantics: an existing edge can be added again and an absent
+edge can be removed again without error. If the write outcome or readback is
+uncertain, the previous Local replica remains unchanged.
+
+## Generate a static graph artifact
+
+`grit graph` writes a complete static site without a live service or
+browser-side GitHub client:
+
+```bash
+grit graph --repo OWNER/REPO --output site/
+grit graph --repo OWNER/REPO --output site/ --json
+```
+
+The target contains `index.html`, `graph.json`, and `graph.schema.json`. The
+versioned JSON uses explicit `blocked` and `blocker` edge roles, normalized
+Issue fields, precomputed layered positions, operational counts, hashes, and
+provenance. Bodies, comments, raw API records, and Operation markers are not
+part of the artifact. The HTML is an accessible, script-free table with no
+remote assets.
+
+Generation validates the closed artifact model in a staging directory before
+replacing the target. Regenerating from the same effective Local replica is
+byte-stable. `synced_at` is the only time field and changes only when the input
+replica itself has a different synchronization timestamp.
 
 ## Product decisions
 

@@ -1,6 +1,8 @@
 mod auth;
 mod cli;
+mod dependency_events;
 mod github;
+mod graph;
 mod model;
 mod operational;
 mod priority;
@@ -8,6 +10,7 @@ mod priority_update;
 mod replica_sync;
 mod repository;
 mod store;
+mod synchronization;
 
 use std::process::ExitCode;
 

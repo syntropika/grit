@@ -23,7 +23,7 @@ pub(crate) fn update(
     issue: &IssueReference,
     selection: PrioritySelection,
 ) -> Result<PriorityUpdateResult, PriorityUpdateError> {
-    let before = client.fetch_issue(issue.repository(), issue.number())?;
+    let before = client.fetch_issue_for_update(issue.repository(), issue.number())?;
     let previous_priority = PriorityState::from_issue_labels(&before.labels);
     let desired = selection.desired();
     let mut remote_changed = false;
