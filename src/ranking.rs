@@ -1,3 +1,5 @@
+use std::num::NonZeroUsize;
+
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
@@ -9,7 +11,7 @@ mod search;
 
 use crate::{
     model::Issue,
-    operational::{ExecutionScope, IssueState, OperationalGraph},
+    operational::{ExecutionScope, OperationalGraph},
     priority::PriorityComparison,
     working_graph::WorkingGraph,
 };
@@ -29,10 +31,30 @@ const STATE_BUDGET: usize = 8_192;
 #[derive(Clone)]
 struct EvaluatedStep<'a> {
     issue: &'a Issue,
-    mode: RankingMode,
+    selection: StepSelection,
 }
 
-struct EvaluatedCandidate<'a> {
+#[derive(Clone, Copy)]
+enum StepSelection {
+    P0Ready,
+    P0Route {
+        feasible_distance: NonZeroUsize,
+        qualifying_p0_count: NonZeroUsize,
+    },
+    Normal,
+}
+
+impl StepSelection {
+    fn mode(self) -> RankingMode {
+        match self {
+            Self::P0Ready => RankingMode::P0Ready,
+            Self::P0Route { .. } => RankingMode::P0Route,
+            Self::Normal => RankingMode::Normal,
+        }
+    }
+}
+
+struct CandidateData<'a> {
     issue: &'a Issue,
     steps: Vec<EvaluatedStep<'a>>,
     unlocks: Vec<&'a Issue>,
@@ -41,6 +63,44 @@ struct EvaluatedCandidate<'a> {
     p0_curve: Vec<usize>,
     step_priorities: Vec<StepPriority>,
     pagerank_bucket: Option<u64>,
+}
+
+struct CriticalRouteOutcome {
+    feasible_distance: NonZeroUsize,
+    realized_distance: Option<NonZeroUsize>,
+    qualifying_p0_count: NonZeroUsize,
+}
+
+impl CriticalRouteOutcome {
+    fn distance(&self) -> NonZeroUsize {
+        self.realized_distance.unwrap_or(self.feasible_distance)
+    }
+}
+
+enum EvaluatedCandidate<'a> {
+    Normal(CandidateData<'a>),
+    P0Ready(CandidateData<'a>),
+    CriticalRoute {
+        candidate: CandidateData<'a>,
+        route: CriticalRouteOutcome,
+    },
+}
+
+impl<'a> EvaluatedCandidate<'a> {
+    fn data(&self) -> &CandidateData<'a> {
+        match self {
+            Self::Normal(candidate)
+            | Self::P0Ready(candidate)
+            | Self::CriticalRoute { candidate, .. } => candidate,
+        }
+    }
+
+    fn into_parts(self) -> (CandidateData<'a>, Option<CriticalRouteOutcome>) {
+        match self {
+            Self::Normal(candidate) | Self::P0Ready(candidate) => (candidate, None),
+            Self::CriticalRoute { candidate, route } => (candidate, Some(route)),
+        }
+    }
 }
 
 pub(crate) fn analyze(
@@ -52,12 +112,6 @@ pub(crate) fn analyze(
     let graph = OperationalGraph::prepare(replica);
     let ready = graph.analyze_ready(scope);
     let pagerank = PageRank::calculate(&graph);
-    let deferred_critical_routes = horizon > 1
-        && replica.issues.iter().any(|issue| {
-            IssueState::parse(&issue.state) == IssueState::Open
-                && priority(working, issue) == PriorityComparison::P0
-                && !graph.is_ready(issue.number)
-        });
     let search = search::evaluate(
         working,
         &graph,
@@ -65,18 +119,17 @@ pub(crate) fn analyze(
         pagerank.as_ref(),
         horizon,
         STATE_BUDGET,
-        deferred_critical_routes,
     );
     let mode = search.mode;
     let candidate_count = search.candidate_count;
     let search_complete = search.truncated_by.is_empty();
     let truncated_by = search.truncated_by;
     let ranking_provenance_context: Vec<_> = search.provenance_numbers.into_iter().collect();
-    let evaluated = select_top_candidates(search.candidates, mode, ALTERNATIVE_LIMIT + 1);
+    let evaluated = select_top_candidates(search.candidates, ALTERNATIVE_LIMIT + 1);
     let decisive = evaluated
         .first()
         .zip(evaluated.get(1))
-        .map(|(winner, runner_up)| decision::compare(winner, runner_up, mode).decisive);
+        .map(|(winner, runner_up)| decision::compare(winner, runner_up).decisive);
     let comparison = decisive
         .as_ref()
         .zip(evaluated.first().zip(evaluated.get(1)))
@@ -100,7 +153,7 @@ pub(crate) fn analyze(
         .count();
 
     let mut ranked_results = evaluated.into_iter().enumerate().map(|(index, candidate)| {
-        let mut reasons = explanation::mode_reasons(mode, executable_p0_count, &candidate);
+        let mut reasons = explanation::mode_reasons(executable_p0_count, &candidate);
         if index == 0 {
             if let Some(reason) = comparison_reason.take() {
                 reasons.push(reason);
@@ -133,7 +186,6 @@ pub(crate) fn analyze(
 
 fn select_top_candidates<'a>(
     candidates: impl IntoIterator<Item = EvaluatedCandidate<'a>>,
-    mode: RankingMode,
     limit: usize,
 ) -> Vec<EvaluatedCandidate<'a>> {
     let mut best = Vec::with_capacity(limit);
@@ -141,7 +193,7 @@ fn select_top_candidates<'a>(
         let position = best
             .iter()
             .position(|current| {
-                decision::compare(&candidate, current, mode).ordering == std::cmp::Ordering::Greater
+                decision::compare(&candidate, current).ordering == std::cmp::Ordering::Greater
             })
             .unwrap_or(best.len());
         if position < limit {
