@@ -1,20 +1,29 @@
+use std::{
+    num::NonZeroUsize,
+    time::{Duration, Instant},
+};
+
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
+mod cache;
 mod decision;
 mod explanation;
 mod output;
 mod pagerank;
+#[cfg(test)]
+mod performance_tests;
 mod search;
 
 use crate::{
     model::Issue,
-    operational::{ExecutionScope, IssueState, OperationalGraph},
+    operational::{ExecutionScope, PreparedRepository},
     priority::PriorityComparison,
     working_graph::WorkingGraph,
 };
+pub(crate) use cache::RankingCache;
 use decision::{PriorityProfile, RankingMode, StepPriority};
-pub(crate) use output::NextAnalysis;
+pub(crate) use output::{NextAnalysis, PlanDecision};
 use output::{NextResult, NextSummary};
 use pagerank::PageRank;
 
@@ -29,10 +38,30 @@ const STATE_BUDGET: usize = 8_192;
 #[derive(Clone)]
 struct EvaluatedStep<'a> {
     issue: &'a Issue,
-    mode: RankingMode,
+    selection: StepSelection,
 }
 
-struct EvaluatedCandidate<'a> {
+#[derive(Clone, Copy)]
+enum StepSelection {
+    P0Ready,
+    P0Route {
+        feasible_distance: NonZeroUsize,
+        qualifying_p0_count: NonZeroUsize,
+    },
+    Normal,
+}
+
+impl StepSelection {
+    fn mode(self) -> RankingMode {
+        match self {
+            Self::P0Ready => RankingMode::P0Ready,
+            Self::P0Route { .. } => RankingMode::P0Route,
+            Self::Normal => RankingMode::Normal,
+        }
+    }
+}
+
+struct CandidateData<'a> {
     issue: &'a Issue,
     steps: Vec<EvaluatedStep<'a>>,
     unlocks: Vec<&'a Issue>,
@@ -43,40 +72,134 @@ struct EvaluatedCandidate<'a> {
     pagerank_bucket: Option<u64>,
 }
 
-pub(crate) fn analyze(
+struct CriticalRouteOutcome {
+    feasible_distance: NonZeroUsize,
+    realized_distance: Option<NonZeroUsize>,
+    qualifying_p0_count: NonZeroUsize,
+}
+
+impl CriticalRouteOutcome {
+    fn distance(&self) -> NonZeroUsize {
+        self.realized_distance.unwrap_or(self.feasible_distance)
+    }
+}
+
+enum EvaluatedCandidate<'a> {
+    Normal(CandidateData<'a>),
+    P0Ready(CandidateData<'a>),
+    CriticalRoute {
+        candidate: CandidateData<'a>,
+        route: CriticalRouteOutcome,
+    },
+}
+
+impl<'a> EvaluatedCandidate<'a> {
+    fn data(&self) -> &CandidateData<'a> {
+        match self {
+            Self::Normal(candidate)
+            | Self::P0Ready(candidate)
+            | Self::CriticalRoute { candidate, .. } => candidate,
+        }
+    }
+
+    fn into_parts(self) -> (CandidateData<'a>, Option<CriticalRouteOutcome>) {
+        match self {
+            Self::Normal(candidate) | Self::P0Ready(candidate) => (candidate, None),
+            Self::CriticalRoute { candidate, route } => (candidate, Some(route)),
+        }
+    }
+}
+
+pub(crate) struct AnalysisRun {
+    pub(crate) analysis: NextAnalysis,
+    pub(crate) profile: AnalysisProfile,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct AnalysisProfile {
+    pub(crate) graph_preparation: Duration,
+    pub(crate) scc_detection: Duration,
+    pub(crate) readiness: Duration,
+    pub(crate) cache_lookup: Duration,
+    pub(crate) pagerank: Duration,
+    pub(crate) search: Duration,
+    pub(crate) output_assembly: Duration,
+    pub(crate) cache_publication: Duration,
+    pub(crate) total: Duration,
+    pub(crate) cache_hit: bool,
+    pub(crate) cache_published: bool,
+}
+
+pub(crate) fn analyze_profiled(
     working: &WorkingGraph<'_>,
     scope: ExecutionScope<'_>,
     horizon: u8,
-) -> NextAnalysis {
-    let replica = working.replica();
-    let graph = OperationalGraph::prepare(replica);
+    cache: &mut RankingCache,
+) -> AnalysisRun {
+    let total_started = Instant::now();
+    let (prepared, graph_timings) = PreparedRepository::prepare_profiled(working);
+    let mut run = analyze_prepared(&prepared, scope, horizon, cache);
+    run.profile.graph_preparation = graph_timings.graph_preparation;
+    run.profile.scc_detection = graph_timings.scc_detection;
+    run.profile.total = total_started.elapsed();
+    run
+}
+
+pub(crate) fn analyze_prepared(
+    prepared: &PreparedRepository<'_>,
+    scope: ExecutionScope<'_>,
+    horizon: u8,
+    cache: &mut RankingCache,
+) -> AnalysisRun {
+    let total_started = Instant::now();
+    let working = prepared.working();
+    let graph = prepared.graph();
+    let readiness_started = Instant::now();
     let ready = graph.analyze_ready(scope);
-    let pagerank = PageRank::calculate(&graph);
-    let deferred_critical_routes = horizon > 1
-        && replica.issues.iter().any(|issue| {
-            IssueState::parse(&issue.state) == IssueState::Open
-                && priority(working, issue) == PriorityComparison::P0
-                && !graph.is_ready(issue.number)
-        });
-    let search = search::evaluate(
-        working,
-        &graph,
-        scope,
-        pagerank.as_ref(),
-        horizon,
-        STATE_BUDGET,
-        deferred_critical_routes,
-    );
+    let readiness = readiness_started.elapsed();
+    let input_hash = effective_input_hash(working, scope);
+    let cache_key = ranking_cache_key(&input_hash, horizon);
+    let cache_lookup_started = Instant::now();
+    let cached = cache.lookup(&cache_key, working, graph, scope, horizon);
+    let cache_lookup = cache_lookup_started.elapsed();
+    let cache_hit = cached.is_some();
+    let mut pagerank_duration = Duration::ZERO;
+    let mut search_duration = Duration::ZERO;
+    let mut cache_publication = Duration::ZERO;
+    let mut cache_published = false;
+    let (pagerank, search) = if let Some(cached) = cached {
+        cached
+    } else {
+        let pagerank_started = Instant::now();
+        let pagerank = PageRank::calculate(graph);
+        pagerank_duration = pagerank_started.elapsed();
+        let search_started = Instant::now();
+        let search = search::evaluate(
+            working,
+            graph,
+            scope,
+            pagerank.as_ref(),
+            horizon,
+            STATE_BUDGET,
+        );
+        search_duration = search_started.elapsed();
+        let cache_publication_started = Instant::now();
+        cache_published = cache.publish(cache_key, pagerank.as_ref(), &search);
+        cache_publication = cache_publication_started.elapsed();
+        (pagerank, search)
+    };
+    let output_started = Instant::now();
     let mode = search.mode;
     let candidate_count = search.candidate_count;
     let search_complete = search.truncated_by.is_empty();
     let truncated_by = search.truncated_by;
+    let work = search.work;
     let ranking_provenance_context: Vec<_> = search.provenance_numbers.into_iter().collect();
-    let evaluated = select_top_candidates(search.candidates, mode, ALTERNATIVE_LIMIT + 1);
+    let evaluated = select_top_candidates(search.candidates, ALTERNATIVE_LIMIT + 1);
     let decisive = evaluated
         .first()
         .zip(evaluated.get(1))
-        .map(|(winner, runner_up)| decision::compare(winner, runner_up, mode).decisive);
+        .map(|(winner, runner_up)| decision::compare(winner, runner_up).decisive);
     let comparison = decisive
         .as_ref()
         .zip(evaluated.first().zip(evaluated.get(1)))
@@ -100,7 +223,7 @@ pub(crate) fn analyze(
         .count();
 
     let mut ranked_results = evaluated.into_iter().enumerate().map(|(index, candidate)| {
-        let mut reasons = explanation::mode_reasons(mode, executable_p0_count, &candidate);
+        let mut reasons = explanation::mode_reasons(executable_p0_count, &candidate);
         if index == 0 {
             if let Some(reason) = comparison_reason.take() {
                 reasons.push(reason);
@@ -112,9 +235,9 @@ pub(crate) fn analyze(
     });
     let recommendation = ranked_results.next();
     let alternatives: Vec<_> = ranked_results.take(ALTERNATIVE_LIMIT).collect();
-    let summary = NextSummary::from_graph(&ready, candidate_count, &graph);
-    NextAnalysis::from_search(NextResult {
-        input_hash: effective_input_hash(working, scope),
+    let summary = NextSummary::from_graph(&ready, candidate_count, graph);
+    let analysis = NextAnalysis::from_search(NextResult {
+        input_hash,
         pending: working.is_pending(),
         pending_operation_ids: working.operation_ids(),
         horizon,
@@ -128,12 +251,29 @@ pub(crate) fn analyze(
         search_complete,
         truncated_by,
         summary,
-    })
+        work,
+    });
+    let output_assembly = output_started.elapsed();
+    AnalysisRun {
+        analysis,
+        profile: AnalysisProfile {
+            graph_preparation: Duration::ZERO,
+            scc_detection: Duration::ZERO,
+            readiness,
+            cache_lookup,
+            pagerank: pagerank_duration,
+            search: search_duration,
+            output_assembly,
+            cache_publication,
+            total: total_started.elapsed(),
+            cache_hit,
+            cache_published,
+        },
+    }
 }
 
 fn select_top_candidates<'a>(
     candidates: impl IntoIterator<Item = EvaluatedCandidate<'a>>,
-    mode: RankingMode,
     limit: usize,
 ) -> Vec<EvaluatedCandidate<'a>> {
     let mut best = Vec::with_capacity(limit);
@@ -141,7 +281,7 @@ fn select_top_candidates<'a>(
         let position = best
             .iter()
             .position(|current| {
-                decision::compare(&candidate, current, mode).ordering == std::cmp::Ordering::Greater
+                decision::compare(&candidate, current).ordering == std::cmp::Ordering::Greater
             })
             .unwrap_or(best.len());
         if position < limit {
@@ -166,8 +306,28 @@ fn effective_input_hash(working: &WorkingGraph<'_>, scope: ExecutionScope<'_>) -
         "execution_scope": {
             "mode": mode,
             "assignee": assignee,
-        }
+        },
     });
     let canonical = serde_json::to_vec(&input).expect("effective input hash is serializable");
+    hex::encode(Sha256::digest(canonical))
+}
+
+fn ranking_cache_key(input_hash: &str, horizon: u8) -> String {
+    let input = json!({
+        "schema_version": "grit.ranking-cache-key/v1",
+        "effective_input_hash": input_hash,
+        "policy_version": POLICY_VERSION,
+        "parameters": {
+            "horizon": horizon,
+            "alternative_limit": ALTERNATIVE_LIMIT,
+            "state_budget": STATE_BUDGET,
+            "pagerank": {
+                "damping": pagerank::DAMPING,
+                "iterations": pagerank::ITERATIONS,
+                "bucket_scale": pagerank::BUCKET_SCALE,
+            }
+        }
+    });
+    let canonical = serde_json::to_vec(&input).expect("ranking cache key is serializable");
     hex::encode(Sha256::digest(canonical))
 }

@@ -1,4 +1,4 @@
-use std::{env, path::PathBuf};
+use std::{env, path::PathBuf, time::Instant};
 
 use clap::{ArgGroup, Parser, Subcommand};
 use serde::Serialize;
@@ -13,14 +13,15 @@ use crate::{
     },
     graph::{GraphError, PublicGraphOptions, confirm_public_repository, publish_site},
     model::{LocalReplica, ReplicaError},
-    operational::{ExecutionScope, analyze_ready},
+    operational::{ExecutionScope, PreparedRepository, analyze_ready},
     outbox::{OutboxError, OutboxStore, PendingMutation},
+    plan::{DependencyLayers, PlanIssue},
     priority::{
         DeclaredPriority, LogicalPriority, PrioritySelection, PriorityState,
         missing_canonical_labels, present_canonical_labels,
     },
     priority_update::{self, PendingPriorityUpdateError, PriorityUpdateError},
-    ranking::{self, NextAnalysis},
+    ranking::{self, NextAnalysis, PlanDecision},
     reconciliation::{self, ReconciliationError, ResolutionChoice},
     replica_sync::{self, ReplicaSyncError},
     repository::{IssueReference, IssueReferenceError, Repository, RepositoryError},
@@ -35,6 +36,7 @@ const GRAPH_SCHEMA_VERSION: &str = "grit.graph/v1";
 const DEPENDENCY_MUTATION_SCHEMA_VERSION: &str = "grit.dependency-mutation/v1";
 const INIT_SCHEMA_VERSION: &str = "grit.init/v1";
 const TRIAGE_SCHEMA_VERSION: &str = "grit.triage/v1";
+const PLAN_SCHEMA_VERSION: &str = "grit.plan/v1";
 const PRIORITY_UPDATE_SCHEMA_VERSION: &str = "grit.priority-update/v1";
 const RESOLVE_SCHEMA_VERSION: &str = "grit.resolve/v1";
 
@@ -58,6 +60,27 @@ enum Command {
         /// Number of completions to evaluate, from one through the default three.
         #[arg(long, default_value_t = ranking::DEFAULT_HORIZON)]
         horizon: u8,
+        /// Emit versioned machine-readable output.
+        #[arg(long)]
+        json: bool,
+        /// Report local ranking phase timings; Synchronization is excluded.
+        #[arg(long)]
+        profile: bool,
+    },
+    /// Explain the best rollout and structural dependency layers.
+    Plan {
+        /// Repository in OWNER/REPO form.
+        #[arg(long)]
+        repo: String,
+        /// Select Ready work assigned to this GitHub login.
+        #[arg(long)]
+        assignee: Option<String>,
+        /// Number of completions to evaluate, from one through the default three.
+        #[arg(long, default_value_t = ranking::DEFAULT_HORIZON)]
+        horizon: u8,
+        /// Capacity is intentionally unsupported by plan/v1.
+        #[arg(long)]
+        workers: Option<usize>,
         /// Emit versioned machine-readable output.
         #[arg(long)]
         json: bool,
@@ -220,10 +243,25 @@ pub(crate) fn execute() -> Result<(), CliError> {
             assignee,
             horizon,
             json,
+            profile,
         } => next(
             &Repository::parse(&repo)?,
             assignee.as_deref(),
             horizon,
+            json,
+            profile,
+        ),
+        Command::Plan {
+            repo,
+            assignee,
+            horizon,
+            workers,
+            json,
+        } => plan(
+            &Repository::parse(&repo)?,
+            assignee.as_deref(),
+            horizon,
+            workers,
             json,
         ),
         Command::Triage {
@@ -417,6 +455,80 @@ fn graph(
                 "warning: GitHub refresh failed; generated from Local replica at {}",
                 replica.synced_at
             );
+        }
+    }
+    Ok(())
+}
+
+fn plan(
+    repository: &Repository,
+    assignee: Option<&str>,
+    horizon: u8,
+    workers: Option<usize>,
+    json: bool,
+) -> Result<(), CliError> {
+    if workers.is_some() {
+        return Err(CliError::UnsupportedPlanWorkers);
+    }
+    if !(ranking::MIN_HORIZON..=ranking::MAX_HORIZON).contains(&horizon) {
+        return Err(CliError::UnsupportedNextHorizon(horizon));
+    }
+    let (replica, source) = refresh_or_local(repository)?;
+    let scope = assignee
+        .map(ExecutionScope::Assignee)
+        .unwrap_or(ExecutionScope::Available);
+    let outbox = OutboxStore::discover(repository)?.load(repository)?;
+    let working = WorkingGraph::project(&replica, &outbox)?;
+    let prepared = PreparedRepository::prepare(&working);
+    let store = ReplicaStore::discover(repository)?;
+    let mut cache = ranking::RankingCache::at(store.repository_directory());
+    let decision = ranking::analyze_prepared(&prepared, scope, horizon, &mut cache)
+        .analysis
+        .into_plan_decision();
+    let structural = crate::plan::analyze(&prepared, scope);
+    let parallel_now = structural.parallel_now;
+    let dependency_layers = structural.dependency_layers;
+    let warnings = analysis_warnings(&working, source);
+
+    if json {
+        let output = PlanOutput {
+            schema_version: PLAN_SCHEMA_VERSION,
+            policy_version: ranking::POLICY_VERSION,
+            command: "plan",
+            repository: &replica.repository,
+            source,
+            synced_at: &replica.synced_at,
+            replica_snapshot_hash: &replica.input_hash,
+            execution_scope: execution_scope_output(assignee),
+            decision,
+            parallel_now,
+            dependency_layers,
+            warnings,
+        };
+        serde_json::to_writer(std::io::stdout().lock(), &output).map_err(CliError::EncodeOutput)?;
+        println!();
+    } else {
+        println!(
+            "plan/v1 for {} (synced_at {}):",
+            replica.repository, replica.synced_at
+        );
+        match decision.recommendation() {
+            Some(recommendation) => println!("{}", recommendation.human_summary()),
+            None => println!("{}", decision.summary().human_empty_summary()),
+        }
+        println!("parallel_now:");
+        for issue in &parallel_now {
+            println!("#{} {}", issue.number, issue.title);
+        }
+        println!("dependency layers (counterfactual topology):");
+        for layer in dependency_layers.human_lines() {
+            println!("{layer}");
+        }
+        if let Some(warning) = decision.truncation_warning() {
+            eprintln!("warning: {warning}");
+        }
+        for warning in &warnings {
+            print_warning(warning);
         }
     }
     Ok(())
@@ -625,6 +737,7 @@ fn next(
     assignee: Option<&str>,
     horizon: u8,
     json: bool,
+    profile: bool,
 ) -> Result<(), CliError> {
     if !(ranking::MIN_HORIZON..=ranking::MAX_HORIZON).contains(&horizon) {
         return Err(CliError::UnsupportedNextHorizon(horizon));
@@ -635,7 +748,17 @@ fn next(
     let scope = assignee
         .map(ExecutionScope::Assignee)
         .unwrap_or(ExecutionScope::Available);
-    let analysis = ranking::analyze(&working, scope, horizon);
+    let store = ReplicaStore::discover(repository)?;
+    let mut cache = ranking::RankingCache::at(store.repository_directory());
+    let run = ranking::analyze_profiled(&working, scope, horizon, &mut cache);
+    let analysis = run.analysis;
+    let analysis_serialization = (profile && json).then(|| {
+        let serialization_started = Instant::now();
+        let _ = serde_json::to_vec(&analysis).expect("Next analysis is serializable");
+        serialization_started.elapsed()
+    });
+    let performance =
+        profile.then(|| PerformanceOutput::from_profile(run.profile, analysis_serialization));
     let warnings = analysis_warnings(&working, source);
     if json {
         let output = NextOutput {
@@ -649,6 +772,7 @@ fn next(
             execution_scope: execution_scope_output(assignee),
             analysis,
             warnings,
+            performance,
         };
         serde_json::to_writer(std::io::stdout().lock(), &output).map_err(CliError::EncodeOutput)?;
         println!();
@@ -666,6 +790,9 @@ fn next(
         }
         for warning in &warnings {
             print_warning(warning);
+        }
+        if let Some(performance) = performance {
+            eprintln!("{}", performance.human_summary());
         }
     }
     Ok(())
@@ -1107,6 +1234,81 @@ struct NextOutput<'a> {
     #[serde(flatten)]
     analysis: NextAnalysis,
     warnings: Vec<ReadyWarning>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    performance: Option<PerformanceOutput>,
+}
+
+#[derive(Serialize)]
+struct PerformanceOutput {
+    unit: &'static str,
+    graph_preparation: u128,
+    scc_detection: u128,
+    readiness: u128,
+    cache_lookup: u128,
+    pagerank: u128,
+    search: u128,
+    output_assembly: u128,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    analysis_serialization: Option<u128>,
+    cache_publication: u128,
+    total_before_serialization: u128,
+    cache_hit: bool,
+    cache_published: bool,
+    synchronization_included: bool,
+}
+
+impl PerformanceOutput {
+    fn from_profile(
+        profile: ranking::AnalysisProfile,
+        analysis_serialization: Option<std::time::Duration>,
+    ) -> Self {
+        Self {
+            unit: "microseconds",
+            graph_preparation: profile.graph_preparation.as_micros(),
+            scc_detection: profile.scc_detection.as_micros(),
+            readiness: profile.readiness.as_micros(),
+            cache_lookup: profile.cache_lookup.as_micros(),
+            pagerank: profile.pagerank.as_micros(),
+            search: profile.search.as_micros(),
+            output_assembly: profile.output_assembly.as_micros(),
+            analysis_serialization: analysis_serialization.map(|duration| duration.as_micros()),
+            cache_publication: profile.cache_publication.as_micros(),
+            total_before_serialization: profile.total.as_micros(),
+            cache_hit: profile.cache_hit,
+            cache_published: profile.cache_published,
+            synchronization_included: false,
+        }
+    }
+
+    fn human_summary(&self) -> String {
+        format!(
+            "ranking profile (microseconds, Synchronization excluded): graph={} scc={} readiness={} cache={} pagerank={} search={} output={} cache_hit={}",
+            self.graph_preparation,
+            self.scc_detection,
+            self.readiness,
+            self.cache_lookup,
+            self.pagerank,
+            self.search,
+            self.output_assembly,
+            self.cache_hit,
+        )
+    }
+}
+
+#[derive(Serialize)]
+struct PlanOutput<'a> {
+    schema_version: &'static str,
+    policy_version: &'static str,
+    command: &'static str,
+    repository: &'a str,
+    source: ReplicaSource,
+    synced_at: &'a str,
+    replica_snapshot_hash: &'a str,
+    execution_scope: ExecutionScopeOutput<'a>,
+    decision: PlanDecision,
+    parallel_now: Vec<PlanIssue<'a>>,
+    dependency_layers: DependencyLayers<'a>,
+    warnings: Vec<ReadyWarning>,
 }
 
 #[derive(Serialize)]
@@ -1329,6 +1531,8 @@ pub(crate) enum CliError {
     EncodeOutput(serde_json::Error),
     #[error("next/v1 horizon must be between 1 and 3, not {0}")]
     UnsupportedNextHorizon(u8),
+    #[error("grit plan does not accept --workers in v1")]
+    UnsupportedPlanWorkers,
     #[error("GitHub refresh failed ({refresh}); no valid Local replica is available ({replica})")]
     RefreshAndReplicaUnavailable { refresh: String, replica: String },
     #[error(
