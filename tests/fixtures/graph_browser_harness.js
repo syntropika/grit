@@ -1,4 +1,5 @@
 const frame = document.querySelector("#app");
+const constrainedFrame = document.querySelector("#constrained-app");
 const projectFrame = document.querySelector("#project-app");
 const result = document.querySelector("#result");
 
@@ -10,7 +11,15 @@ const exercise = () => {
     const projectDoc = projectFrame.contentDocument;
     const projectData = JSON.parse(projectDoc.querySelector("#graph-data").textContent);
     const projectHarness = createHarness(projectDoc, projectData);
+    const presentation = JSON.parse(doc.querySelector("#graph-presentation-data").textContent);
     const checks = {
+      full_network_within_validated_range: presentation.mode === "full"
+        && doc.querySelector("#network-mode").hidden,
+      performance_markers: Number(doc.documentElement.dataset.gritLoadMs) >= 0
+        && Number(doc.documentElement.dataset.gritRenderMs) >= 0
+        && Number(doc.documentElement.dataset.gritTimeToInteractiveMs)
+          >= Number(doc.documentElement.dataset.gritLoadMs),
+      ...exerciseConstrainedMode(constrainedFrame.contentDocument),
       ...exerciseSearchAndSelection(harness),
       ...exerciseFilters(harness),
       ...exerciseIsolation(harness),
@@ -26,6 +35,79 @@ const exercise = () => {
     result.textContent = JSON.stringify({ error: String(error), stack: error.stack });
   }
 };
+
+function exerciseConstrainedMode(doc) {
+  const search = doc.querySelector("#graph-search");
+  const visibleGraphKeys = () => [...doc.querySelectorAll(".graph-node:not([hidden])")]
+    .map((node) => node.dataset.nodeKey)
+    .sort();
+  const visibleTableKeys = () => [...doc.querySelectorAll("tbody tr:not([hidden])")]
+    .map((row) => row.dataset.nodeKey)
+    .sort();
+  const initial = !doc.querySelector("#network-mode").hidden
+    && visibleGraphKeys().join(",") === "acme/widgets#1"
+    && visibleTableKeys().length === 6;
+
+  search.value = "#5";
+  search.dispatchEvent(new Event("input", { bubbles: true }));
+  const searchable = visibleTableKeys().join(",") === "acme/widgets#5";
+  doc.querySelector('tr[data-node-key="acme/widgets#5"] button').click();
+  search.value = "";
+  search.dispatchEvent(new Event("input", { bubbles: true }));
+  const neighborhood = visibleGraphKeys().join(",") === "acme/widgets#4,acme/widgets#5";
+  const node = doc.querySelector('.graph-node[data-node-key="acme/widgets#5"]');
+  const data = JSON.parse(doc.querySelector("#graph-data").textContent);
+  const source = data.nodes.find((candidate) => candidate.key === "acme/widgets#5");
+  const precomputed = node.dataset.sourceX === String(source.position.x)
+    && node.dataset.sourceY === String(source.position.y);
+
+  doc.querySelector("#show-initial-network").click();
+  const reset = visibleGraphKeys().join(",") === "acme/widgets#1";
+  doc.querySelector("#show-full-network").click();
+  const expanded = visibleGraphKeys().length === data.nodes.length;
+
+  doc.querySelector("#clear-view").click();
+  const priority = doc.querySelector("#priority-filter");
+  priority.value = "value:p0";
+  priority.dispatchEvent(new Event("change", { bubbles: true }));
+  const completeFilteredTable = visibleGraphKeys().length === 0
+    && visibleTableKeys().join(",") === "acme/widgets#2";
+  doc.querySelector('tr[data-node-key="acme/widgets#2"] button').click();
+  const filteredSelection = visibleGraphKeys().join(",") === "acme/widgets#2"
+    && visibleTableKeys().join(",") === "acme/widgets#2";
+
+  doc.querySelector("#clear-view").click();
+  doc.querySelector("#root-node").value = "acme/widgets#2";
+  doc.querySelector("#highlight-upstream").click();
+  const boundedHighlight = doc.querySelector('.graph-node[data-node-key="acme/widgets#1"]')
+    .classList.contains("relationship-upstream")
+    && doc.querySelector('.graph-node[data-node-key="acme/widgets#2"]')
+      .classList.contains("relationship-root");
+  doc.querySelector("#show-full-network").click();
+  const expandedHighlight = doc.querySelector('.graph-node[data-node-key="partners/platform#42"]')
+    .classList.contains("relationship-upstream")
+    && doc.querySelectorAll(".graph-edge.relationship-upstream").length === 2;
+
+  doc.querySelector("#clear-view").click();
+  doc.querySelector("#root-node").value = "acme/widgets#4";
+  doc.querySelector("#root-depth").value = "1";
+  doc.querySelector("#isolate-root").click();
+  const isolated = visibleGraphKeys().join(",") === "acme/widgets#4,acme/widgets#5"
+    && visibleTableKeys().join(",") === "acme/widgets#4,acme/widgets#5";
+  doc.querySelector("#clear-view").click();
+  const cleared = visibleGraphKeys().join(",") === "acme/widgets#1"
+    && visibleTableKeys().length === data.nodes.length
+    && doc.querySelectorAll(".relationship-upstream, .relationship-root").length === 0;
+  return {
+    constrained_mode_opens_bounded: initial,
+    constrained_search_keeps_table: searchable,
+    selected_result_opens_neighborhood: neighborhood && precomputed,
+    constrained_reset_and_explicit_expand: reset && expanded,
+    constrained_filters_keep_complete_table: completeFilteredTable && filteredSelection,
+    constrained_highlights_survive_window_changes: boundedHighlight && expandedHighlight,
+    constrained_isolation_and_clear: isolated && cleared
+  };
+}
 
 function createHarness(doc, data) {
   const visibleKeys = (selector) => [...doc.querySelectorAll(selector)]
@@ -265,15 +347,18 @@ function exerciseHostileText(harness) {
       .includes("<script>alert(1)</script>")
       && doc.querySelector("#issue-details").textContent
         .includes("area:<img src=x onerror=alert(2)>"),
-    no_injected_elements: doc.querySelectorAll("script").length === 3
+    no_injected_elements: doc.querySelectorAll("script").length === 5
       && doc.querySelectorAll("img").length === 0
   };
 }
 
 function exerciseWhenReady() {
-  const mainReady = frame.contentDocument?.querySelector("#graph-data");
-  const projectReady = projectFrame.contentDocument?.querySelector("#project-filter");
-  if (mainReady && projectReady) {
+  const mainReady = frame.contentDocument?.documentElement?.dataset.gritTimeToInteractiveMs;
+  const constrainedReady = constrainedFrame.contentDocument
+    ?.documentElement?.dataset.gritTimeToInteractiveMs;
+  const projectReady = projectFrame.contentDocument
+    ?.documentElement?.dataset.gritTimeToInteractiveMs;
+  if (mainReady && constrainedReady && projectReady) {
     setTimeout(exercise, 0);
     return;
   }

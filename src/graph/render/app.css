@@ -89,6 +89,35 @@ main { padding: 1rem clamp(1rem, 3vw, 3rem) 3rem; }
   padding: .75rem;
 }
 
+.network-mode {
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+  margin-bottom: 1rem;
+  padding: .75rem;
+  border: 1px solid #b8c7d6;
+  border-radius: .75rem;
+  background: #eef6ff;
+}
+
+.network-mode[hidden] { display: none; }
+
+.network-mode div { flex: 1; }
+
+.network-mode h2,
+.network-mode p { margin: 0; }
+
+.network-mode p { margin-top: .2rem; color: var(--muted); font-size: .82rem; }
+
+.network-mode button {
+  padding: .45rem .65rem;
+  border: 1px solid #8da1b5;
+  border-radius: .4rem;
+  background: var(--paper);
+  color: var(--ink);
+  cursor: pointer;
+}
+
 .toolbar label { font-weight: 700; }
 
 #graph-search {
@@ -348,6 +377,7 @@ tbody tr.relationship-path { background: var(--accent-soft); }
 
 @media (max-width: 860px) {
   .toolbar { align-items: flex-start; flex-wrap: wrap; }
+  .network-mode { align-items: flex-start; flex-wrap: wrap; }
   #graph-search { width: 100%; order: 3; }
   .zoom-controls { margin-left: 0; }
   .explorer { grid-template-columns: 1fr; }

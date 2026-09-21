@@ -39,6 +39,8 @@ fn graph_generates_a_deterministic_valid_offline_site_without_raw_records() {
     let graph_bytes = fs::read(output_directory.join("graph.json")).expect("graph JSON");
     let html_bytes = fs::read(output_directory.join("index.html")).expect("graph HTML");
     let stylesheet_bytes = fs::read(output_directory.join("app.css")).expect("graph stylesheet");
+    let network_view_bytes =
+        fs::read(output_directory.join("network-view.js")).expect("network-view JavaScript");
     let graph_query_bytes =
         fs::read(output_directory.join("graph-query.js")).expect("graph query JavaScript");
     let javascript_bytes = fs::read(output_directory.join("app.js")).expect("graph JavaScript");
@@ -122,10 +124,15 @@ fn graph_generates_a_deterministic_valid_offline_site_without_raw_records() {
     assert!(!html.contains("<link rel=\"stylesheet\" href=\"http"));
     assert!(html.contains("href=\"./graph.json\""));
     assert!(html.contains("connect-src 'none'"));
-    assert!(html.contains("src=\"./graph-query.js\""));
+    assert!(html.contains("id=\"graph-presentation-data\""));
+    assert!(html.contains("grit.graph-presentation/v1"));
+    assert!(html.contains("\"mode\":\"full\""));
+    assert!(html.contains("src=\"./network-view.js\""));
     assert!(html.contains("src=\"./app.js\""));
     assert!(html.contains("href=\"./app.css\""));
     assert!(!String::from_utf8_lossy(&javascript_bytes).contains("fetch("));
+    assert!(!String::from_utf8_lossy(&network_view_bytes).contains("fetch("));
+    assert!(html.contains("src=\"./graph-query.js\""));
     assert!(!String::from_utf8_lossy(&graph_query_bytes).contains("fetch("));
     assert!(!String::from_utf8_lossy(&stylesheet_bytes).contains("url(http"));
 
@@ -172,6 +179,11 @@ fn graph_generates_a_deterministic_valid_offline_site_without_raw_records() {
     assert_eq!(
         fs::read(output_directory.join("app.css")).expect("regenerated stylesheet"),
         stylesheet_bytes
+    );
+    assert_eq!(
+        fs::read(output_directory.join("network-view.js"))
+            .expect("regenerated network-view JavaScript"),
+        network_view_bytes
     );
     assert_eq!(
         fs::read(output_directory.join("app.js")).expect("regenerated JavaScript"),
@@ -264,13 +276,15 @@ fn generated_site_is_a_keyboard_accessible_offline_graph_explorer() {
     assert_success(&generated);
     mocks.assert();
 
+    let constrained_output_directory = workspace.path().join("constrained-site");
+    prepare_constrained_browser_site(&output_directory, &constrained_output_directory);
     let project_output_directory = workspace.path().join("project-site");
     prepare_project_browser_site(&output_directory, &project_output_directory);
 
     let harness = workspace.path().join("browser-test.html");
     fs::write(
         &harness,
-        "<!doctype html><html><body><iframe id=\"app\" src=\"./site/index.html\"></iframe><iframe id=\"project-app\" src=\"./project-site/index.html\"></iframe><output id=\"result\">pending</output><script src=\"./browser-test.js\"></script></body></html>\n",
+        "<!doctype html><html><body><iframe id=\"app\" src=\"./site/index.html\"></iframe><iframe id=\"constrained-app\" src=\"./constrained-site/index.html\"></iframe><iframe id=\"project-app\" src=\"./project-site/index.html\"></iframe><output id=\"result\">pending</output><script src=\"./browser-test.js\"></script></body></html>\n",
     )
     .expect("browser harness");
     fs::write(
@@ -319,10 +333,19 @@ fn generated_site_is_a_keyboard_accessible_offline_graph_explorer() {
         "precomputed_position",
         "scc_position",
         "labels_hidden_by_default",
+        "full_network_within_validated_range",
+        "performance_markers",
         "selected_label_only",
         "keyboard_navigation",
         "zoom",
         "hostile_text_is_literal",
+        "constrained_mode_opens_bounded",
+        "constrained_search_keeps_table",
+        "selected_result_opens_neighborhood",
+        "constrained_reset_and_explicit_expand",
+        "constrained_filters_keep_complete_table",
+        "constrained_highlights_survive_window_changes",
+        "constrained_isolation_and_clear",
         "readiness_filter",
         "state_filter",
         "priority_filter",
@@ -527,7 +550,13 @@ fn browser_issue_inventory() -> String {
 
 fn prepare_project_browser_site(source: &std::path::Path, target: &std::path::Path) {
     fs::create_dir(target).expect("Project browser site directory");
-    for asset in ["app.css", "graph-query.js", "app.js", "graph.schema.json"] {
+    for asset in [
+        "app.css",
+        "graph-query.js",
+        "network-view.js",
+        "app.js",
+        "graph.schema.json",
+    ] {
         fs::copy(source.join(asset), target.join(asset)).expect("copy Project browser site asset");
     }
 
@@ -572,6 +601,36 @@ fn label(id: u64, name: &str) -> Value {
         "color": "123456",
         "description": null
     })
+}
+
+fn prepare_constrained_browser_site(source: &std::path::Path, target: &std::path::Path) {
+    fs::create_dir(target).expect("constrained browser site directory");
+    for asset in [
+        "app.css",
+        "network-view.js",
+        "graph-query.js",
+        "app.js",
+        "graph.json",
+        "graph.schema.json",
+    ] {
+        fs::copy(source.join(asset), target.join(asset)).expect("copy constrained site asset");
+    }
+    let mut html = fs::read_to_string(source.join("index.html")).expect("source graph HTML");
+    let marker = "<script id=\"graph-presentation-data\" type=\"application/json\">";
+    let data_start = html.find(marker).expect("embedded presentation data") + marker.len();
+    let data_end = data_start
+        + html[data_start..]
+            .find("</script>")
+            .expect("embedded presentation data terminator");
+    let constrained = json!({
+        "schema_version": "grit.graph-presentation/v1",
+        "mode": "constrained",
+        "full_network_limits": {"nodes": 0, "edges": 0},
+        "initial_network_node_limit": 2,
+        "initial_node_keys": ["acme/widgets#1"]
+    });
+    html.replace_range(data_start..data_end, &constrained.to_string());
+    fs::write(target.join("index.html"), html).expect("constrained browser site HTML");
 }
 
 fn issue(number: u64, title: &str, state: &str) -> Value {

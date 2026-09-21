@@ -2,7 +2,10 @@ use std::collections::BTreeMap;
 
 use schemars::schema_for;
 
-use super::{GraphError, artifact::GraphArtifact, serialization::pretty_json, text::escape_html};
+use super::{
+    GraphError, artifact::GraphArtifact, presentation::GraphPresentation,
+    serialization::pretty_json, text::escape_html,
+};
 
 pub(super) fn graph_json(artifact: &GraphArtifact) -> Result<Vec<u8>, GraphError> {
     pretty_json(artifact)
@@ -12,7 +15,10 @@ pub(super) fn schema_json() -> Result<Vec<u8>, GraphError> {
     pretty_json(&schema_for!(GraphArtifact))
 }
 
-pub(super) fn html(artifact: &GraphArtifact) -> Result<String, GraphError> {
+pub(super) fn html(
+    artifact: &GraphArtifact,
+    presentation: &GraphPresentation,
+) -> Result<String, GraphError> {
     let show_projects = artifact.nodes.iter().any(|node| node.projects.is_some());
     let mut blockers = BTreeMap::<String, Vec<String>>::new();
     let mut dependents = BTreeMap::<String, Vec<String>>::new();
@@ -69,6 +75,9 @@ pub(super) fn html(artifact: &GraphArtifact) -> Result<String, GraphError> {
 
     let graph_data = serde_json::to_string(artifact).map_err(GraphError::EncodeArtifact)?;
     let graph_data = escape_script_data(&graph_data);
+    let presentation_data =
+        serde_json::to_string(presentation).map_err(GraphError::EncodeArtifact)?;
+    let presentation_data = escape_script_data(&presentation_data);
     render_template(
         include_str!("render/index.html"),
         &[
@@ -76,6 +85,7 @@ pub(super) fn html(artifact: &GraphArtifact) -> Result<String, GraphError> {
             ("synced_at", escape_html(&artifact.synced_at)),
             ("artifact_hash", escape_html(&artifact.artifact_hash)),
             ("graph_data", graph_data),
+            ("presentation_data", presentation_data),
             (
                 "project_header",
                 if show_projects {
@@ -94,6 +104,10 @@ pub(super) fn stylesheet() -> &'static [u8] {
 
 pub(super) fn javascript() -> &'static [u8] {
     include_bytes!("render/app.js")
+}
+
+pub(super) fn network_view_javascript() -> &'static [u8] {
+    include_bytes!("render/network-view.js")
 }
 
 pub(super) fn graph_query_javascript() -> &'static [u8] {

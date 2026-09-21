@@ -8,6 +8,8 @@
     <link rel="alternate" type="application/json" href="./graph.json">
     <link rel="stylesheet" href="./app.css">
     <script id="graph-data" type="application/json">{{graph_data}}</script>
+    <script id="graph-presentation-data" type="application/json">{{presentation_data}}</script>
+    <script src="./network-view.js" defer></script>
     <script src="./graph-query.js" defer></script>
     <script src="./app.js" defer></script>
   </head>
@@ -74,6 +76,14 @@
           <output id="view-status" role="status" aria-live="polite"></output>
           <p class="control-help">Root isolation follows both directions without moving nodes or changing metrics. Highlights follow Dependency arrows from blocker to dependent.</p>
         </fieldset>
+      </section>
+      <section id="network-mode" class="network-mode" aria-labelledby="network-mode-heading" hidden>
+        <div>
+          <h2 id="network-mode-heading">Constrained network view</h2>
+          <p id="network-mode-status"></p>
+        </div>
+        <button id="show-initial-network" type="button">Show initial overview</button>
+        <button id="show-full-network" type="button">Render full network</button>
       </section>
       <div class="explorer">
         <section class="graph-region" aria-labelledby="graph-heading">

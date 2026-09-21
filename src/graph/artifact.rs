@@ -114,7 +114,7 @@ pub(super) enum NodeKind {
     ExternalBlocker,
 }
 
-#[derive(Clone, Copy, Deserialize, JsonSchema, Serialize)]
+#[derive(Clone, Copy, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum Readiness {
     Ready,
@@ -556,7 +556,9 @@ mod tests {
         validate(&artifact).expect("valid artifact with Project membership");
         let serialized = serde_json::to_vec(&artifact).expect("serialized artifact");
         validate_serialized(&serialized).expect("serialized Project artifact");
-        let html = crate::graph::render::html(&artifact).expect("rendered Project artifact");
+        let html =
+            crate::graph::render::html(&artifact, &crate::graph::presentation::build(&artifact))
+                .expect("rendered Project artifact");
         assert!(html.contains("<th scope=\"col\">Projects</th>"));
         assert!(html.contains("<td>Platform, Roadmap</td>"));
 
@@ -564,7 +566,8 @@ mod tests {
         artifact.artifact_hash = calculate_hash(&artifact).expect("artifact hash without Projects");
         validate(&artifact).expect("valid artifact without Project membership");
         let html =
-            crate::graph::render::html(&artifact).expect("rendered artifact without Projects");
+            crate::graph::render::html(&artifact, &crate::graph::presentation::build(&artifact))
+                .expect("rendered artifact without Projects");
         assert!(!html.contains("<th scope=\"col\">Projects</th>"));
     }
 }
