@@ -6,6 +6,7 @@ use super::{
     decision::{DecisiveComparison, RankingMode},
     output::{IssueReference, issue_reference},
 };
+use crate::working_graph::{PendingProvenance, WorkingGraph};
 
 #[derive(Serialize)]
 #[serde(untagged)]
@@ -56,6 +57,8 @@ pub(super) struct ComparisonReason {
 
 #[derive(Serialize)]
 pub(super) struct ComparisonEvidence {
+    #[serde(flatten)]
+    provenance: PendingProvenance,
     reason_code: &'static str,
     component: &'static str,
     winner: IssueReference,
@@ -68,14 +71,26 @@ pub(super) fn evidence(
     decision: &DecisiveComparison,
     winner: &EvaluatedCandidate<'_>,
     runner_up: &EvaluatedCandidate<'_>,
-    repository: &str,
+    working: &WorkingGraph<'_>,
+    ranking_provenance_context: &[u64],
 ) -> ComparisonEvidence {
     let descriptor = decision.descriptor();
+    let provenance = working.provenance_for_issues(
+        winner
+            .steps
+            .iter()
+            .map(|step| step.issue.number)
+            .chain(winner.unlocks.iter().map(|issue| issue.number))
+            .chain(runner_up.steps.iter().map(|step| step.issue.number))
+            .chain(runner_up.unlocks.iter().map(|issue| issue.number))
+            .chain(ranking_provenance_context.iter().copied()),
+    );
     ComparisonEvidence {
+        provenance,
         reason_code: descriptor.reason_code,
         component: descriptor.component,
-        winner: issue_reference(repository, winner.issue),
-        runner_up: issue_reference(repository, runner_up.issue),
+        winner: issue_reference(working, winner.issue),
+        runner_up: issue_reference(working, runner_up.issue),
         winner_value: descriptor.winner_value,
         runner_up_value: descriptor.runner_up_value,
     }

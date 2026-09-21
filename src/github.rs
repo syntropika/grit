@@ -1283,3 +1283,31 @@ pub(crate) enum GitHubError {
     #[error("{0} is a Pull Request; Declared priority updates require an Issue")]
     PullRequestPriority(String),
 }
+
+impl GitHubError {
+    pub(crate) fn permits_offline_queue(&self) -> bool {
+        match self {
+            Self::Request(_) | Self::MutationUncertain { .. } => true,
+            Self::Status(status) | Self::MutationUncertainStatus { status, .. } => {
+                status.is_server_error() || *status == StatusCode::REQUEST_TIMEOUT
+            }
+            Self::InvalidToken
+            | Self::BuildClient(_)
+            | Self::Authentication(_)
+            | Self::RateLimited { .. }
+            | Self::Decode(_)
+            | Self::DecodeMetadata(_)
+            | Self::InvalidEtag
+            | Self::GraphQl
+            | Self::PullRequestDependency(_)
+            | Self::InvalidLink
+            | Self::PaginationLoop
+            | Self::CrossOriginPagination
+            | Self::InvalidUrl { .. }
+            | Self::InvalidRepositoryUrl
+            | Self::InvalidLabelUrl
+            | Self::IssueIdentityMismatch
+            | Self::PullRequestPriority(_) => false,
+        }
+    }
+}

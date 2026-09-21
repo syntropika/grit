@@ -1,6 +1,6 @@
 use std::{fmt, str::FromStr};
 
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer};
 
 use crate::model::Label;
 
@@ -10,7 +10,7 @@ pub(crate) struct PriorityLabelSpec {
     pub(crate) description: &'static str,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum DeclaredPriority {
     P0,
@@ -18,6 +18,43 @@ pub(crate) enum DeclaredPriority {
     P2,
     P3,
     P4,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub(crate) enum LogicalPriority {
+    Declared { value: DeclaredPriority },
+    Unspecified,
+    Conflict { labels: Vec<String> },
+}
+
+impl LogicalPriority {
+    pub(crate) fn from_state(state: &PriorityState) -> Self {
+        match state {
+            PriorityState::Declared { value } => Self::Declared { value: *value },
+            PriorityState::Unspecified => Self::Unspecified,
+            PriorityState::Conflict { labels } => Self::Conflict {
+                labels: labels.clone(),
+            },
+        }
+    }
+
+    pub(crate) fn from_selection(selection: PrioritySelection) -> Self {
+        match selection {
+            PrioritySelection::Declared(value) => Self::Declared { value },
+            PrioritySelection::None => Self::Unspecified,
+        }
+    }
+
+    pub(crate) fn to_state(&self) -> PriorityState {
+        match self {
+            Self::Declared { value } => PriorityState::Declared { value: *value },
+            Self::Unspecified => PriorityState::Unspecified,
+            Self::Conflict { labels } => PriorityState::Conflict {
+                labels: labels.clone(),
+            },
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

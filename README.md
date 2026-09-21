@@ -11,6 +11,7 @@ static graph artifacts, with actionable triage diagnostics and bounded multistep
 next-work recommendations with an exact horizon-one option. Its offline browser explorer presents the precomputed
 Issue graph with synchronized network and accessible table selection.
 Public exports use a separate allowlisted model after a live Repository visibility check.
+Unavailable Priority updates are queued durably and projected into analysis with explicit Pending provenance.
 
 ## Build and test
 
@@ -95,7 +96,7 @@ Initialization creates only missing canonical names. It never renames,
 recolors, redescribes, deletes, or assigns an existing label, so repeated runs
 converge without further changes. Read commands never create labels.
 
-Update one Issue's logical Priority online with a full Issue reference:
+Update one Issue's logical Priority with a full Issue reference:
 
 ```bash
 grit update OWNER/REPO#NUMBER --priority p0
@@ -106,7 +107,11 @@ A concrete value removes every other canonical Priority label and leaves
 exactly the requested one; `none` removes all canonical Priority labels. Grit
 preserves non-Priority labels and every other Issue field. It writes GitHub
 first, then synchronizes and verifies the logical result before publishing the
-Local replica. The output reports both the previous and resulting Priority.
+Local replica. If GitHub is unavailable before Grit can confirm the update,
+Grit instead appends a versioned Pending mutation to a durable outbox. Each
+operation retains the logical base and desired values; it never edits the Local
+replica or advances `synced_at`. The output reports both the previous and
+resulting Priority and whether the result is synchronized or pending.
 
 ## Enumerate Executable work
 
@@ -124,6 +129,12 @@ reported separately from Dependency readiness. JSON reports every returned
 Issue's priority as `declared`, `unspecified`, or `conflict`. A conflict remains
 eligible and does not change readiness; it compares as neutral in later ranking
 commands. Missing canonical Repository labels and conflicts appear as warnings.
+
+Pending Priority mutations are applied in order over the Local replica to
+form the Working graph used by `ready` and `next`. Their JSON identifies every
+affected Issue and result with `pending: true` and the responsible operation
+IDs. Analysis may pull newer GitHub state, but it never replays or writes the
+outbox; reconciliation is a separate explicit operation.
 
 If GitHub cannot be reached, `ready` uses the latest valid Local replica and
 reports its unchanged `synced_at`. A replica is accepted only when its schema,
@@ -161,10 +172,11 @@ unsupported optimum claim.
 
 Robot output reports both snapshot and effective-input hashes, metric states,
 the global runner-up comparison, structured reasons, and whether the result is
-a close structural tie. If no Issue is Executable, the command succeeds with a
-null recommendation and categorized blocker counts. Like `ready`, it attempts
-a pull Synchronization and falls back to the latest valid Local replica without
-mutating GitHub.
+a close structural tie. Pending recommendations, Issue references, comparison
+evidence, and reasons carry operation provenance. If no Issue is Executable,
+the command succeeds with a null recommendation and categorized blocker
+counts. Like `ready`, it attempts a pull Synchronization and falls back to the
+latest valid Local replica without mutating GitHub.
 
 ## Triage graph problems
 

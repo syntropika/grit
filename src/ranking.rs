@@ -8,9 +8,10 @@ mod pagerank;
 mod search;
 
 use crate::{
-    model::{Issue, LocalReplica},
+    model::Issue,
     operational::{ExecutionScope, IssueState, OperationalGraph},
-    priority::{PriorityComparison, PriorityState},
+    priority::PriorityComparison,
+    working_graph::WorkingGraph,
 };
 use decision::{PriorityProfile, RankingMode, StepPriority};
 pub(crate) use output::NextAnalysis;
@@ -43,20 +44,22 @@ struct EvaluatedCandidate<'a> {
 }
 
 pub(crate) fn analyze(
-    replica: &LocalReplica,
+    working: &WorkingGraph<'_>,
     scope: ExecutionScope<'_>,
     horizon: u8,
 ) -> NextAnalysis {
+    let replica = working.replica();
     let graph = OperationalGraph::prepare(replica);
     let ready = graph.analyze_ready(scope);
     let pagerank = PageRank::calculate(&graph);
     let deferred_critical_routes = horizon > 1
         && replica.issues.iter().any(|issue| {
             IssueState::parse(&issue.state) == IssueState::Open
-                && priority(issue) == PriorityComparison::P0
+                && priority(working, issue) == PriorityComparison::P0
                 && !graph.is_ready(issue.number)
         });
     let search = search::evaluate(
+        working,
         &graph,
         scope,
         pagerank.as_ref(),
@@ -68,6 +71,7 @@ pub(crate) fn analyze(
     let candidate_count = search.candidate_count;
     let search_complete = search.truncated_by.is_empty();
     let truncated_by = search.truncated_by;
+    let ranking_provenance_context: Vec<_> = search.provenance_numbers.into_iter().collect();
     let evaluated = select_top_candidates(search.candidates, mode, ALTERNATIVE_LIMIT + 1);
     let decisive = evaluated
         .first()
@@ -77,7 +81,13 @@ pub(crate) fn analyze(
         .as_ref()
         .zip(evaluated.first().zip(evaluated.get(1)))
         .map(|(decision, (winner, runner_up))| {
-            explanation::evidence(decision, winner, runner_up, &replica.repository)
+            explanation::evidence(
+                decision,
+                winner,
+                runner_up,
+                working,
+                &ranking_provenance_context,
+            )
         });
     let close_call = decisive
         .as_ref()
@@ -86,7 +96,7 @@ pub(crate) fn analyze(
     let executable_p0_count = ready
         .executable
         .iter()
-        .filter(|issue| priority(issue) == PriorityComparison::P0)
+        .filter(|issue| priority(working, issue) == PriorityComparison::P0)
         .count();
 
     let mut ranked_results = evaluated.into_iter().enumerate().map(|(index, candidate)| {
@@ -98,13 +108,15 @@ pub(crate) fn analyze(
                 reasons.push(explanation::only_candidate_reason(candidate_count));
             }
         }
-        output::candidate_output(candidate, &replica.repository, reasons)
+        output::candidate_output(candidate, working, &ranking_provenance_context, reasons)
     });
     let recommendation = ranked_results.next();
     let alternatives: Vec<_> = ranked_results.take(ALTERNATIVE_LIMIT).collect();
     let summary = NextSummary::from_graph(&ready, candidate_count, &graph);
     NextAnalysis::from_search(NextResult {
-        input_hash: effective_input_hash(replica, scope),
+        input_hash: effective_input_hash(working, scope),
+        pending: working.is_pending(),
+        pending_operation_ids: working.operation_ids(),
         horizon,
         state_budget: STATE_BUDGET,
         mode,
@@ -142,15 +154,15 @@ fn select_top_candidates<'a>(
     best
 }
 
-fn priority(issue: &Issue) -> PriorityComparison {
-    PriorityState::from_issue_labels(&issue.labels).comparison()
+fn priority(working: &WorkingGraph<'_>, issue: &Issue) -> PriorityComparison {
+    working.priority(issue).comparison()
 }
 
-fn effective_input_hash(replica: &LocalReplica, scope: ExecutionScope<'_>) -> String {
+fn effective_input_hash(working: &WorkingGraph<'_>, scope: ExecutionScope<'_>) -> String {
     let (mode, assignee) = scope.hash_key();
     let input = json!({
         "schema_version": "grit.working-input/v1",
-        "replica_snapshot_hash": replica.input_hash,
+        "working_graph_hash": working.input_hash(),
         "execution_scope": {
             "mode": mode,
             "assignee": assignee,
