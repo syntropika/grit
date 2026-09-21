@@ -1,8 +1,11 @@
 use std::{fs, process::Command};
 
+use chrono::{DateTime, Duration, SecondsFormat};
 use mockito::{Matcher, Mock, Server};
 use serde_json::Value;
 use tempfile::TempDir;
+
+mod support;
 
 #[test]
 fn ready_separates_readiness_from_default_and_assignee_execution_scopes() {
@@ -23,9 +26,8 @@ fn ready_separates_readiness_from_default_and_assignee_execution_scopes() {
         "acme/widgets",
         issue_inventory().to_owned(),
         dependencies,
-        2,
+        1,
     );
-
     let state = TempDir::new().expect("temporary state directory");
     let default = ready_command(&state, &github.url(), None)
         .output()
@@ -50,6 +52,15 @@ fn ready_separates_readiness_from_default_and_assignee_execution_scopes() {
     assert_eq!(default["summary"]["assigned_ready_count"], 1);
     assert_eq!(default["summary"]["blocked_count"], 1);
     assert_eq!(default["warnings"], serde_json::json!([]));
+    mocks.assert();
+
+    let delta_mocks = mock_unchanged_delta(
+        &mut github,
+        "acme/widgets",
+        &replica_since(&state, "acme/widgets"),
+        issue_inventory().to_owned(),
+        5,
+    );
 
     let assigned = ready_command(&state, &github.url(), Some("alice"))
         .output()
@@ -67,7 +78,7 @@ fn ready_separates_readiness_from_default_and_assignee_execution_scopes() {
     assert_eq!(assigned["issues"][0]["available"], false);
     assert_eq!(assigned["issues"][0]["assignees"][0], "alice");
 
-    mocks.assert();
+    delta_mocks.assert();
 }
 
 #[test]
@@ -176,18 +187,40 @@ fn ready_command(state: &TempDir, api_url: &str, assignee: Option<&str>) -> Comm
 }
 
 struct RepositoryMocks {
+    labels: Mock,
     issues: Mock,
     comments: Mock,
     dependencies: Vec<Mock>,
+    events: Mock,
+}
+
+struct DeltaMocks {
+    labels: Mock,
+    issues: Mock,
+    comments: Mock,
+    events: Mock,
+    count: Mock,
+}
+
+impl DeltaMocks {
+    fn assert(self) {
+        self.labels.assert();
+        self.issues.assert();
+        self.comments.assert();
+        self.events.assert();
+        self.count.assert();
+    }
 }
 
 impl RepositoryMocks {
     fn assert(self) {
+        self.labels.assert();
         self.issues.assert();
         self.comments.assert();
         for dependency in self.dependencies {
             dependency.assert();
         }
+        self.events.assert();
     }
 }
 
@@ -198,6 +231,15 @@ fn mock_repository(
     dependencies: Vec<(u64, String)>,
     expected_calls: usize,
 ) -> RepositoryMocks {
+    let labels_path = format!("/repos/{repository}/labels");
+    let labels = github
+        .mock("GET", labels_path.as_str())
+        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(canonical_labels())
+        .expect(expected_calls)
+        .create();
     let issues_path = format!("/repos/{repository}/issues");
     let issues = github
         .mock("GET", issues_path.as_str())
@@ -237,12 +279,96 @@ fn mock_repository(
                 .create()
         })
         .collect();
+    let events_path = format!("/repos/{repository}/issues/events");
+    let events = github
+        .mock("GET", events_path.as_str())
+        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(checkpoint_event())
+        .expect(expected_calls)
+        .create();
 
     RepositoryMocks {
+        labels,
         issues,
         comments,
         dependencies,
+        events,
     }
+}
+
+fn canonical_labels() -> String {
+    serde_json::to_string(
+        &(0_u64..=4)
+            .map(|priority| {
+                serde_json::json!({
+                    "id": priority + 100,
+                    "node_id": format!("L_{priority}"),
+                    "name": format!("priority:p{priority}"),
+                    "color": "123456",
+                    "description": null
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
+    .expect("canonical labels")
+}
+
+fn mock_unchanged_delta(
+    github: &mut Server,
+    repository: &str,
+    since: &str,
+    issue_inventory: String,
+    issue_count: u64,
+) -> DeltaMocks {
+    let labels_path = format!("/repos/{repository}/labels");
+    let labels = github
+        .mock("GET", labels_path.as_str())
+        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(canonical_labels())
+        .create();
+    let issues_path = format!("/repos/{repository}/issues");
+    let issues = github
+        .mock("GET", issues_path.as_str())
+        .match_query(support::issue_delta_query(since, None))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(issue_inventory)
+        .create();
+
+    let comments_path = format!("/repos/{repository}/issues/comments");
+    let comments = github
+        .mock("GET", comments_path.as_str())
+        .match_query(support::comment_delta_query(since, None))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("[]")
+        .create();
+
+    let events_path = format!("/repos/{repository}/issues/events");
+    let events = github
+        .mock("GET", events_path.as_str())
+        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(checkpoint_event())
+        .create();
+    let count = support::mock_issue_count(github, issue_count);
+
+    DeltaMocks {
+        labels,
+        issues,
+        comments,
+        events,
+        count,
+    }
+}
+
+fn checkpoint_event() -> &'static str {
+    r#"[{"id":100,"event":"labeled","created_at":"2026-08-01T00:00:00Z","issue":null}]"#
 }
 
 fn ready_command_for(
@@ -262,6 +388,21 @@ fn ready_command_for(
         .env("GRIT_STATE_DIR", state.path())
         .env("PATH", "");
     command
+}
+
+fn replica_since(state: &TempDir, repository: &str) -> String {
+    let replica_path = state
+        .path()
+        .join("repositories")
+        .join(repository)
+        .join("replica.json");
+    let replica: Value = serde_json::from_slice(&fs::read(replica_path).expect("Local replica"))
+        .expect("replica JSON");
+    let watermark = replica["sync"]["ordinary_issues"]["watermark"]
+        .as_str()
+        .expect("ordinary-Issue watermark");
+    let watermark = DateTime::parse_from_rfc3339(watermark).expect("valid watermark");
+    (watermark - Duration::minutes(1)).to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
 fn issue_numbers(document: &Value) -> Vec<u64> {

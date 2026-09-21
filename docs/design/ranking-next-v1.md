@@ -19,7 +19,7 @@ There is no universal decimal score. `next/v1` uses an ordered key made of obser
 5. Every unlocked Issue is counted once, even in diamonds or when reached through multiple paths.
 6. A closed Issue or closed historical chain cannot alter operational ranking.
 7. Missing metrics are omitted; they are never replaced with a maximum or uniform contribution.
-8. Given the same input, configuration, and deterministic budget, ordering is reproducible. If the wall-clock safety limit activates, the output declares it and does not promise reproducibility across machines.
+8. Given the same input, configuration, and deterministic budget, ordering is reproducible. An outer wall-clock cancellation aborts the command instead of returning a load-dependent recommendation.
 9. The mode is recalculated before every simulated step: a rollout never postpones an Executable P0 to continue non-critical work.
 
 ## Graph preparation
@@ -163,7 +163,6 @@ Default `next/v1` values:
 | Joint probe | beam 8, branch 8, 64 successors |
 | Probe work budget | 262,144 successors per command |
 | Deterministic budget | 8,192 materialized successors |
-| Wall-clock safety budget | 500 ms of local ranking |
 
 With horizon 1, Grit evaluates every candidate exactly using blocker counters in `O(V+E)`.
 
@@ -233,7 +232,7 @@ When PageRank is globally omitted, its quota is empty and round-robin fills thos
 
 A state consumes `state_budget` when the main search materializes a successor by appending one executable step; the root does not count. Successors internal to a probe consume only the probe's local and global budgets. Both counters follow the deterministic orders above and are checked before materializing the next successor. Cache state, allocation, and memory therefore cannot alter what work fits within either budget.
 
-The state budget is the primary reproducible limit; the wall-clock budget is a safeguard checked only between complete expansions. Grit records every discard caused by shortlist, P0 frontier, downstream metric limit, branch, beam, state, or time. The result remains executable, but search is declared complete only when no candidate or state was discarded:
+The deterministic state and probe budgets bound ranking work. Wall-clock cancellation belongs outside the ranking engine and aborts the command rather than changing the explored set or returning a load-dependent recommendation. Grit records every discard caused by shortlist, P0 frontier, downstream metric limit, branch, beam, or state. The result remains executable, but search is declared complete only when no candidate or state was discarded:
 
 ```json
 {
@@ -243,7 +242,7 @@ The state budget is the primary reproducible limit; the wall-clock budget is a s
 }
 ```
 
-`truncated_by` is an ordered list without duplicates. Its v1 values, in canonical order, are `first_step_shortlist`, `potential_budget`, `probe_pool`, `probe_budget`, `p0_frontier`, `branch_width`, `beam_width`, `state_budget`, and `wall_time`. With horizon 1, shortlist, probe, limited P0 frontier, beam, and branch do not apply: every candidate is evaluated exactly.
+`truncated_by` is an ordered list without duplicates. Its v1 values, in canonical order, are `first_step_shortlist`, `potential_budget`, `probe_pool`, `probe_budget`, `p0_frontier`, `branch_width`, `beam_width`, and `state_budget`. With horizon 1, shortlist, probe, limited P0 frontier, beam, and branch do not apply: every candidate is evaluated exactly.
 
 Ranking is recalculated from the effective input and cached by `input_hash`, policy version, and parameters. `input_hash` covers the Local replica snapshot, the ordered Pending mutation overlay, and the Execution scope; two different Working graphs never share a result merely because they have the same `synced_at`. No hidden incremental score is maintained.
 
