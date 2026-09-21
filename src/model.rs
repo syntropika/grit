@@ -1,4 +1,5 @@
-use serde::{Deserialize, Serialize};
+use chrono::{DateTime, Duration, FixedOffset, SecondsFormat, Utc};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
@@ -7,7 +8,7 @@ use crate::repository::IssueReference;
 
 pub(crate) const REPLICA_SCHEMA_VERSION: &str = "grit.local-replica/v1";
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct LocalReplica {
     pub(crate) schema_version: String,
     pub(crate) repository: String,
@@ -15,14 +16,17 @@ pub(crate) struct LocalReplica {
     pub(crate) input_hash: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) repository_labels: Option<Vec<Label>>,
+    #[serde(default)]
+    pub(crate) sync: SyncMetadata,
     pub(crate) issues: Vec<Issue>,
     pub(crate) dependencies: Vec<Dependency>,
 }
 
 impl LocalReplica {
-    pub(crate) fn build(
+    pub(crate) fn build_with_sync(
         repository: String,
         synced_at: String,
+        sync: SyncMetadata,
         repository_labels: Vec<Label>,
         issues: Vec<Issue>,
         dependencies: Vec<Dependency>,
@@ -39,6 +43,7 @@ impl LocalReplica {
             synced_at,
             input_hash,
             repository_labels: Some(repository_labels),
+            sync,
             issues,
             dependencies,
         })
@@ -92,6 +97,107 @@ impl LocalReplica {
                     .eq_ignore_ascii_case(blocker.repository().full_name())
                 && dependency.blocker.number == blocker.number()
         })
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct SyncMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) ordinary_issues: Option<OrdinaryIssueCursor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) dependency_events: Option<DependencyEventCheckpoint>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct DependencyEventCheckpoint {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) latest_event_id: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct OrdinaryIssueCursor {
+    pub(crate) watermark: Watermark,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) issues_etag: Option<EntityTag>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) comments_etag: Option<EntityTag>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct Watermark(DateTime<FixedOffset>);
+
+impl Watermark {
+    pub(crate) fn now() -> Self {
+        Self(Utc::now().fixed_offset())
+    }
+
+    pub(crate) fn overlapped_since(&self) -> String {
+        (self.0 - Duration::minutes(1)).to_rfc3339_opts(SecondsFormat::Secs, true)
+    }
+
+    pub(crate) fn later(&self, other: &Self) -> Self {
+        std::cmp::max(self, other).clone()
+    }
+}
+
+impl Serialize for Watermark {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.0.to_rfc3339_opts(SecondsFormat::Millis, true))
+    }
+}
+
+impl<'de> Deserialize<'de> for Watermark {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        DateTime::parse_from_rfc3339(&value)
+            .map(Self)
+            .map_err(|_| de::Error::custom("invalid ordinary-Issue watermark"))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct EntityTag(String);
+
+impl EntityTag {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        let opaque = value.strip_prefix("W/").unwrap_or(value);
+        (value.is_ascii()
+            && opaque.len() >= 2
+            && opaque.starts_with('"')
+            && opaque.ends_with('"')
+            && !opaque[1..opaque.len() - 1]
+                .chars()
+                .any(|character| matches!(character, '\r' | '\n' | '"')))
+        .then(|| Self(value.to_owned()))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Serialize for EntityTag {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for EntityTag {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).ok_or_else(|| de::Error::custom("invalid GitHub ETag"))
     }
 }
 
@@ -158,7 +264,7 @@ pub(crate) enum ReplicaError {
     HashMismatch,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct Issue {
     pub(crate) id: u64,
     pub(crate) node_id: String,
@@ -268,7 +374,7 @@ impl std::fmt::Display for TemporaryIssueId {
     }
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum StableNodeKey {
     GitHub(u64),
     Draft(TemporaryIssueId),
@@ -302,7 +408,7 @@ pub(crate) struct Label {
     pub(crate) description: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct Comment {
     pub(crate) id: u64,
     pub(crate) node_id: String,
@@ -322,7 +428,7 @@ pub(crate) struct CommentIdentity {
     pub(crate) issue_number: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct Dependency {
     pub(crate) blocked: IssueIdentity,
     pub(crate) blocker: BlockerIdentity,
@@ -503,7 +609,7 @@ impl SetPresence {
 
 pub(crate) type DependencyPresence = SetPresence;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct IssueIdentity {
     pub(crate) repository: String,
     pub(crate) number: u64,
@@ -511,7 +617,7 @@ pub(crate) struct IssueIdentity {
     pub(crate) node_id: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct BlockerIdentity {
     pub(crate) repository: String,
     pub(crate) number: u64,
@@ -523,7 +629,7 @@ pub(crate) struct BlockerIdentity {
     pub(crate) node_id: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum BlockerScope {
     Internal,

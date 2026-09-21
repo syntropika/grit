@@ -161,6 +161,14 @@ fn init_accepts_a_concurrent_canonical_label_creation() {
 #[test]
 fn ready_reports_declared_unspecified_and_conflicting_priority_without_mutation() {
     let mut github = Server::new();
+    let events = github
+        .mock("GET", "/repos/acme/widgets/issues/events")
+        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("[]")
+        .expect(2)
+        .create();
     let state = TempDir::new().expect("temporary state directory");
     let issues = vec![
         issue(1, vec![label(20, "priority:p2", "fbca04", "Normal")]),
@@ -269,6 +277,7 @@ fn ready_reports_declared_unspecified_and_conflicting_priority_without_mutation(
             && warning["labels"] == json!(["priority:p0", "priority:p4"])
     }));
 
+    events.assert();
     issue_mock.assert();
     comments.assert();
     for dependency in dependencies {

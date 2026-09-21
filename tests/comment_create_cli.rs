@@ -327,6 +327,14 @@ fn mock_dynamic_inventory(
         .with_body("[]")
         .expect(inventories)
         .create();
+    let events = github
+        .mock("GET", "/repos/acme/widgets/issues/events")
+        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("[]")
+        .expect(inventories)
+        .create();
     let issue_state = Arc::clone(&remote);
     let issues = github
         .mock("GET", "/repos/acme/widgets/issues")
@@ -370,7 +378,7 @@ fn mock_dynamic_inventory(
         .expect(dependency_reads)
         .create();
     RepositoryMocks {
-        mocks: vec![labels, issues, comments, dependencies],
+        mocks: vec![labels, events, issues, comments, dependencies],
     }
 }
 
@@ -486,6 +494,7 @@ fn dropped_comment_server(
     let server = thread::spawn(move || {
         let expected = [
             ("GET", "/repos/acme/widgets/labels"),
+            ("GET", "/repos/acme/widgets/issues/events"),
             ("GET", "/repos/acme/widgets/issues"),
             ("GET", "/repos/acme/widgets/issues/comments"),
             (
@@ -494,6 +503,7 @@ fn dropped_comment_server(
             ),
             ("POST", "/repos/acme/widgets/issues/1/comments"),
             ("GET", "/repos/acme/widgets/labels"),
+            ("GET", "/repos/acme/widgets/issues/events"),
             ("GET", "/repos/acme/widgets/issues"),
             ("GET", "/repos/acme/widgets/issues/comments"),
             (
@@ -584,6 +594,13 @@ fn read_http_request(stream: &mut std::net::TcpStream) -> (String, String, Vec<u
 }
 
 fn seed_replica(github: &mut Server, state: &TempDir, issues: Vec<Value>) {
+    let events = github
+        .mock("GET", "/repos/acme/widgets/issues/events")
+        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("[]")
+        .create();
     let labels = github
         .mock("GET", "/repos/acme/widgets/labels")
         .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
@@ -628,6 +645,7 @@ fn seed_replica(github: &mut Server, state: &TempDir, issues: Vec<Value>) {
         .expect("seed replica");
     assert_success(&output);
     labels.assert();
+    events.assert();
     inventory.assert();
     comments.assert();
     dependencies.assert();

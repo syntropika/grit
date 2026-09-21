@@ -1,4 +1,8 @@
-use std::{fs::File, io, path::PathBuf};
+use std::{
+    fs::File,
+    io,
+    path::{Path, PathBuf},
+};
 
 use directories::ProjectDirs;
 use thiserror::Error;
@@ -35,6 +39,12 @@ impl ReplicaStore {
             .validate(repository.full_name())
             .map_err(StoreError::InvalidReplica)?;
         Ok(replica)
+    }
+
+    pub(crate) fn repository_directory(&self) -> &Path {
+        self.replica_path
+            .parent()
+            .expect("replica path always has a parent")
     }
 }
 

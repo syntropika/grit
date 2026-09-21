@@ -86,6 +86,101 @@ fn offline_create_returns_a_stable_draft_identity_and_participates_in_next() {
 }
 
 #[test]
+fn multistep_draft_rollouts_follow_stable_ids_instead_of_synthetic_numbers() {
+    let state = TempDir::new().expect("state directory");
+    let mut github = Server::new();
+    seed_empty_replica(&mut github, &state);
+    for title in ["First", "Second", "Third"] {
+        queue_draft(&state, &github.url(), title);
+    }
+    let path = state.path().join("repositories/acme/widgets/outbox.json");
+    let mut outbox: Value =
+        serde_json::from_slice(&fs::read(&path).expect("outbox")).expect("JSON");
+    let identities = [
+        (
+            "70000000-0000-4000-8000-000000000001",
+            0xf000000000004000_u64,
+        ),
+        (
+            "80000000-0000-4000-8000-000000000002",
+            0x8000000000004000_u64,
+        ),
+        (
+            "90000000-0000-4000-8000-000000000003",
+            0x9000000000004000_u64,
+        ),
+    ];
+    for (operation, (temporary_id, synthetic_number)) in outbox["operations"]
+        .as_array_mut()
+        .expect("operations")
+        .iter_mut()
+        .zip(identities)
+    {
+        operation["temporary_id"] = json!(temporary_id);
+        operation["synthetic_number"] = json!(synthetic_number);
+    }
+    fs::write(path, serde_json::to_vec(&outbox).expect("outbox JSON")).expect("save identities");
+    let output = grit(&state, &github.url())
+        .env_remove("GH_TOKEN")
+        .args(["next", "--repo", "acme/widgets", "--horizon", "3", "--json"])
+        .output()
+        .expect("rank Draft sequence");
+    assert_success(&output);
+    let ranked: Value = serde_json::from_slice(&output.stdout).expect("next JSON");
+    let actual: Vec<_> = ranked["recommendation"]["rollout"]["steps"]
+        .as_array()
+        .expect("steps")
+        .iter()
+        .map(|step| {
+            step["issue"]["temporary_id"]
+                .as_str()
+                .expect("Draft identity")
+        })
+        .collect();
+    assert_eq!(actual, identities.map(|(id, _)| id));
+    assert_eq!(
+        ranked["comparison_to_runner_up"]["component"],
+        "stable_node_key"
+    );
+    let warm = grit(&state, &github.url())
+        .env_remove("GH_TOKEN")
+        .args(["next", "--repo", "acme/widgets", "--horizon", "3", "--json"])
+        .arg("--profile")
+        .output()
+        .expect("rank from cache");
+    assert_success(&warm);
+    let warm: Value = serde_json::from_slice(&warm.stdout).expect("warm JSON");
+    assert_eq!(warm["performance"]["cache_hit"], true);
+    assert_eq!(warm["recommendation"], ranked["recommendation"]);
+    let plan = grit(&state, &github.url())
+        .env_remove("GH_TOKEN")
+        .args(["plan", "--repo", "acme/widgets", "--horizon", "3", "--json"])
+        .output()
+        .expect("plan Draft Issues");
+    assert_success(&plan);
+    let plan: Value = serde_json::from_slice(&plan.stdout).expect("plan JSON");
+    assert_eq!(plan["decision"]["recommendation"], ranked["recommendation"]);
+    for issues in [
+        &plan["parallel_now"],
+        &plan["dependency_layers"]["layers"][0]["issues"],
+    ] {
+        let actual: Vec<_> = issues
+            .as_array()
+            .expect("structural Issues")
+            .iter()
+            .map(|issue| {
+                assert!(
+                    issue.get("number").is_none(),
+                    "Draft must not expose synthetic GitHub number"
+                );
+                issue["temporary_id"].as_str().expect("Draft identity")
+            })
+            .collect();
+        assert_eq!(actual, identities.map(|(id, _)| id));
+    }
+}
+
+#[test]
 fn two_related_drafts_map_to_two_github_issues_and_one_native_dependency() {
     let state = TempDir::new().expect("state directory");
     let mut seed = Server::new();
@@ -627,6 +722,16 @@ fn mock_inventory(
     mocks.push(
         github
             .mock("GET", "/repos/acme/widgets/labels")
+            .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("[]")
+            .expect(expected.labels)
+            .create(),
+    );
+    mocks.push(
+        github
+            .mock("GET", "/repos/acme/widgets/issues/events")
             .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
             .with_status(200)
             .with_header("content-type", "application/json")
