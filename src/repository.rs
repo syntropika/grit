@@ -78,6 +78,13 @@ impl PendingIssueReference {
         }
     }
 
+    pub(crate) fn github_reference(&self, number: u64) -> IssueReference {
+        IssueReference {
+            repository: self.repository().clone(),
+            number,
+        }
+    }
+
     pub(crate) fn stable_key(&self) -> String {
         match self {
             Self::GitHub(reference) => reference.stable_key(),

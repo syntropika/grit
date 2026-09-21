@@ -15,9 +15,10 @@ use url::Url;
 use crate::{
     auth::AuthToken,
     dependency_events::{DependencyEvent, RawEvent, RawIssueReference},
+    issue_field::{IssueField, IssueFieldValue},
     model::{
-        Actor, BlockerIdentity, BlockerScope, Comment, Dependency, EntityTag, Issue, IssueIdentity,
-        Label,
+        Actor, BlockerIdentity, BlockerScope, Comment, CommentIdentity, Dependency, EntityTag,
+        Issue, IssueIdentity, Label, SetPresence,
     },
     operation_marker,
     repository::{IssueReference, Repository},
@@ -92,6 +93,14 @@ pub(crate) enum DependencyChange {
     AlreadyAbsent,
 }
 
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MetadataChange {
+    Added,
+    AlreadyPresent,
+    Removed,
+    AlreadyAbsent,
+}
 #[derive(Clone, Deserialize)]
 pub(crate) struct RepositoryMetadata {
     pub(crate) full_name: String,
@@ -327,7 +336,7 @@ impl GitHubClient {
             return Err(GitHubError::IssueIdentityMismatch);
         }
         if issue.pull_request.is_some() {
-            return Err(GitHubError::PullRequestPriority(format!(
+            return Err(GitHubError::PullRequestIssueMutation(format!(
                 "{}#{number}",
                 repository.full_name()
             )));
@@ -379,6 +388,93 @@ impl GitHubClient {
         })
     }
 
+    pub(crate) fn create_comment(
+        &self,
+        repository: &Repository,
+        issue_number: u64,
+        body: &str,
+        marker: &str,
+    ) -> Result<CommentIdentity, GitHubError> {
+        let url = self.endpoint(&format!(
+            "repos/{}/{}/issues/{issue_number}/comments",
+            repository.owner(),
+            repository.name()
+        ))?;
+        let response = self
+            .client
+            .post(url)
+            .json(&CreateCommentRequest {
+                body: operation_marker::embed(body, marker),
+            })
+            .send()
+            .map_err(|source| GitHubError::MutationUncertain {
+                operation: "creating the Issue comment",
+                source,
+            })?;
+        let status = response.status();
+        if status != StatusCode::CREATED {
+            return Err(mutation_status_error(
+                status,
+                response.headers(),
+                "creating the Issue comment",
+            ));
+        }
+        let comment: GitHubComment = response.json().map_err(GitHubError::Decode)?;
+        let actual_issue =
+            issue_number_from_url(&comment.issue_url).ok_or(GitHubError::IssueIdentityMismatch)?;
+        if actual_issue != issue_number {
+            return Err(GitHubError::IssueIdentityMismatch);
+        }
+        Ok(comment.identity(actual_issue))
+    }
+
+    pub(crate) fn patch_issue_field(
+        &self,
+        repository: &Repository,
+        issue_number: u64,
+        field: IssueField,
+        desired: &IssueFieldValue,
+    ) -> Result<(), GitHubError> {
+        let url = self.endpoint(&format!(
+            "repos/{}/{}/issues/{issue_number}",
+            repository.owner(),
+            repository.name()
+        ))?;
+        let body = match (field, desired) {
+            (IssueField::Title, IssueFieldValue::Title { value }) => {
+                serde_json::json!({"title": value})
+            }
+            (IssueField::Body, IssueFieldValue::Body { value }) => {
+                serde_json::json!({"body": value})
+            }
+            (IssueField::State, IssueFieldValue::State { value }) => {
+                serde_json::json!({"state": value.as_str()})
+            }
+            (IssueField::Assignees, IssueFieldValue::Assignees { logins }) => {
+                serde_json::json!({"assignees": logins})
+            }
+            _ => return Err(GitHubError::InvalidIssueFieldValue),
+        };
+        let response = self
+            .client
+            .request(reqwest::Method::PATCH, url)
+            .json(&body)
+            .send()
+            .map_err(|source| GitHubError::MutationUncertain {
+                operation: "updating the Issue field",
+                source,
+            })?;
+        let status = response.status();
+        if status != StatusCode::OK {
+            return Err(mutation_status_error(
+                status,
+                response.headers(),
+                "updating the Issue field",
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn find_issues_with_markers(
         &self,
         repository: &Repository,
@@ -401,32 +497,50 @@ impl GitHubClient {
                 ("per_page", "100"),
             ],
         )?;
-        let mut matches = BTreeMap::<String, Vec<CreatedIssueIdentity>>::new();
-        for issue in issues
-            .into_iter()
-            .filter(|issue| issue.pull_request.is_none())
-        {
-            let identity = CreatedIssueIdentity {
-                id: issue.id,
-                node_id: issue.node_id,
-                number: issue.number,
-                url: issue.html_url,
-            };
-            for marker in issue
-                .body
-                .as_deref()
-                .into_iter()
-                .flat_map(operation_marker::values)
-            {
-                if markers.contains(marker) {
-                    matches
-                        .entry(marker.to_owned())
-                        .or_default()
-                        .push(identity.clone());
-                }
-            }
+        Ok(operation_marker::index(
+            issues,
+            markers,
+            |issue| {
+                issue
+                    .pull_request
+                    .is_none()
+                    .then_some(issue.body.as_deref())
+                    .flatten()
+            },
+            |issue| {
+                issue.pull_request.is_none().then(|| CreatedIssueIdentity {
+                    id: issue.id,
+                    node_id: issue.node_id.clone(),
+                    number: issue.number,
+                    url: issue.html_url.clone(),
+                })
+            },
+        ))
+    }
+
+    pub(crate) fn find_comments_with_markers(
+        &self,
+        repository: &Repository,
+        markers: &BTreeSet<String>,
+    ) -> Result<BTreeMap<String, Vec<CommentIdentity>>, GitHubError> {
+        if markers.is_empty() {
+            return Ok(BTreeMap::new());
         }
-        Ok(matches)
+        let url = self.endpoint(&format!(
+            "repos/{}/{}/issues/comments",
+            repository.owner(),
+            repository.name()
+        ))?;
+        let comments: Vec<GitHubComment> = self.paginate(url, &[("per_page", "100")])?;
+        Ok(operation_marker::index(
+            comments,
+            markers,
+            |comment| comment.body.as_deref(),
+            |comment| {
+                issue_number_from_url(&comment.issue_url)
+                    .map(|issue_number| comment.identity(issue_number))
+            },
+        ))
     }
 
     pub(crate) fn add_issue_label(
@@ -447,7 +561,7 @@ impl GitHubClient {
             .json(&AddIssueLabelsRequest { labels: &labels })
             .send()
             .map_err(|source| GitHubError::MutationUncertain {
-                operation: "adding the requested Priority label",
+                operation: "adding the requested Issue label",
                 source,
             })?;
         let status = response.status();
@@ -457,7 +571,7 @@ impl GitHubClient {
         Err(mutation_status_error(
             status,
             response.headers(),
-            "adding the requested Priority label",
+            "adding the requested Issue label",
         ))
     }
 
@@ -480,7 +594,7 @@ impl GitHubClient {
                 .delete(url)
                 .send()
                 .map_err(|source| GitHubError::MutationUncertain {
-                    operation: "removing an obsolete Priority label",
+                    operation: "removing the requested Issue label",
                     source,
                 })?;
         let status = response.status();
@@ -490,8 +604,166 @@ impl GitHubClient {
         Err(mutation_status_error(
             status,
             response.headers(),
-            "removing an obsolete Priority label",
+            "removing the requested Issue label",
         ))
+    }
+
+    pub(crate) fn mutate_generic_label(
+        &self,
+        issue: &IssueReference,
+        label: &crate::metadata::GenericLabel,
+        desired: SetPresence,
+    ) -> Result<MetadataChange, GitHubError> {
+        let remote = self.fetch_issue_for_update(issue.repository(), issue.number())?;
+        let remote_label = remote
+            .labels
+            .iter()
+            .find(|candidate| label.matches(&candidate.name));
+        let present = remote_label.is_some();
+        if present == desired.is_present() {
+            return Ok(if present {
+                MetadataChange::AlreadyPresent
+            } else {
+                MetadataChange::AlreadyAbsent
+            });
+        }
+        let result = if desired.is_present() {
+            self.add_issue_label(issue.repository(), issue.number(), label.as_str())
+        } else {
+            self.remove_issue_label(
+                issue.repository(),
+                issue.number(),
+                &remote_label
+                    .expect("a removal is attempted only for an observed label")
+                    .name,
+            )
+        };
+        match result {
+            Ok(()) => Ok(if desired.is_present() {
+                MetadataChange::Added
+            } else {
+                MetadataChange::Removed
+            }),
+            Err(error) => {
+                let readback = self.fetch_issue_for_update(issue.repository(), issue.number())?;
+                let now_present = readback
+                    .labels
+                    .iter()
+                    .any(|candidate| label.matches(&candidate.name));
+                if now_present == desired.is_present() {
+                    Ok(if now_present {
+                        MetadataChange::AlreadyPresent
+                    } else {
+                        MetadataChange::AlreadyAbsent
+                    })
+                } else {
+                    Err(error)
+                }
+            }
+        }
+    }
+
+    pub(crate) fn mutate_parent_relationship(
+        &self,
+        parent: &IssueReference,
+        child: &IssueReference,
+        desired: SetPresence,
+    ) -> Result<MetadataChange, GitHubError> {
+        let child_id = self.fetch_issue_id(child)?;
+        let present = self.sub_issue_exists(parent, child_id)?;
+        if present == desired.is_present() {
+            return Ok(if present {
+                MetadataChange::AlreadyPresent
+            } else {
+                MetadataChange::AlreadyAbsent
+            });
+        }
+        match self.set_parent_relationship(parent, child_id, desired) {
+            Ok(change) => Ok(change),
+            Err(error) => {
+                if self.sub_issue_exists(parent, child_id)? == desired.is_present() {
+                    Ok(if desired.is_present() {
+                        MetadataChange::AlreadyPresent
+                    } else {
+                        MetadataChange::AlreadyAbsent
+                    })
+                } else {
+                    Err(error)
+                }
+            }
+        }
+    }
+
+    pub(crate) fn set_parent_relationship(
+        &self,
+        parent: &IssueReference,
+        child_id: u64,
+        desired: SetPresence,
+    ) -> Result<MetadataChange, GitHubError> {
+        let url = self.endpoint(&format!(
+            "repos/{}/{}/issues/{}/{}",
+            parent.repository().owner(),
+            parent.repository().name(),
+            parent.number(),
+            if desired.is_present() {
+                "sub_issues"
+            } else {
+                "sub_issue"
+            }
+        ))?;
+        let request = if desired.is_present() {
+            self.client.post(url)
+        } else {
+            self.client.delete(url)
+        };
+        let response = request
+            .json(&SubIssueRequest {
+                sub_issue_id: child_id,
+            })
+            .send()
+            .map_err(|source| GitHubError::MutationUncertain {
+                operation: "changing the parent/sub-Issue relationship",
+                source,
+            })?;
+        if response.status().is_success() {
+            return Ok(if desired.is_present() {
+                MetadataChange::Added
+            } else {
+                MetadataChange::Removed
+            });
+        }
+        let error = mutation_status_error(
+            response.status(),
+            response.headers(),
+            "changing the parent/sub-Issue relationship",
+        );
+        Err(error)
+    }
+
+    pub(crate) fn sub_issue_exists(
+        &self,
+        parent: &IssueReference,
+        child_id: u64,
+    ) -> Result<bool, GitHubError> {
+        Ok(self.sub_issue_ids(parent)?.contains(&child_id))
+    }
+
+    pub(crate) fn sub_issue_ids(
+        &self,
+        parent: &IssueReference,
+    ) -> Result<BTreeSet<u64>, GitHubError> {
+        let url = self.endpoint(&format!(
+            "repos/{}/{}/issues/{}/sub_issues",
+            parent.repository().owner(),
+            parent.repository().name(),
+            parent.number()
+        ))?;
+        let sub_issues: Vec<GitHubIssueLocator> = self.paginate(url, &[("per_page", "100")])?;
+        Ok(sub_issues
+            .iter()
+            .filter(|candidate| candidate.pull_request.is_none())
+            .map(|candidate| candidate.id)
+            .collect())
     }
 
     pub(crate) fn fetch_repository_metadata(
@@ -1220,6 +1492,15 @@ struct GitHubComment {
 }
 
 impl GitHubComment {
+    fn identity(&self, issue_number: u64) -> CommentIdentity {
+        CommentIdentity {
+            id: self.id,
+            node_id: self.node_id.clone(),
+            url: self.html_url.clone(),
+            issue_number,
+        }
+    }
+
     fn normalize_change(self) -> Option<CommentChange> {
         let issue_number = issue_number_from_url(&self.issue_url)?;
         Some(CommentChange {
@@ -1240,6 +1521,11 @@ impl GitHubComment {
             updated_at: self.updated_at,
         }
     }
+}
+
+#[derive(Serialize)]
+struct CreateCommentRequest {
+    body: String,
 }
 
 #[derive(Deserialize)]
@@ -1344,6 +1630,11 @@ struct AddDependency {
     issue_id: u64,
 }
 
+#[derive(Serialize)]
+struct SubIssueRequest {
+    sub_issue_id: u64,
+}
+
 #[derive(Debug, Error)]
 pub(crate) enum GitHubError {
     #[error("the GitHub token cannot be represented as an HTTP header")]
@@ -1395,12 +1686,14 @@ pub(crate) enum GitHubError {
     GraphQl,
     #[error("GitHub returned an Issue different from the requested Issue")]
     IssueIdentityMismatch,
+    #[error("Issue-field value does not match the requested field")]
+    InvalidIssueFieldValue,
+    #[error("{0} is a Pull Request; Issue mutations require an Issue")]
+    PullRequestIssueMutation(String),
     #[error("{0} is a Pull Request; native Dependencies require Issues")]
     PullRequestDependency(String),
     #[error("could not construct a safe Issue-label URL")]
     InvalidLabelUrl,
-    #[error("{0} is a Pull Request; Declared priority updates require an Issue")]
-    PullRequestPriority(String),
 }
 
 impl GitHubError {
@@ -1418,7 +1711,6 @@ impl GitHubError {
             | Self::DecodeMetadata(_)
             | Self::InvalidEtag
             | Self::GraphQl
-            | Self::PullRequestDependency(_)
             | Self::InvalidLink
             | Self::PaginationLoop
             | Self::CrossOriginPagination
@@ -1426,7 +1718,9 @@ impl GitHubError {
             | Self::InvalidRepositoryUrl
             | Self::InvalidLabelUrl
             | Self::IssueIdentityMismatch
-            | Self::PullRequestPriority(_) => false,
+            | Self::InvalidIssueFieldValue
+            | Self::PullRequestIssueMutation(_)
+            | Self::PullRequestDependency(_) => false,
         }
     }
 }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::operation_marker;
 
 impl ReconciliationPass<'_, '_, '_, '_> {
     pub(super) fn reconcile_issue_create_operation(
@@ -89,10 +90,11 @@ impl ReconciliationPass<'_, '_, '_, '_> {
         marker: &str,
     ) -> Result<(), ReconciliationError> {
         self.requires_final_refresh = true;
-        let matches = self.marker_matches.get(marker).cloned().unwrap_or_default();
-        match matches.as_slice() {
-            [remote] => self.accept_remote_mapping(operation, remote, Outcome::AlreadySatisfied),
-            [] => {
+        match operation_marker::classify(self.marker_matches.get(marker).map(Vec::as_slice)) {
+            operation_marker::Recovery::Unique(remote) => {
+                self.accept_remote_mapping(operation, &remote, Outcome::AlreadySatisfied)
+            }
+            operation_marker::Recovery::Missing => {
                 let message =
                     "no GitHub Issue contains the persisted Operation marker; create remains unresolved"
                         .to_owned();
@@ -106,10 +108,10 @@ impl ReconciliationPass<'_, '_, '_, '_> {
                 );
                 Ok(())
             }
-            _ => {
+            operation_marker::Recovery::Ambiguous(count) => {
                 let message = format!(
                     "{} GitHub Issues contain the persisted Operation marker; create remains unresolved",
-                    matches.len()
+                    count
                 );
                 self.record_issue_create(
                     operation,
@@ -164,6 +166,29 @@ impl ReconciliationPass<'_, '_, '_, '_> {
             .or_insert_with(|| RemotePriority {
                 logical: LogicalPriority::Unspecified,
                 canonical_labels: Vec::new(),
+            });
+        let create = operation
+            .issue_create_view()
+            .expect("Draft mapping belongs to an Issue-create mutation");
+        self.remote_issues
+            .entry(identity.issue_number)
+            .or_insert_with(|| Issue {
+                id: identity.issue_id,
+                node_id: identity.issue_node_id.clone(),
+                number: identity.issue_number,
+                url: identity.issue_url.clone(),
+                title: create.title.to_owned(),
+                body: create.body.to_owned(),
+                state: "open".to_owned(),
+                state_reason: None,
+                author: None,
+                assignees: Vec::new(),
+                labels: Vec::new(),
+                comments: Vec::new(),
+                created_at: create.created_at.to_owned(),
+                updated_at: create.created_at.to_owned(),
+                closed_at: None,
+                identity: crate::model::IssueIdentityState::MappedDraft(create.temporary_id),
             });
         self.transaction
             .checkpoint_draft_mapping(self.repository, operation.id(), identity)?;

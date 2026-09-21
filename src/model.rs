@@ -436,6 +436,14 @@ pub(crate) struct Comment {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct CommentIdentity {
+    pub(crate) id: u64,
+    pub(crate) node_id: String,
+    pub(crate) url: String,
+    pub(crate) issue_number: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct Dependency {
     pub(crate) blocked: IssueIdentity,
     pub(crate) blocker: BlockerIdentity,
@@ -599,12 +607,12 @@ impl From<DependencyEdgeKeyWire> for DependencyEdgeKey {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum DependencyPresence {
+pub(crate) enum SetPresence {
     Present,
     Absent,
 }
 
-impl DependencyPresence {
+impl SetPresence {
     pub(crate) fn from_present(present: bool) -> Self {
         if present { Self::Present } else { Self::Absent }
     }
@@ -613,6 +621,8 @@ impl DependencyPresence {
         matches!(self, Self::Present)
     }
 }
+
+pub(crate) type DependencyPresence = SetPresence;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct IssueIdentity {

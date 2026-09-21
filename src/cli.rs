@@ -1,12 +1,13 @@
 use std::{env, path::PathBuf, time::Instant};
 
-use clap::{ArgGroup, Parser, Subcommand};
+use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use thiserror::Error;
 use url::Url;
 
 use crate::{
     auth::{AuthError, AuthToken},
+    comment_create::{self, PendingCommentCreateError},
     dependency_update::{self, PendingDependencyUpdateError},
     github::{
         CreateLabelRequest, DependencyChange, DependencyIntent, GitHubClient, GitHubError,
@@ -14,7 +15,10 @@ use crate::{
     },
     graph::{GraphError, PublicGraphOptions, confirm_public_repository, publish_site},
     issue_create::{self, PendingIssueCreateError},
-    model::{DependencyPresence, LocalReplica, ReplicaError, TemporaryIssueId},
+    issue_field::{self, IssueField, IssueFieldUpdateError, IssueFieldValue, IssueStateValue},
+    metadata::{GenericLabel, MetadataError, MetadataSetTarget, PendingIssueOperand},
+    metadata_mutation::{self, MetadataMutationError, MetadataMutationOutcome, MetadataRequest},
+    model::{DependencyPresence, LocalReplica, ReplicaError, SetPresence, TemporaryIssueId},
     operational::{ExecutionScope, PreparedRepository, analyze_ready},
     outbox::{OutboxError, OutboxStore, PendingMutation},
     plan::{DependencyLayers, PlanIssue},
@@ -45,6 +49,9 @@ const PLAN_SCHEMA_VERSION: &str = "grit.plan/v1";
 const PRIORITY_UPDATE_SCHEMA_VERSION: &str = "grit.priority-update/v1";
 const RESOLVE_SCHEMA_VERSION: &str = "grit.resolve/v1";
 const ISSUE_CREATE_SCHEMA_VERSION: &str = "grit.issue-create/v1";
+const COMMENT_CREATE_SCHEMA_VERSION: &str = "grit.comment-create/v1";
+const ISSUE_FIELD_UPDATE_SCHEMA_VERSION: &str = "grit.issue-field-update/v1";
+const METADATA_MUTATION_SCHEMA_VERSION: &str = "grit.metadata-set/v1";
 
 #[derive(Parser)]
 #[command(name = "grit", version, about)]
@@ -65,6 +72,17 @@ enum Command {
         title: String,
         /// Draft Issue body in Markdown.
         #[arg(long, default_value = "")]
+        body: String,
+        /// Emit versioned machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add a recoverable comment to an Issue or Draft Issue.
+    Comment {
+        /// Issue in OWNER/REPO#NUMBER or OWNER/REPO#draft:TEMPORARY_ID form.
+        issue: String,
+        /// Comment body in Markdown.
+        #[arg(long)]
         body: String,
         /// Emit versioned machine-readable output.
         #[arg(long)]
@@ -118,13 +136,74 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Update one Issue's logical Declared priority.
+    /// Update one logical Issue field.
+    #[command(group(
+        ArgGroup::new("issue_update")
+            .required(true)
+            .multiple(false)
+            .args(["priority", "title", "body", "state", "assignee", "clear_assignees"])
+    ))]
     Update {
-        /// Issue in OWNER/REPO#NUMBER form.
+        /// Issue in OWNER/REPO#NUMBER or OWNER/REPO#draft:TEMPORARY_ID form.
         issue: String,
         /// Desired logical Priority, or none to remove it.
         #[arg(long)]
-        priority: PrioritySelection,
+        priority: Option<PrioritySelection>,
+        /// Replace the Issue title.
+        #[arg(long)]
+        title: Option<String>,
+        /// Replace the Issue body Markdown.
+        #[arg(long)]
+        body: Option<String>,
+        /// Open or close the Issue.
+        #[arg(long)]
+        state: Option<IssueStateArgument>,
+        /// Replace the assignee set with these logins; repeat for multiple assignees.
+        #[arg(long, action = clap::ArgAction::Append)]
+        assignee: Vec<String>,
+        /// Remove every assignee.
+        #[arg(long)]
+        clear_assignees: bool,
+        /// Emit versioned machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add or remove one non-Priority Issue label.
+    #[command(group(
+        ArgGroup::new("label_intent")
+            .required(true)
+            .multiple(false)
+            .args(["add", "remove"])
+    ))]
+    Label {
+        /// Issue in OWNER/REPO#NUMBER or OWNER/REPO#draft:TEMPORARY_ID form.
+        issue: String,
+        /// Add this generic label.
+        #[arg(long)]
+        add: Option<String>,
+        /// Remove this generic label.
+        #[arg(long)]
+        remove: Option<String>,
+        /// Emit versioned machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add or remove a parent/sub-Issue relationship without creating a Dependency.
+    #[command(name = "sub-issue", group(
+        ArgGroup::new("sub_issue_intent")
+            .required(true)
+            .multiple(false)
+            .args(["add", "remove"])
+    ))]
+    SubIssue {
+        /// Parent Issue reference.
+        parent: String,
+        /// Add this Issue as a sub-Issue.
+        #[arg(long)]
+        add: Option<String>,
+        /// Remove this Issue as a sub-Issue.
+        #[arg(long)]
+        remove: Option<String>,
         /// Emit versioned machine-readable output.
         #[arg(long)]
         json: bool,
@@ -217,7 +296,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Resolve one Pending Priority conflict explicitly.
+    /// Resolve one Pending scalar-field conflict explicitly.
     #[command(group(
         ArgGroup::new("resolution")
             .required(true)
@@ -236,13 +315,28 @@ enum Command {
         /// Reaffirm the local value against the last observed GitHub value.
         #[arg(long)]
         local: bool,
-        /// Replace the local value and rebase it on the last observed GitHub value.
+        /// Replace a conflicting Priority and rebase it on the last observed GitHub value.
         #[arg(long)]
         priority: Option<PrioritySelection>,
         /// Emit versioned machine-readable output.
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum IssueStateArgument {
+    Open,
+    Closed,
+}
+
+impl From<IssueStateArgument> for IssueStateValue {
+    fn from(value: IssueStateArgument) -> Self {
+        match value {
+            IssueStateArgument::Open => Self::Open,
+            IssueStateArgument::Closed => Self::Closed,
+        }
+    }
 }
 
 pub(crate) fn execute() -> Result<(), CliError> {
@@ -254,6 +348,7 @@ pub(crate) fn execute() -> Result<(), CliError> {
             body,
             json,
         } => create_issue(&Repository::parse(&repo)?, title, body, json),
+        Command::Comment { issue, body, json } => create_comment(&issue, body, json),
         Command::Graph {
             repo,
             output,
@@ -308,8 +403,33 @@ pub(crate) fn execute() -> Result<(), CliError> {
         Command::Update {
             issue,
             priority,
+            title,
+            body,
+            state,
+            assignee,
+            clear_assignees,
             json,
-        } => update_priority(&issue, priority, json),
+        } => {
+            if let Some(priority) = priority {
+                update_priority(&issue, priority, json)
+            } else {
+                let (field, desired) =
+                    issue_field_request(title, body, state, assignee, clear_assignees);
+                update_issue_field(&issue, field, desired, json)
+            }
+        }
+        Command::Label {
+            issue,
+            add,
+            remove,
+            json,
+        } => mutate_generic_label(&issue, add, remove, json),
+        Command::SubIssue {
+            parent,
+            add,
+            remove,
+            json,
+        } => mutate_parent_relationship(&parent, add, remove, json),
         Command::Block { issue, by, json } => {
             mutate_dependency(&issue, &by, DependencyIntent::Block, json)
         }
@@ -331,7 +451,7 @@ pub(crate) fn execute() -> Result<(), CliError> {
             local,
             priority,
             json,
-        } => resolve_priority_conflict(
+        } => resolve_conflict(
             &Repository::parse(&repo)?,
             &operation,
             resolution_choice(remote, local, priority),
@@ -476,6 +596,148 @@ fn plan(
     Ok(())
 }
 
+fn mutate_generic_label(
+    issue: &str,
+    add: Option<String>,
+    remove: Option<String>,
+    json: bool,
+) -> Result<(), CliError> {
+    let issue = PendingIssueReference::parse(issue)?;
+    let (label, desired) = match (add, remove) {
+        (Some(label), None) => (GenericLabel::new(label)?, SetPresence::Present),
+        (None, Some(label)) => (GenericLabel::new(label)?, SetPresence::Absent),
+        _ => unreachable!("clap requires exactly one label intent"),
+    };
+    let client = optional_github_client()?;
+    let result = metadata_mutation::update_or_queue(
+        client.as_ref(),
+        MetadataRequest::GenericLabel {
+            issue: &issue,
+            label,
+            desired,
+        },
+    )?;
+    print_metadata_mutation(&result, json)
+}
+
+fn mutate_parent_relationship(
+    parent: &str,
+    add: Option<String>,
+    remove: Option<String>,
+    json: bool,
+) -> Result<(), CliError> {
+    let parent = PendingIssueReference::parse(parent)?;
+    let (child, desired) = match (add, remove) {
+        (Some(child), None) => (PendingIssueReference::parse(&child)?, SetPresence::Present),
+        (None, Some(child)) => (PendingIssueReference::parse(&child)?, SetPresence::Absent),
+        _ => unreachable!("clap requires exactly one sub-Issue intent"),
+    };
+    let client = optional_github_client()?;
+    let result = metadata_mutation::update_or_queue(
+        client.as_ref(),
+        MetadataRequest::ParentRelationship {
+            parent: &parent,
+            child: &child,
+            desired,
+        },
+    )?;
+    print_metadata_mutation(&result, json)
+}
+
+fn optional_github_client() -> Result<Option<GitHubClient>, CliError> {
+    match github_client() {
+        Ok(client) => Ok(Some(client)),
+        Err(CliError::Auth(_)) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn print_metadata_mutation(
+    result: &metadata_mutation::MetadataMutationResult,
+    json: bool,
+) -> Result<(), CliError> {
+    let (pending, result_name, operation, working_graph) = match &result.outcome {
+        MetadataMutationOutcome::Synchronized { change } => {
+            (false, metadata_change_name(*change), None, None)
+        }
+        MetadataMutationOutcome::Queued {
+            operation,
+            working_input_hash,
+        } => (
+            true,
+            "pending",
+            Some(MetadataOperationOutput {
+                id: operation.id(),
+                depends_on: operation.depends_on().to_vec(),
+            }),
+            Some(WorkingGraphSummary {
+                input_hash: working_input_hash,
+            }),
+        ),
+    };
+    let (label, relationship) = match &result.target {
+        MetadataSetTarget::GenericLabel { label, .. } => (Some(label.as_str()), None),
+        MetadataSetTarget::ParentRelationship { parent, child } => (
+            None,
+            Some(ParentRelationshipOutput {
+                parent: operand_key(&result.replica.repository, *parent),
+                child: operand_key(&result.replica.repository, *child),
+                kind: "parent_of",
+            }),
+        ),
+    };
+    let output = MetadataMutationOutput {
+        schema_version: METADATA_MUTATION_SCHEMA_VERSION,
+        command: if label.is_some() {
+            "label"
+        } else {
+            "sub-issue"
+        },
+        repository: &result.replica.repository,
+        result: result_name,
+        pending,
+        label,
+        relationship,
+        desired_present: result.desired.is_present(),
+        operation,
+        working_graph,
+        snapshot: snapshot_summary(&result.replica),
+    };
+    if json {
+        serde_json::to_writer(std::io::stdout().lock(), &output).map_err(CliError::EncodeOutput)?;
+        println!();
+    } else if pending {
+        println!(
+            "Queued {} as Pending mutation {}",
+            output.command,
+            output
+                .operation
+                .as_ref()
+                .expect("Pending metadata output has an operation")
+                .id
+        );
+    } else {
+        println!("{}: {}", output.command, output.result);
+    }
+    Ok(())
+}
+
+fn operand_key(repository: &str, operand: PendingIssueOperand) -> String {
+    operand
+        .temporary_id()
+        .map(|temporary_id| temporary_id.stable_node_key(repository))
+        .unwrap_or_else(|| format!("{repository}#{}", operand.number()))
+}
+
+fn metadata_change_name(change: crate::github::MetadataChange) -> &'static str {
+    match change {
+        crate::github::MetadataChange::Added => "added",
+        crate::github::MetadataChange::AlreadyPresent => "already_present",
+        crate::github::MetadataChange::Removed => "removed",
+        crate::github::MetadataChange::AlreadyAbsent => "already_absent",
+    }
+}
+
 fn create_issue(
     repository: &Repository,
     title: String,
@@ -514,6 +776,133 @@ fn create_issue(
     Ok(())
 }
 
+fn create_comment(issue: &str, body: String, json: bool) -> Result<(), CliError> {
+    let reference = PendingIssueReference::parse(issue)?;
+    let queued = comment_create::queue(&reference, body)?;
+    let operation_id = queued.operation.id().to_owned();
+    let mut replica = queued.replica;
+    let mut pending = true;
+    let mut result_name = "pending";
+    let mut remote = None;
+    let mut warning = None;
+    let mut working_input_hash = Some(queued.working_input_hash);
+
+    if let Some(client) = optional_github_client()? {
+        match reconciliation::reconcile(&client, reference.repository()) {
+            Ok(reconciled) => {
+                let operation = reconciled
+                    .operations
+                    .iter()
+                    .find(|operation| operation.id == operation_id)
+                    .expect("the queued comment participates in its immediate reconciliation");
+                if let reconciliation::OperationDetails::CommentCreate { remote: created } =
+                    &operation.details
+                {
+                    remote = created.clone();
+                }
+                match operation.outcome {
+                    reconciliation::Outcome::Applied => {
+                        pending = false;
+                        result_name = "created";
+                    }
+                    reconciliation::Outcome::AlreadySatisfied => {
+                        pending = false;
+                        result_name = "recovered";
+                    }
+                    reconciliation::Outcome::Checkpointed => {
+                        pending = false;
+                        result_name = "created";
+                    }
+                    reconciliation::Outcome::Failed
+                    | reconciliation::Outcome::Conflicting
+                    | reconciliation::Outcome::TransitivelyBlocked
+                    | reconciliation::Outcome::ResolvedRemote => {
+                        warning.clone_from(&operation.error);
+                    }
+                }
+                replica = reconciled.replica;
+                if pending {
+                    let outbox = OutboxStore::discover(reference.repository())?
+                        .load(reference.repository())?;
+                    working_input_hash = Some(
+                        WorkingGraph::project(&replica, &outbox)?
+                            .input_hash()
+                            .to_owned(),
+                    );
+                } else {
+                    working_input_hash = None;
+                }
+            }
+            Err(error) => {
+                warning = Some(format!(
+                    "GitHub reconciliation was unavailable; comment remains Pending: {error}"
+                ));
+            }
+        }
+    }
+
+    let output = CommentCreateOutput {
+        schema_version: COMMENT_CREATE_SCHEMA_VERSION,
+        command: "comment",
+        repository: &replica.repository,
+        issue: &queued.issue_key,
+        body: &queued.body,
+        result: result_name,
+        pending,
+        operation: CommentCreateOperationOutput {
+            id: &operation_id,
+            kind: "comment_create",
+            depends_on: queued.operation.depends_on(),
+        },
+        remote,
+        working_graph: working_input_hash
+            .as_deref()
+            .map(|input_hash| WorkingGraphSummary { input_hash }),
+        snapshot: snapshot_summary(&replica),
+        warning,
+    };
+    if json {
+        serde_json::to_writer(std::io::stdout().lock(), &output).map_err(CliError::EncodeOutput)?;
+        println!();
+    } else if output.pending {
+        println!(
+            "Queued comment on {} as Pending mutation {}",
+            output.issue, output.operation.id
+        );
+        if let Some(warning) = &output.warning {
+            eprintln!("warning: {warning}");
+        }
+    } else {
+        println!("Created comment on {}", output.issue);
+    }
+    Ok(())
+}
+
+fn issue_field_request(
+    title: Option<String>,
+    body: Option<String>,
+    state: Option<IssueStateArgument>,
+    assignees: Vec<String>,
+    clear_assignees: bool,
+) -> (IssueField, IssueFieldValue) {
+    if let Some(title) = title {
+        (IssueField::Title, IssueFieldValue::title(title))
+    } else if let Some(body) = body {
+        (IssueField::Body, IssueFieldValue::body(body))
+    } else if let Some(state) = state {
+        (IssueField::State, IssueFieldValue::state(state.into()))
+    } else if !assignees.is_empty() {
+        (IssueField::Assignees, IssueFieldValue::assignees(assignees))
+    } else if clear_assignees {
+        (
+            IssueField::Assignees,
+            IssueFieldValue::assignees(Vec::new()),
+        )
+    } else {
+        unreachable!("clap requires exactly one Issue-field update")
+    }
+}
+
 fn resolution_choice(
     remote: bool,
     local: bool,
@@ -533,7 +922,7 @@ fn reconcile(repository: &Repository, json: bool) -> Result<(), CliError> {
     print_reconciliation(&result, "reconcile", json)
 }
 
-fn resolve_priority_conflict(
+fn resolve_conflict(
     repository: &Repository,
     operation_id: &str,
     choice: ResolutionChoice,
@@ -597,28 +986,50 @@ fn print_reconciliation(
         );
         for operation in &result.operations {
             if operation.classification == reconciliation::Classification::Conflicting {
-                let reconciliation::OperationDetails::PriorityUpdate {
-                    base,
-                    local,
-                    remote,
-                } = &operation.details
-                else {
-                    continue;
-                };
-                println!(
-                    "{} Issue #{} conflict: base {}, local {}, remote {}",
-                    operation.id,
-                    operation
-                        .issue_number
-                        .expect("Priority conflicts have a GitHub Issue number"),
-                    base.to_state().display_name(),
-                    local.to_state().display_name(),
-                    remote
-                        .as_ref()
-                        .map(LogicalPriority::to_state)
-                        .map(|priority| priority.display_name())
-                        .unwrap_or("missing")
-                );
+                match &operation.details {
+                    reconciliation::OperationDetails::PriorityUpdate {
+                        base,
+                        local,
+                        remote,
+                    } => println!(
+                        "{} Issue #{} conflict: base {}, local {}, remote {}",
+                        operation.id,
+                        operation
+                            .issue_number
+                            .expect("Priority conflicts have a GitHub Issue number"),
+                        base.to_state().display_name(),
+                        local.to_state().display_name(),
+                        remote
+                            .as_ref()
+                            .map(LogicalPriority::to_state)
+                            .map(|priority| priority.display_name())
+                            .unwrap_or("missing")
+                    ),
+                    reconciliation::OperationDetails::IssueFieldUpdate {
+                        field,
+                        base,
+                        local,
+                        remote,
+                    } => println!(
+                        "{} Issue #{} {} conflict: base {}, local {}, remote {}",
+                        operation.id,
+                        operation
+                            .issue_number
+                            .expect("Issue-field conflicts have an Issue number"),
+                        field.name(),
+                        serde_json::to_string(base).expect("Issue-field values serialize"),
+                        serde_json::to_string(local).expect("Issue-field values serialize"),
+                        remote
+                            .as_ref()
+                            .map(|value| serde_json::to_string(value)
+                                .expect("Issue-field values serialize"))
+                            .unwrap_or_else(|| "missing".to_owned())
+                    ),
+                    reconciliation::OperationDetails::IssueCreate { .. }
+                    | reconciliation::OperationDetails::CommentCreate { .. }
+                    | reconciliation::OperationDetails::DependencyUpdate { .. }
+                    | reconciliation::OperationDetails::MetadataSetUpdate { .. } => {}
+                }
             }
         }
     }
@@ -668,6 +1079,87 @@ fn initialize(repository: &Repository, json: bool) -> Result<(), CliError> {
             output.created_labels.join(", "),
             repository.full_name()
         );
+    }
+    Ok(())
+}
+
+fn update_issue_field(
+    issue: &str,
+    field: IssueField,
+    desired: IssueFieldValue,
+    json: bool,
+) -> Result<(), CliError> {
+    let reference = PendingIssueReference::parse(issue)?;
+    let client = match github_client() {
+        Ok(client) => Some(client),
+        Err(CliError::Auth(_)) => None,
+        Err(error) => return Err(error),
+    };
+    let result = issue_field::update_or_queue(client.as_ref(), &reference, field, desired)?;
+    print_issue_field_update(&result, json)
+}
+
+fn print_issue_field_update(
+    result: &issue_field::IssueFieldUpdateResult,
+    json: bool,
+) -> Result<(), CliError> {
+    let (status, pending, issue_url, operation, working_graph) = match &result.outcome {
+        issue_field::IssueFieldUpdateOutcome::Synchronized { issue_url } => {
+            ("synchronized", false, Some(issue_url.as_str()), None, None)
+        }
+        issue_field::IssueFieldUpdateOutcome::Queued {
+            issue_url,
+            operation,
+            working_input_hash,
+        } => (
+            "pending",
+            true,
+            issue_url.as_deref(),
+            Some(IssueFieldOperationOutput {
+                id: operation.id(),
+                kind: "issue_field_update",
+                depends_on: operation.depends_on().to_vec(),
+            }),
+            Some(WorkingGraphSummary {
+                input_hash: working_input_hash,
+            }),
+        ),
+    };
+    let output = IssueFieldUpdateOutput {
+        schema_version: ISSUE_FIELD_UPDATE_SCHEMA_VERSION,
+        command: "update",
+        status,
+        pending,
+        repository: &result.replica.repository,
+        issue: IssueFieldIssueOutput {
+            key: &result.issue_key,
+            number: issue_url.map(|_| result.issue_number),
+            temporary_id: result.temporary_id,
+            url: issue_url,
+        },
+        field: result.field,
+        base: &result.base,
+        local: &result.desired,
+        operation,
+        working_graph,
+        snapshot: snapshot_summary(&result.replica),
+    };
+    if json {
+        serde_json::to_writer(std::io::stdout().lock(), &output).map_err(CliError::EncodeOutput)?;
+        println!();
+    } else if pending {
+        println!(
+            "Queued {} {} update as Pending mutation {}",
+            output.issue.key,
+            output.field.name(),
+            output
+                .operation
+                .as_ref()
+                .expect("Pending field output includes an operation")
+                .id
+        );
+    } else {
+        println!("Updated {} {}", output.issue.key, output.field.name());
     }
     Ok(())
 }
@@ -1104,6 +1596,11 @@ fn ready(repository: &Repository, assignee: Option<&str>, json: bool) -> Result<
             ready: true,
             available: issue.assignees.is_empty(),
             priority: working.priority(issue),
+            labels: issue
+                .labels
+                .iter()
+                .map(|label| label.name.as_str())
+                .collect(),
             assignees: issue
                 .assignees
                 .iter()
@@ -1520,6 +2017,76 @@ struct PriorityUpdateOutput<'a> {
     snapshot: SnapshotSummary<'a>,
 }
 
+#[derive(Serialize)]
+struct IssueFieldUpdateOutput<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    status: &'static str,
+    pending: bool,
+    repository: &'a str,
+    issue: IssueFieldIssueOutput<'a>,
+    field: IssueField,
+    base: &'a IssueFieldValue,
+    local: &'a IssueFieldValue,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    operation: Option<IssueFieldOperationOutput<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    working_graph: Option<WorkingGraphSummary<'a>>,
+    snapshot: SnapshotSummary<'a>,
+}
+
+#[derive(Serialize)]
+struct IssueFieldIssueOutput<'a> {
+    key: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    number: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temporary_id: Option<TemporaryIssueId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct IssueFieldOperationOutput<'a> {
+    id: &'a str,
+    kind: &'static str,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    depends_on: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct MetadataMutationOutput<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    repository: &'a str,
+    result: &'static str,
+    pending: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    relationship: Option<ParentRelationshipOutput>,
+    desired_present: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    operation: Option<MetadataOperationOutput<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    working_graph: Option<WorkingGraphSummary<'a>>,
+    snapshot: SnapshotSummary<'a>,
+}
+
+#[derive(Serialize)]
+struct ParentRelationshipOutput {
+    parent: String,
+    child: String,
+    kind: &'static str,
+}
+
+#[derive(Serialize)]
+struct MetadataOperationOutput<'a> {
+    id: &'a str,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    depends_on: Vec<String>,
+}
+
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum PriorityUpdateStatus {
@@ -1583,6 +2150,33 @@ struct DraftCreateOperationOutput<'a> {
 }
 
 #[derive(Serialize)]
+struct CommentCreateOutput<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    repository: &'a str,
+    issue: &'a str,
+    body: &'a str,
+    result: &'static str,
+    pending: bool,
+    operation: CommentCreateOperationOutput<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote: Option<crate::model::CommentIdentity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    working_graph: Option<WorkingGraphSummary<'a>>,
+    snapshot: SnapshotSummary<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    warning: Option<String>,
+}
+
+#[derive(Serialize)]
+struct CommentCreateOperationOutput<'a> {
+    id: &'a str,
+    kind: &'static str,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    depends_on: &'a [String],
+}
+
+#[derive(Serialize)]
 struct PriorityIssueOutput<'a> {
     key: &'a str,
     number: u64,
@@ -1638,6 +2232,7 @@ struct ReadyIssue<'a> {
     ready: bool,
     available: bool,
     priority: PriorityState,
+    labels: Vec<&'a str>,
     assignees: Vec<&'a str>,
 }
 
@@ -1745,6 +2340,8 @@ pub(crate) enum CliError {
     PendingIssueReference(#[from] PendingIssueReferenceError),
     #[error(transparent)]
     PendingIssueCreate(#[from] PendingIssueCreateError),
+    #[error(transparent)]
+    PendingCommentCreate(#[from] PendingCommentCreateError),
     #[error("GRIT_GITHUB_API_URL is invalid: {0}")]
     ParseApiBase(url::ParseError),
     #[error("GRIT_GITHUB_API_URL must be a safe absolute HTTP(S) base URL")]
@@ -1761,6 +2358,12 @@ pub(crate) enum CliError {
     ReplicaSync(#[from] ReplicaSyncError),
     #[error(transparent)]
     PriorityUpdate(#[from] PriorityUpdateError),
+    #[error(transparent)]
+    IssueFieldUpdate(#[from] IssueFieldUpdateError),
+    #[error(transparent)]
+    Metadata(#[from] MetadataError),
+    #[error(transparent)]
+    MetadataMutation(#[from] MetadataMutationError),
     #[error(transparent)]
     Reconciliation(#[from] ReconciliationError),
     #[error(transparent)]

@@ -11,8 +11,8 @@ use thiserror::Error;
 
 use crate::{
     model::{
-        BlockerIdentity, BlockerScope, Dependency, DependencyEdgeKey, DependencyPresence, Issue,
-        IssueIdentity, LocalReplica,
+        BlockerIdentity, BlockerScope, Comment, Dependency, DependencyEdgeKey, DependencyPresence,
+        Issue, IssueIdentity, Label, LocalReplica, SetPresence,
     },
     outbox::{IssueCreateState, PendingMutation, PendingMutationOutbox},
     priority::{LogicalPriority, PriorityState},
@@ -41,6 +41,9 @@ impl<'a> WorkingGraph<'a> {
         let mut pending_priority_numbers = BTreeSet::new();
         let mut creation_operation_ids = BTreeMap::<u64, Vec<(usize, String)>>::new();
         let mut dependency_intents = Vec::new();
+        let mut field_updates = Vec::new();
+        let mut label_updates = Vec::new();
+        let mut comment_creates = Vec::new();
         let mut operation_ids = Vec::with_capacity(outbox.operations().len());
         let mut operation_ids_by_issue = BTreeMap::<u64, Vec<(usize, String)>>::new();
         let mut topology_operation_ids = Vec::new();
@@ -53,6 +56,26 @@ impl<'a> WorkingGraph<'a> {
             }
             if let Some((edge, desired)) = operation.dependency_values() {
                 dependency_intents.push((edge.clone(), desired));
+            }
+            if let Some((issue_number, field, value)) = operation.effective_field_update() {
+                field_updates.push((issue_number, field, value.clone()));
+            }
+            if let Some((
+                crate::metadata::MetadataSetTarget::GenericLabel { issue, label },
+                desired,
+            )) = operation.metadata_set_values()
+            {
+                label_updates.push((issue.number(), label.clone(), desired));
+            }
+            if let Some(comment) = operation.comment_create_view()
+                && operation.is_pending_intent()
+            {
+                comment_creates.push((
+                    comment.issue.number(),
+                    operation.id().to_owned(),
+                    comment.body.to_owned(),
+                    comment.created_at.to_owned(),
+                ));
             }
             if !operation.is_pending_intent() {
                 continue;
@@ -96,6 +119,15 @@ impl<'a> WorkingGraph<'a> {
                 .to_mut()
                 .issues
                 .sort_by_key(|issue| issue.stable_node_key());
+        }
+        if !field_updates.is_empty() {
+            apply_field_updates(&mut effective_replica.to_mut().issues, field_updates)?;
+        }
+        if !label_updates.is_empty() {
+            apply_label_updates(&mut effective_replica.to_mut().issues, label_updates)?;
+        }
+        if !comment_creates.is_empty() {
+            apply_comment_creates(&mut effective_replica.to_mut().issues, comment_creates)?;
         }
         if !dependency_intents.is_empty() {
             project_dependency_intents(effective_replica.to_mut(), dependency_intents)?;
@@ -197,6 +229,99 @@ impl<'a> WorkingGraph<'a> {
         indexed_operation_ids.extend(self.topology_operation_ids.iter().cloned());
         PendingProvenance::from_indexed(indexed_operation_ids)
     }
+}
+
+fn apply_comment_creates(
+    issues: &mut [Issue],
+    comments: Vec<(u64, String, String, String)>,
+) -> Result<(), WorkingGraphError> {
+    let issue_indices: BTreeMap<_, _> = issues
+        .iter()
+        .enumerate()
+        .map(|(index, issue)| (issue.number, index))
+        .collect();
+    for (issue_number, operation_id, body, created_at) in comments {
+        let index = issue_indices
+            .get(&issue_number)
+            .copied()
+            .ok_or(WorkingGraphError::MissingIssue(issue_number))?;
+        issues[index].comments.push(Comment {
+            id: 0,
+            node_id: format!("pending:{operation_id}"),
+            url: String::new(),
+            body,
+            author: None,
+            author_association: "pending".to_owned(),
+            created_at: created_at.clone(),
+            updated_at: created_at,
+        });
+    }
+    Ok(())
+}
+
+fn apply_label_updates(
+    issues: &mut [Issue],
+    updates: Vec<(u64, crate::metadata::GenericLabel, SetPresence)>,
+) -> Result<(), WorkingGraphError> {
+    let issue_indices: BTreeMap<_, _> = issues
+        .iter()
+        .enumerate()
+        .map(|(index, issue)| (issue.number, index))
+        .collect();
+    for (issue_number, label, desired) in updates {
+        let index = issue_indices
+            .get(&issue_number)
+            .copied()
+            .ok_or(WorkingGraphError::MissingIssue(issue_number))?;
+        let labels = &mut issues[index].labels;
+        let existing = labels
+            .iter()
+            .position(|candidate| label.matches(&candidate.name));
+        match (desired, existing) {
+            (SetPresence::Present, None) => labels.push(Label {
+                id: None,
+                node_id: None,
+                name: label.as_str().to_owned(),
+                color: None,
+                description: None,
+            }),
+            (SetPresence::Absent, Some(index)) => {
+                labels.remove(index);
+            }
+            (SetPresence::Present, Some(_)) | (SetPresence::Absent, None) => {}
+        }
+        labels.sort_by(|left, right| {
+            left.name
+                .to_ascii_lowercase()
+                .cmp(&right.name.to_ascii_lowercase())
+                .then_with(|| left.name.cmp(&right.name))
+        });
+    }
+    Ok(())
+}
+
+fn apply_field_updates(
+    issues: &mut [Issue],
+    updates: Vec<(
+        u64,
+        crate::issue_field::IssueField,
+        crate::issue_field::IssueFieldValue,
+    )>,
+) -> Result<(), WorkingGraphError> {
+    let issue_indices: BTreeMap<_, _> = issues
+        .iter()
+        .enumerate()
+        .map(|(index, issue)| (issue.number, index))
+        .collect();
+    for (issue_number, field, value) in updates {
+        let index = issue_indices
+            .get(&issue_number)
+            .copied()
+            .ok_or(WorkingGraphError::MissingIssue(issue_number))?;
+        debug_assert_eq!(value.field(), field);
+        value.apply_to(&mut issues[index]);
+    }
+    Ok(())
 }
 
 fn validated_issue_numbers(
@@ -371,4 +496,57 @@ pub(crate) enum WorkingGraphError {
     EncodeHashInput(serde_json::Error),
     #[error("Pending mutations reference Issue #{0}, which is absent from the Local replica")]
     MissingIssue(u64),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        issue_field::{IssueField, IssueFieldValue},
+        model::IssueIdentityState,
+    };
+
+    #[test]
+    fn field_projection_scales_by_indexing_issues_once_and_preserves_operation_order() {
+        let mut issues: Vec<_> = (1..=5_000).map(issue).collect();
+        let mut updates = Vec::new();
+        for number in 1..=5_000 {
+            updates.push((
+                number,
+                IssueField::Title,
+                IssueFieldValue::title(format!("first-{number}")),
+            ));
+            updates.push((
+                number,
+                IssueField::Title,
+                IssueFieldValue::title(format!("last-{number}")),
+            ));
+        }
+
+        apply_field_updates(&mut issues, updates).expect("project field updates");
+
+        assert_eq!(issues[0].title, "last-1");
+        assert_eq!(issues[4_999].title, "last-5000");
+    }
+
+    fn issue(number: u64) -> Issue {
+        Issue {
+            id: number,
+            node_id: format!("I_{number}"),
+            number,
+            url: format!("https://github.com/acme/widgets/issues/{number}"),
+            title: format!("Issue {number}"),
+            body: String::new(),
+            state: "open".to_owned(),
+            state_reason: None,
+            author: None,
+            assignees: Vec::new(),
+            labels: Vec::new(),
+            comments: Vec::new(),
+            created_at: "2026-08-07T00:00:00Z".to_owned(),
+            updated_at: "2026-08-07T00:00:00Z".to_owned(),
+            closed_at: None,
+            identity: IssueIdentityState::GitHub,
+        }
+    }
 }

@@ -3,28 +3,49 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
 use thiserror::Error;
 
+mod comment_create;
 mod dependency;
+mod field;
 mod issue_create;
+mod metadata_set;
 mod priority;
-
-#[cfg(test)]
-use priority::{PendingClassification, classify_priority};
 
 use crate::{
     draft_identity::{
         DraftIdentity, DraftIdentityError, DraftIdentityStore, DraftIdentityTransaction,
     },
     github::{DependencyIntent, GitHubClient, GitHubError},
-    model::{DependencyEdgeKey, DependencyPresence, Issue, LocalReplica},
+    issue_field::{IssueField, IssueFieldValue},
+    model::{
+        CommentIdentity, DependencyEdgeKey, DependencyPresence, Issue, LocalReplica, SetPresence,
+    },
     outbox::{
-        DependencyMutationState, IssueCreateState, MutationKind, MutationStateUpdate, OutboxError,
-        OutboxStore, PendingMutation, PriorityMutationState, PriorityWrite,
+        CommentCreateState, DependencyMutationState, IssueCreateState, IssueFieldMutationState,
+        MutationKind, MutationStateUpdate, OutboxError, OutboxStore, PendingMutation,
+        PriorityMutationState, PriorityWrite,
     },
     priority::{DeclaredPriority, LogicalPriority, PrioritySelection, PriorityState},
     replica_sync::{self, ReplicaSyncError},
     repository::{IssueReference, Repository},
     store::{ReplicaStore, StoreError},
 };
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScalarClassification {
+    Applicable,
+    AlreadySatisfied,
+    Conflicting,
+}
+
+fn classify_scalar<T: Eq>(base: &T, desired: &T, remote: &T) -> ScalarClassification {
+    if remote == desired {
+        ScalarClassification::AlreadySatisfied
+    } else if remote == base {
+        ScalarClassification::Applicable
+    } else {
+        ScalarClassification::Conflicting
+    }
+}
 
 pub(crate) const OUTPUT_SCHEMA_VERSION: &str = "grit.reconcile/v1";
 
@@ -76,6 +97,10 @@ pub(crate) enum OperationDetails {
         #[serde(skip_serializing_if = "Option::is_none")]
         remote: Option<DraftIssueResult>,
     },
+    CommentCreate {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        remote: Option<CommentIdentity>,
+    },
     PriorityUpdate {
         base: LogicalPriority,
         local: LogicalPriority,
@@ -84,6 +109,19 @@ pub(crate) enum OperationDetails {
     },
     DependencyUpdate {
         edge: DependencyEdgeResult,
+        desired_present: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        remote_present: Option<bool>,
+    },
+    IssueFieldUpdate {
+        field: IssueField,
+        base: IssueFieldValue,
+        local: IssueFieldValue,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        remote: Option<IssueFieldValue>,
+    },
+    MetadataSetUpdate {
+        target: crate::metadata::MetadataSetTarget,
         desired_present: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         remote_present: Option<bool>,
@@ -184,6 +222,12 @@ pub(crate) fn reconcile(
     let preflight = replica_sync::fetch(client, repository)?;
     let identity_store = DraftIdentityStore::discover(repository)?;
     let mut identity_transaction = identity_store.begin_transaction(repository)?;
+    let remote_issues: BTreeMap<_, _> = preflight
+        .issues
+        .iter()
+        .cloned()
+        .map(|issue| (issue.number, issue))
+        .collect();
     let markers_to_recover: BTreeSet<_> = transaction
         .operations()
         .iter()
@@ -200,14 +244,32 @@ pub(crate) fn reconcile(
         })
         .collect();
     let marker_matches = client.find_issues_with_markers(repository, &markers_to_recover)?;
+    let comment_markers_to_recover: BTreeSet<_> = transaction
+        .operations()
+        .iter()
+        .filter_map(|operation| {
+            operation
+                .comment_create_view()
+                .filter(|comment| {
+                    matches!(comment.state, CommentCreateState::AwaitingMarker { .. })
+                })
+                .map(|comment| comment.marker.to_owned())
+        })
+        .collect();
+    let comment_marker_matches =
+        client.find_comments_with_markers(repository, &comment_markers_to_recover)?;
     let pass = ReconciliationPass {
         client,
         repository,
         transaction: &mut transaction,
         remote: priority::remote_priorities(&preflight),
         remote_dependencies: dependency::remote_dependencies(&preflight),
+        remote_issues,
+        metadata_presence: BTreeMap::new(),
+        remote_sub_issues: BTreeMap::new(),
         identity_transaction: &mut identity_transaction,
         marker_matches,
+        comment_marker_matches,
         results: Vec::new(),
         requires_final_refresh: false,
     }
@@ -224,7 +286,13 @@ pub(crate) fn reconcile(
         .publish(&final_replica)
         .map_err(ReconciliationError::FinalPublication)?;
 
-    retire_verified_operations(repository, &mut transaction, &final_replica, &mut results)?;
+    retire_verified_operations(
+        client,
+        repository,
+        &mut transaction,
+        &final_replica,
+        &mut results,
+    )?;
     let remaining = transaction.operations().len();
     let summary = ReconciliationSummary::from_operations(&results, remaining);
 
@@ -242,8 +310,12 @@ struct ReconciliationPass<'client, 'transaction, 'store, 'identity> {
     transaction: &'transaction mut crate::outbox::OutboxTransaction<'store>,
     remote: BTreeMap<u64, RemotePriority>,
     remote_dependencies: BTreeSet<DependencyEdgeKey>,
+    remote_issues: BTreeMap<u64, Issue>,
+    metadata_presence: BTreeMap<crate::metadata::MetadataSetTarget, bool>,
+    remote_sub_issues: BTreeMap<u64, BTreeSet<u64>>,
     identity_transaction: &'identity mut DraftIdentityTransaction<'identity>,
     marker_matches: BTreeMap<String, Vec<crate::github::CreatedIssueIdentity>>,
+    comment_marker_matches: BTreeMap<String, Vec<CommentIdentity>>,
     results: Vec<OperationResult>,
     requires_final_refresh: bool,
 }
@@ -277,6 +349,9 @@ impl ReconciliationPass<'_, '_, '_, '_> {
             MutationKind::IssueCreate => {
                 self.reconcile_issue_create_operation(&operation, blocked_by)
             }
+            MutationKind::CommentCreate => {
+                self.reconcile_comment_create_operation(&operation, blocked_by)
+            }
             MutationKind::PriorityUpdate => {
                 self.reconcile_priority_operation(&operation, blocked_by)
             }
@@ -285,6 +360,12 @@ impl ReconciliationPass<'_, '_, '_, '_> {
                     .dependency_values()
                     .expect("Dependency-update kind has Dependency values");
                 self.reconcile_dependency_operation(&operation, edge.clone(), desired, blocked_by)
+            }
+            MutationKind::IssueFieldUpdate => {
+                self.reconcile_issue_field_operation(&operation, blocked_by)
+            }
+            MutationKind::MetadataSetUpdate => {
+                self.reconcile_metadata_set_operation(&operation, blocked_by)
             }
         }
     }
@@ -308,6 +389,7 @@ struct PassResult {
 }
 
 fn retire_verified_operations(
+    client: &GitHubClient,
     repository: &Repository,
     transaction: &mut crate::outbox::OutboxTransaction<'_>,
     final_replica: &LocalReplica,
@@ -325,6 +407,7 @@ fn retire_verified_operations(
     let superseded = superseded_terminal_ids(transaction.operations(), &terminal_set);
     let mut retired = BTreeSet::new();
     let mut state_updates = BTreeMap::new();
+    let mut final_sub_issues = BTreeMap::new();
     for operation_id in terminal_ids.into_iter().rev() {
         let operation = transaction
             .operation(&operation_id)
@@ -346,6 +429,12 @@ fn retire_verified_operations(
                 results,
                 &mut state_updates,
             ),
+            MutationKind::CommentCreate => comment_create::verify_terminal(
+                &operation,
+                final_replica,
+                results,
+                &mut state_updates,
+            ),
             MutationKind::DependencyUpdate => dependency::verify_terminal(
                 &operation,
                 &final_dependencies,
@@ -358,6 +447,18 @@ fn retire_verified_operations(
                 results,
                 &mut state_updates,
             ),
+            MutationKind::IssueFieldUpdate => {
+                field::verify_terminal(&operation, final_replica, results, &mut state_updates)
+            }
+            MutationKind::MetadataSetUpdate => metadata_set::verify_terminal(
+                client,
+                repository,
+                &operation,
+                final_replica,
+                results,
+                &mut state_updates,
+                &mut final_sub_issues,
+            )?,
         };
         if verified {
             retired.insert(operation_id);
@@ -392,8 +493,11 @@ fn superseded_terminal_ids(
 #[derive(Clone, Eq, PartialEq)]
 enum MutationTarget {
     IssueCreate(crate::model::TemporaryIssueId),
+    CommentCreate(String),
     Priority(u64),
     Dependency(DependencyEdgeKey),
+    IssueField(u64, IssueField),
+    MetadataSet(crate::metadata::MetadataSetTarget),
 }
 
 fn mutation_target(operation: &PendingMutation) -> MutationTarget {
@@ -404,12 +508,26 @@ fn mutation_target(operation: &PendingMutation) -> MutationTarget {
                 .expect("Issue-create kind has Issue-create values")
                 .temporary_id,
         ),
+        MutationKind::CommentCreate => MutationTarget::CommentCreate(operation.id().to_owned()),
         MutationKind::PriorityUpdate => MutationTarget::Priority(operation.issue_number()),
         MutationKind::DependencyUpdate => MutationTarget::Dependency(
             operation
                 .dependency_values()
                 .expect("Dependency-update kind has Dependency values")
                 .0
+                .clone(),
+        ),
+        MutationKind::IssueFieldUpdate => {
+            let update = operation
+                .issue_field_update_view()
+                .expect("Issue-field kind has Issue-field values");
+            MutationTarget::IssueField(update.issue_number, update.field)
+        }
+        MutationKind::MetadataSetUpdate => MutationTarget::MetadataSet(
+            operation
+                .metadata_set_update_view()
+                .expect("metadata kind has metadata values")
+                .target
                 .clone(),
         ),
     }
@@ -426,8 +544,25 @@ pub(crate) fn resolve(
     let operation = transaction
         .operation(operation_id)
         .ok_or_else(|| ReconciliationError::UnknownOperation(operation_id.to_owned()))?;
-    let Some(PriorityMutationState::Conflicting { remote }) = operation.priority_state().cloned()
-    else {
+    enum ConflictValue {
+        Priority(LogicalPriority),
+        IssueField(IssueFieldValue),
+    }
+    let conflict = if let Some(PriorityMutationState::Conflicting { remote }) =
+        operation.priority_state().cloned()
+    {
+        Some(ConflictValue::Priority(remote))
+    } else if let Some(update) = operation.issue_field_update_view() {
+        match update.state {
+            IssueFieldMutationState::Conflicting { remote } => {
+                Some(ConflictValue::IssueField(remote.clone()))
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let Some(conflict) = conflict else {
         return Err(ReconciliationError::OperationNotConflicting(
             operation_id.to_owned(),
         ));
@@ -437,19 +572,32 @@ pub(crate) fn resolve(
         ResolutionChoice::Local => "local",
         ResolutionChoice::Replacement(_) => "priority",
     };
-    match choice {
-        ResolutionChoice::Remote => {
+    match (choice, conflict) {
+        (ResolutionChoice::Remote, ConflictValue::Priority(remote)) => {
             transaction.resolve_remote(repository, operation_id, remote)?;
         }
-        ResolutionChoice::Local => {
+        (ResolutionChoice::Local, ConflictValue::Priority(remote)) => {
             transaction.rebase_priority(repository, operation_id, remote, None)?;
         }
-        ResolutionChoice::Replacement(selection) => transaction.rebase_priority(
-            repository,
-            operation_id,
-            remote,
-            Some(LogicalPriority::from_selection(selection)),
-        )?,
+        (ResolutionChoice::Replacement(selection), ConflictValue::Priority(remote)) => {
+            transaction.rebase_priority(
+                repository,
+                operation_id,
+                remote,
+                Some(LogicalPriority::from_selection(selection)),
+            )?;
+        }
+        (ResolutionChoice::Remote, ConflictValue::IssueField(remote)) => {
+            transaction.resolve_issue_field_remote(repository, operation_id, remote)?;
+        }
+        (ResolutionChoice::Local, ConflictValue::IssueField(remote)) => {
+            transaction.rebase_issue_field(repository, operation_id, remote)?;
+        }
+        (ResolutionChoice::Replacement(_), ConflictValue::IssueField(_)) => {
+            return Err(ReconciliationError::PriorityReplacementForIssueField(
+                operation_id.to_owned(),
+            ));
+        }
     }
     drop(transaction);
 
@@ -472,21 +620,27 @@ pub(crate) enum ReconciliationError {
     DraftIdentity(#[from] DraftIdentityError),
     #[error(transparent)]
     GitHub(#[from] GitHubError),
+    #[error(transparent)]
+    IssueField(#[from] crate::issue_field::IssueFieldError),
     #[error("final Synchronization after Mutation reconciliation failed: {0}")]
     FinalSynchronization(ReplicaSyncError),
     #[error("accepted GitHub state could not be published to the Local replica: {0}")]
     FinalPublication(StoreError),
     #[error("Pending mutation operation {0:?} does not exist")]
     UnknownOperation(String),
-    #[error("Pending mutation operation {0:?} is not a Priority conflict")]
+    #[error("Pending mutation operation {0:?} is not a resolvable field conflict")]
     OperationNotConflicting(String),
+    #[error("Pending mutation operation {0:?} is not a Priority conflict")]
+    PriorityReplacementForIssueField(String),
+    #[error("GitHub Issue #{0} is missing during metadata reconciliation")]
+    MissingMetadataIssue(u64),
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
 
-    use super::{PendingClassification, classify_priority, superseded_terminal_ids};
+    use super::{ScalarClassification, classify_scalar, superseded_terminal_ids};
     use crate::{
         outbox::{PendingMutation, PriorityWrite},
         priority::{DeclaredPriority, LogicalPriority},
@@ -499,16 +653,16 @@ mod tests {
         let desired = declared(DeclaredPriority::P0);
 
         assert_eq!(
-            classify_priority(&base, &desired, &desired),
-            PendingClassification::AlreadySatisfied
+            classify_scalar(&base, &desired, &desired),
+            ScalarClassification::AlreadySatisfied
         );
         assert_eq!(
-            classify_priority(&base, &desired, &base),
-            PendingClassification::Applicable
+            classify_scalar(&base, &desired, &base),
+            ScalarClassification::Applicable
         );
         assert_eq!(
-            classify_priority(&base, &desired, &declared(DeclaredPriority::P3)),
-            PendingClassification::Conflicting
+            classify_scalar(&base, &desired, &declared(DeclaredPriority::P3)),
+            ScalarClassification::Conflicting
         );
     }
 

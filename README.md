@@ -14,7 +14,10 @@ composable filters, Dependency relationship isolation, and a bounded view for de
 Public exports use a separate allowlisted model after a live Repository visibility check.
 Unavailable Priority and Dependency updates are queued durably and projected into analysis with explicit Pending provenance.
 Grit also creates recoverable Draft Issues with stable temporary identities and marker-based reconciliation.
+Title, body, state, and assignment edits use field-aware Pending mutations.
+Generic labels and parent/sub-Issue relationships use idempotent set mutations.
 Structural plans share the cached Working-graph analysis used by next-work recommendations.
+Online and offline comments use durable Operation markers for safe recovery.
 
 ## Build and test
 
@@ -248,6 +251,74 @@ before the request. Grit embeds it in an invisible Markdown comment, removes it
 from normalized and user-facing data, and uses it only to recover an ambiguous
 response. Exactly one remote match is accepted; zero or multiple matches stay
 unresolved and are never retried blindly.
+
+## Comment online or offline
+
+Add Markdown comments to a synchronized Issue or a Draft Issue:
+
+```bash
+grit comment OWNER/REPO#42 --body "Deployment note"
+grit comment OWNER/REPO#draft:TEMPORARY_ID --body "Offline finding" --json
+```
+
+Grit persists the comment intent and a random Operation marker before making
+the GitHub request. With connectivity it immediately reconciles and publishes
+only verified readback; without connectivity it leaves a Pending comment in
+the Working graph. A comment on an unresolved Draft waits for that Draft's
+GitHub identity. If a response is lost after GitHub accepts the comment, the
+next reconciliation searches for the marker: exactly one match is recovered,
+while zero or multiple matches remain unresolved without a blind retry.
+Operation markers are omitted from human and JSON output and stripped from all
+normalized comment data consumed by graph and public serializers.
+
+## Edit Issue fields
+
+`update` changes exactly one logical field per invocation:
+
+```bash
+grit update OWNER/REPO#42 --title "A clearer title"
+grit update OWNER/REPO#42 --body "Revised Markdown"
+grit update OWNER/REPO#42 --state closed
+grit update OWNER/REPO#42 --assignee alice --assignee bob
+grit update OWNER/REPO#42 --clear-assignees
+grit update OWNER/REPO#42 --priority p1
+```
+
+Title, body, state, and assignment also accept a Draft key such as
+`OWNER/REPO#draft:TEMPORARY_ID`. Canonical Issues are updated online when
+GitHub is available; otherwise Grit records the base and desired values in the
+outbox and projects the desired field into `ready` and `next` without changing
+the Local replica. `grit reconcile` applies a Pending field only when GitHub
+still matches its base, treats the desired remote value as already satisfied,
+and exposes incompatible base/local/remote values as a conflict. Resolve a
+conflict explicitly with `grit resolve OPERATION --repo OWNER/REPO --local` or
+`--remote`; resolution always performs a fresh GitHub read before any write.
+
+## Change generic labels and parent relationships
+
+Generic labels use independent add/remove set semantics:
+
+```bash
+grit label OWNER/REPO#42 --add area:backend
+grit label OWNER/REPO#42 --remove risk:high
+```
+
+Canonical `priority:p0` through `priority:p4` labels are rejected here; change
+them only through `grit update ISSUE --priority`. Both generic-label commands
+accept Draft keys and project Pending changes without editing the Local
+replica.
+
+Parent relationships use a separate sub-Issue command:
+
+```bash
+grit sub-issue OWNER/REPO#10 --add OWNER/REPO#42
+grit sub-issue OWNER/REPO#10 --remove OWNER/REPO#42
+```
+
+The first reference is the parent. Grit queues unresolved Draft identities and
+replays the relationship after GitHub assigns their Issue IDs. Parent/sub-Issue
+relationships are decomposition metadata: they are never projected as
+Dependencies and do not affect readiness or ranking topology.
 
 ## Triage graph problems
 
