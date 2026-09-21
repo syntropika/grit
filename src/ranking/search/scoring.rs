@@ -25,6 +25,7 @@ impl<'graph, 'issues, 'scope, 'pagerank, 'working>
                 step.clone(),
                 completion.newly_ready(),
                 rollout.graph(),
+                self.pagerank,
                 self.working,
             );
             self.track_partial(&partial);
@@ -161,21 +162,7 @@ impl<'graph, 'issues, 'scope, 'pagerank, 'working>
         left: &PartialRollout<'issues>,
         right: &PartialRollout<'issues>,
     ) -> Ordering {
-        let left = snapshot(
-            left,
-            self.root.graph(),
-            self.pagerank,
-            self.horizon,
-            self.working,
-        );
-        let right = snapshot(
-            right,
-            self.root.graph(),
-            self.pagerank,
-            self.horizon,
-            self.working,
-        );
-        compare_same_first(&left, &right)
+        left.order.compare(&right.order)
     }
 
     fn compare_potential(
@@ -213,7 +200,7 @@ impl<'graph, 'issues, 'scope, 'pagerank, 'working>
         let mut potential_priority_profiles = vec![[0usize; 4]; remaining_steps + 1];
         let mut visits = 0usize;
         let mut exhausted = false;
-        for number in self
+        for (number, closure) in self
             .potential_targets
             .iter()
             .filter(|_| remaining_steps > 0)
@@ -229,13 +216,6 @@ impl<'graph, 'issues, 'scope, 'pagerank, 'working>
                 break;
             }
             visits += 1;
-            let Some(closure) = self
-                .feasible_closures
-                .get(number)
-                .and_then(|closure| closure.as_ref())
-            else {
-                continue;
-            };
             let distance = closure
                 .iter()
                 .filter(|blocker| !rollout.is_completed(**blocker))

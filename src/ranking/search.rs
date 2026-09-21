@@ -1,4 +1,4 @@
-mod frontier;
+pub(in crate::ranking) mod frontier;
 mod policy;
 mod probe;
 mod scoring;
@@ -36,7 +36,14 @@ pub(super) struct SearchResult<'a> {
     pub(super) candidate_count: usize,
     pub(super) candidates: Vec<EvaluatedCandidate<'a>>,
     pub(super) truncated_by: Vec<SearchRestriction>,
+    pub(super) work: SearchWork,
     pub(super) provenance_numbers: BTreeSet<u64>,
+}
+
+#[derive(Clone, Copy, serde::Deserialize, serde::Serialize)]
+pub(super) struct SearchWork {
+    pub(super) materialized_successors: usize,
+    pub(super) probed_successors: usize,
 }
 
 struct Search<'graph, 'issues, 'scope, 'pagerank, 'working> {
@@ -49,8 +56,7 @@ struct Search<'graph, 'issues, 'scope, 'pagerank, 'working> {
     expanded_states: usize,
     probe_work: usize,
     p0_targets: BTreeSet<u64>,
-    potential_targets: Vec<u64>,
-    feasible_closures: BTreeMap<u64, Option<Vec<u64>>>,
+    potential_targets: Vec<(u64, Vec<u64>)>,
     restrictions: Restrictions,
     best_by_first: BTreeMap<u64, EvaluatedCandidate<'issues>>,
 }
@@ -82,18 +88,12 @@ pub(super) fn evaluate<'graph, 'issues, 'scope, 'pagerank>(
             .iter()
             .copied()
             .filter(|number| !root.is_ready(*number))
+            .filter_map(|number| {
+                root.feasible_prerequisite_closure(number, horizon as usize)
+                    .map(|closure| (number, closure.into_iter().collect()))
+            })
             .collect()
     };
-    let feasible_closures = potential_targets
-        .iter()
-        .map(|number| {
-            (
-                *number,
-                root.feasible_prerequisite_closure(*number, horizon as usize)
-                    .map(|closure| closure.into_iter().collect()),
-            )
-        })
-        .collect();
     let provenance_numbers = graph
         .open_numbers()
         .iter()
@@ -117,7 +117,6 @@ pub(super) fn evaluate<'graph, 'issues, 'scope, 'pagerank>(
         probe_work: 0,
         p0_targets,
         potential_targets,
-        feasible_closures,
         restrictions: Restrictions::default(),
         best_by_first: BTreeMap::new(),
     };
@@ -150,14 +149,9 @@ impl<'graph, 'issues, 'scope, 'pagerank, 'working>
     fn run(mut self) -> SearchResult<'issues> {
         let one_step_analysis = (self.horizon == 1).then(|| self.root.one_step_analysis());
         let first_frontier = if let Some(analysis) = &one_step_analysis {
-            one_step_frontier(analysis, &self.p0_targets, self.working)
+            one_step_frontier(analysis, &self.p0_targets)
         } else {
-            frontier(
-                &self.root,
-                self.horizon as usize,
-                &self.p0_targets,
-                self.working,
-            )
+            frontier(&self.root, self.horizon as usize, &self.p0_targets)
         };
         let mode = first_frontier.mode;
         if self.horizon == 1 {
@@ -168,7 +162,13 @@ impl<'graph, 'issues, 'scope, 'pagerank, 'working>
                     .as_ref()
                     .map(|analysis| analysis.unlocks_for(step.issue.number))
                     .unwrap_or(&[]);
-                let checkpoint = partial.apply(step, newly_ready, self.root.graph(), self.working);
+                let checkpoint = partial.apply(
+                    step,
+                    newly_ready,
+                    self.root.graph(),
+                    self.pagerank,
+                    self.working,
+                );
                 self.record(&partial);
                 partial.undo(checkpoint);
             }
@@ -197,8 +197,7 @@ impl<'graph, 'issues, 'scope, 'pagerank, 'working>
             let mut successors = Vec::new();
             for state in &beam {
                 let remaining = self.horizon as usize - state.partial.steps.len();
-                let next_frontier =
-                    frontier(&state.rollout, remaining, &self.p0_targets, self.working);
+                let next_frontier = frontier(&state.rollout, remaining, &self.p0_targets);
                 let branches = self.select_branches(state, next_frontier);
                 for scored in branches {
                     if let Some(successor) =
@@ -248,6 +247,10 @@ impl<'graph, 'issues, 'scope, 'pagerank, 'working>
             candidate_count,
             candidates: self.best_by_first.into_values().collect(),
             truncated_by: self.restrictions.into_vec(),
+            work: SearchWork {
+                materialized_successors: self.expanded_states,
+                probed_successors: self.probe_work,
+            },
             provenance_numbers: self.provenance_numbers.into_inner(),
         }
     }
@@ -275,6 +278,7 @@ impl<'graph, 'issues, 'scope, 'pagerank, 'working>
             step.clone(),
             completion.newly_ready(),
             rollout.graph(),
+            self.pagerank,
             self.working,
         );
         let mut causal = parent.causal.clone();
