@@ -1302,6 +1302,69 @@ fn empty_graph_omits_pagerank_globally_and_out_of_range_horizon_is_rejected() {
     assert!(String::from_utf8_lossy(&unsupported.stderr).contains("between 1 and 3"));
 }
 
+#[test]
+fn next_profiles_each_local_phase_and_reuses_the_persistent_ranking_cache() {
+    let mut github = Server::new();
+    let state = TempDir::new().expect("temporary state directory");
+    let issues = vec![
+        issue(1, "open", &["priority:p1"], &[]),
+        issue(2, "open", &["priority:p3"], &[]),
+        issue(3, "open", &["priority:p4"], &[]),
+    ];
+    let dependencies = vec![
+        (1, vec![]),
+        (2, vec![]),
+        (3, vec![internal_blocker(1, "open")]),
+    ];
+    let mocks = mock_repository(&mut github, "acme/profile", issues, dependencies);
+
+    let mut cold = next_default_command(&state, &github.url(), "acme/profile", true);
+    cold.arg("--profile");
+    let cold = cold.output().expect("run cold profiled next");
+    assert_success(&cold);
+    let cold: Value = serde_json::from_slice(&cold.stdout).expect("cold next JSON");
+    assert_eq!(cold["performance"]["unit"], "microseconds");
+    assert_eq!(cold["performance"]["cache_hit"], false);
+    assert_eq!(cold["performance"]["cache_published"], true);
+    assert_eq!(cold["performance"]["synchronization_included"], false);
+    for phase in [
+        "graph_preparation",
+        "scc_detection",
+        "readiness",
+        "cache_lookup",
+        "pagerank",
+        "search",
+        "output_assembly",
+        "analysis_serialization",
+        "cache_publication",
+    ] {
+        assert!(cold["performance"][phase].is_u64(), "phase {phase}");
+    }
+
+    let mut warm = next_default_command(&state, &github.url(), "acme/profile", false);
+    warm.arg("--profile");
+    let warm = warm.output().expect("run warm profiled next");
+    assert_success(&warm);
+    let warm: Value = serde_json::from_slice(&warm.stdout).expect("warm next JSON");
+    assert_eq!(warm["performance"]["cache_hit"], true);
+    assert_eq!(warm["performance"]["pagerank"], 0);
+    assert_eq!(warm["performance"]["search"], 0);
+    for field in [
+        "input_hash",
+        "mode",
+        "parameters",
+        "metrics",
+        "recommendation",
+        "alternatives",
+        "search_complete",
+        "truncated_by",
+        "work",
+    ] {
+        assert_eq!(cold[field], warm[field], "field {field}");
+    }
+    mocks.assert();
+}
+
 fn next_command(state: &TempDir, api_url: &str, repository: &str, online: bool) -> Command {
     next_command_with_horizon(state, api_url, repository, online, Some(1))
 }
