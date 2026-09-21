@@ -41,6 +41,7 @@ pub(crate) fn publish_site(
             ("graph.schema.json", schema_bytes),
             ("index.html", html_bytes),
             ("app.css", render::stylesheet().to_vec()),
+            ("graph-query.js", render::graph_query_javascript().to_vec()),
             ("app.js", render::javascript().to_vec()),
         ],
     )?;
