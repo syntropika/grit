@@ -1,6 +1,8 @@
 use super::*;
 
-impl<'graph, 'issues, 'scope, 'pagerank> Search<'graph, 'issues, 'scope, 'pagerank> {
+impl<'graph, 'issues, 'scope, 'pagerank, 'working>
+    Search<'graph, 'issues, 'scope, 'pagerank, 'working>
+{
     pub(super) fn probe(
         &mut self,
         parent: &SearchState<'graph, 'issues, 'scope>,
@@ -42,7 +44,7 @@ impl<'graph, 'issues, 'scope, 'pagerank> Search<'graph, 'issues, 'scope, 'pagera
             let mut successors = Vec::new();
             for state in &beam {
                 let remaining = self.horizon as usize - state.partial.steps.len();
-                let mut next = frontier(&state.rollout, remaining, &self.p0_targets);
+                let mut next = frontier(&state.rollout, remaining, &self.p0_targets, self.working);
                 if next.mode == RankingMode::Normal {
                     next.steps
                         .retain(|step| state.causal.contains(step.issue.number));

@@ -1,6 +1,5 @@
 use std::env;
 
-use chrono::{SecondsFormat, Utc};
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 use thiserror::Error;
@@ -11,17 +10,23 @@ use crate::{
     github::{CreateLabelRequest, GitHubClient, GitHubError, LabelCreation},
     model::{LocalReplica, ReplicaError},
     operational::{ExecutionScope, analyze_ready},
+    outbox::{OutboxError, OutboxStore, PendingMutation},
     priority::{
-        DeclaredPriority, PriorityState, missing_canonical_labels, present_canonical_labels,
+        DeclaredPriority, LogicalPriority, PrioritySelection, PriorityState,
+        missing_canonical_labels, present_canonical_labels,
     },
+    priority_update::{self, PendingPriorityUpdateError, PriorityUpdateError},
     ranking::{self, NextAnalysis},
-    repository::{Repository, RepositoryError},
+    replica_sync::{self, ReplicaSyncError},
+    repository::{IssueReference, IssueReferenceError, Repository, RepositoryError},
     store::{ReplicaStore, StoreError},
+    working_graph::{PendingProvenance, WorkingGraph, WorkingGraphError},
 };
 
 const SYNC_SCHEMA_VERSION: &str = "grit.sync/v1";
 const READY_SCHEMA_VERSION: &str = "grit.ready/v1";
 const INIT_SCHEMA_VERSION: &str = "grit.init/v1";
+const PRIORITY_UPDATE_SCHEMA_VERSION: &str = "grit.priority-update/v1";
 
 #[derive(Parser)]
 #[command(name = "grit", version, about)]
@@ -43,6 +48,17 @@ enum Command {
         /// Number of completions to evaluate, from one through the default three.
         #[arg(long, default_value_t = ranking::DEFAULT_HORIZON)]
         horizon: u8,
+        /// Emit versioned machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Update one Issue's logical Declared priority.
+    Update {
+        /// Issue in OWNER/REPO#NUMBER form.
+        issue: String,
+        /// Desired logical Priority, or none to remove it.
+        #[arg(long)]
+        priority: PrioritySelection,
         /// Emit versioned machine-readable output.
         #[arg(long)]
         json: bool,
@@ -93,6 +109,11 @@ pub(crate) fn execute() -> Result<(), CliError> {
             horizon,
             json,
         ),
+        Command::Update {
+            issue,
+            priority,
+            json,
+        } => update_priority(&issue, priority, json),
         Command::Init { repo, json } => initialize(&Repository::parse(&repo)?, json),
         Command::Sync { repo, json } => sync(&Repository::parse(&repo)?, json),
         Command::Ready {
@@ -151,6 +172,103 @@ fn initialize(repository: &Repository, json: bool) -> Result<(), CliError> {
     Ok(())
 }
 
+fn update_priority(issue: &str, requested: PrioritySelection, json: bool) -> Result<(), CliError> {
+    let issue = IssueReference::parse(issue)?;
+    let client = match github_client() {
+        Ok(client) => client,
+        Err(CliError::Auth(source)) => {
+            return queue_priority_update(&issue, requested, source.to_string(), json);
+        }
+        Err(error) => return Err(error),
+    };
+    let result = match priority_update::update(&client, &issue, requested) {
+        Ok(result) => result,
+        Err(source) if source.permits_offline_queue() => {
+            return queue_priority_update(&issue, requested, source.to_string(), json);
+        }
+        Err(source) => return Err(source.into()),
+    };
+    let output = PriorityUpdateOutput {
+        schema_version: PRIORITY_UPDATE_SCHEMA_VERSION,
+        command: "update",
+        status: PriorityUpdateStatus::Synchronized,
+        pending: false,
+        repository: &result.replica.repository,
+        issue: PriorityIssueOutput {
+            key: &result.issue_key,
+            number: result.issue_number,
+            url: &result.issue_url,
+        },
+        previous_priority: result.previous_priority,
+        resulting_priority: result.resulting_priority,
+        operation: None,
+        working_graph: None,
+        snapshot: snapshot_summary(&result.replica),
+    };
+    print_priority_update(output, json)
+}
+
+fn queue_priority_update(
+    issue: &IssueReference,
+    requested: PrioritySelection,
+    online_failure: String,
+    json: bool,
+) -> Result<(), CliError> {
+    let result = priority_update::queue(issue, requested).map_err(|queue| {
+        CliError::OnlinePriorityUpdateAndQueueFailed {
+            online: online_failure,
+            queue,
+        }
+    })?;
+    let output = PriorityUpdateOutput {
+        schema_version: PRIORITY_UPDATE_SCHEMA_VERSION,
+        command: "update",
+        status: PriorityUpdateStatus::Pending,
+        pending: true,
+        repository: &result.replica.repository,
+        issue: PriorityIssueOutput {
+            key: &result.issue_key,
+            number: result.issue_number,
+            url: &result.issue_url,
+        },
+        previous_priority: result.previous_priority,
+        resulting_priority: result.resulting_priority,
+        operation: Some(PendingOperationOutput::from(&result.operation)),
+        working_graph: Some(WorkingGraphSummary {
+            input_hash: &result.working_input_hash,
+        }),
+        snapshot: snapshot_summary(&result.replica),
+    };
+    print_priority_update(output, json)
+}
+
+fn print_priority_update(output: PriorityUpdateOutput<'_>, json: bool) -> Result<(), CliError> {
+    if json {
+        serde_json::to_writer(std::io::stdout().lock(), &output).map_err(CliError::EncodeOutput)?;
+        println!();
+    } else if matches!(output.status, PriorityUpdateStatus::Pending) {
+        println!(
+            "Queued {} Priority from {} to {} as Pending mutation {}",
+            output.issue.key,
+            output.previous_priority.display_name(),
+            output.resulting_priority.display_name(),
+            output
+                .operation
+                .as_ref()
+                .expect("Pending output includes an operation")
+                .id
+        );
+    } else {
+        println!(
+            "Updated {} Priority from {} to {}",
+            output.issue.key,
+            output.previous_priority.display_name(),
+            output.resulting_priority.display_name()
+        );
+    }
+    Ok(())
+}
+
 fn sync(repository: &Repository, json: bool) -> Result<(), CliError> {
     let replica = synchronize(repository)?;
     print_sync_result(&replica, json)?;
@@ -167,11 +285,13 @@ fn next(
         return Err(CliError::UnsupportedNextHorizon(horizon));
     }
     let (replica, source) = refresh_or_local(repository)?;
+    let outbox = OutboxStore::discover(repository)?.load(repository)?;
+    let working = WorkingGraph::project(&replica, &outbox)?;
     let scope = assignee
         .map(ExecutionScope::Assignee)
         .unwrap_or(ExecutionScope::Available);
-    let analysis = ranking::analyze(&replica, scope, horizon);
-    let warnings = analysis_warnings(&replica, source);
+    let analysis = ranking::analyze(&working, scope, horizon);
+    let warnings = analysis_warnings(&working, source);
     if json {
         let output = NextOutput {
             schema_version: ranking::OUTPUT_SCHEMA_VERSION,
@@ -208,16 +328,7 @@ fn next(
 
 fn synchronize(repository: &Repository) -> Result<LocalReplica, CliError> {
     let client = github_client()?;
-    let data = client.fetch_repository(repository)?;
-
-    let replica = LocalReplica::build(
-        repository.full_name().to_owned(),
-        Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-        data.labels,
-        data.issues,
-        data.dependencies,
-    )?;
-
+    let replica = replica_sync::fetch(&client, repository)?;
     ReplicaStore::discover(repository)?.publish(&replica)?;
     Ok(replica)
 }
@@ -233,19 +344,7 @@ fn github_client() -> Result<GitHubClient, CliError> {
 }
 
 fn print_sync_result(replica: &LocalReplica, json: bool) -> Result<(), CliError> {
-    let comment_count = replica
-        .issues
-        .iter()
-        .map(|issue| issue.comments.len())
-        .sum();
-    let snapshot = SnapshotSummary {
-        schema_version: &replica.schema_version,
-        synced_at: &replica.synced_at,
-        input_hash: &replica.input_hash,
-        issue_count: replica.issues.len(),
-        comment_count,
-        dependency_count: replica.dependencies.len(),
-    };
+    let snapshot = snapshot_summary(replica);
     if json {
         let output = SyncOutput {
             schema_version: SYNC_SCHEMA_VERSION,
@@ -268,23 +367,41 @@ fn print_sync_result(replica: &LocalReplica, json: bool) -> Result<(), CliError>
     Ok(())
 }
 
+fn snapshot_summary(replica: &LocalReplica) -> SnapshotSummary<'_> {
+    SnapshotSummary {
+        schema_version: &replica.schema_version,
+        synced_at: &replica.synced_at,
+        input_hash: &replica.input_hash,
+        issue_count: replica.issues.len(),
+        comment_count: replica
+            .issues
+            .iter()
+            .map(|issue| issue.comments.len())
+            .sum(),
+        dependency_count: replica.dependencies.len(),
+    }
+}
+
 fn ready(repository: &Repository, assignee: Option<&str>, json: bool) -> Result<(), CliError> {
     let (replica, source) = refresh_or_local(repository)?;
+    let outbox = OutboxStore::discover(repository)?.load(repository)?;
+    let working = WorkingGraph::project(&replica, &outbox)?;
     let scope = assignee
         .map(ExecutionScope::Assignee)
         .unwrap_or(ExecutionScope::Available);
     let analysis = analyze_ready(&replica, scope);
-    let warnings = analysis_warnings(&replica, source);
+    let warnings = analysis_warnings(&working, source);
     let issues: Vec<_> = analysis
         .executable
         .iter()
         .map(|issue| ReadyIssue {
+            provenance: working.provenance_for_issue(issue.number),
             number: issue.number,
             url: &issue.url,
             title: &issue.title,
             ready: true,
             available: issue.assignees.is_empty(),
-            priority: PriorityState::from_issue_labels(&issue.labels),
+            priority: working.priority(issue),
             assignees: issue
                 .assignees
                 .iter()
@@ -298,7 +415,10 @@ fn ready(repository: &Repository, assignee: Option<&str>, json: bool) -> Result<
         repository: &replica.repository,
         source,
         synced_at: &replica.synced_at,
-        input_hash: &replica.input_hash,
+        replica_snapshot_hash: &replica.input_hash,
+        input_hash: working.input_hash(),
+        pending: working.is_pending(),
+        pending_operation_ids: working.operation_ids(),
         execution_scope: execution_scope_output(assignee),
         issues,
         summary: ReadySummary {
@@ -349,7 +469,8 @@ fn refresh_or_local(repository: &Repository) -> Result<(LocalReplica, ReplicaSou
     }
 }
 
-fn analysis_warnings(replica: &LocalReplica, source: ReplicaSource) -> Vec<ReadyWarning> {
+fn analysis_warnings(working: &WorkingGraph<'_>, source: ReplicaSource) -> Vec<ReadyWarning> {
+    let replica = working.replica();
     let mut warnings = Vec::new();
     if let Some(repository_labels) = replica.repository_labels.as_deref() {
         let missing_labels: Vec<_> = missing_canonical_labels(repository_labels)
@@ -370,7 +491,7 @@ fn analysis_warnings(replica: &LocalReplica, source: ReplicaSource) -> Vec<Ready
         .iter()
         .filter(|issue| issue.state.eq_ignore_ascii_case("open"))
     {
-        let priority = PriorityState::from_issue_labels(&issue.labels);
+        let priority = working.priority(issue);
         if let Some(labels) = priority.conflict_labels() {
             warnings.push(ReadyWarning {
                 code: "priority_conflict",
@@ -478,6 +599,61 @@ struct NextOutput<'a> {
 }
 
 #[derive(Serialize)]
+struct PriorityUpdateOutput<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    status: PriorityUpdateStatus,
+    pending: bool,
+    repository: &'a str,
+    issue: PriorityIssueOutput<'a>,
+    previous_priority: PriorityState,
+    resulting_priority: PriorityState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    operation: Option<PendingOperationOutput<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    working_graph: Option<WorkingGraphSummary<'a>>,
+    snapshot: SnapshotSummary<'a>,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum PriorityUpdateStatus {
+    Synchronized,
+    Pending,
+}
+
+#[derive(Serialize)]
+struct PendingOperationOutput<'a> {
+    id: &'a str,
+    kind: &'static str,
+    base: &'a LogicalPriority,
+    desired: &'a LogicalPriority,
+}
+
+impl<'a> From<&'a PendingMutation> for PendingOperationOutput<'a> {
+    fn from(operation: &'a PendingMutation) -> Self {
+        Self {
+            id: operation.id(),
+            kind: "priority_update",
+            base: operation.base(),
+            desired: operation.desired(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct WorkingGraphSummary<'a> {
+    input_hash: &'a str,
+}
+
+#[derive(Serialize)]
+struct PriorityIssueOutput<'a> {
+    key: &'a str,
+    number: u64,
+    url: &'a str,
+}
+
+#[derive(Serialize)]
 struct SnapshotSummary<'a> {
     schema_version: &'a str,
     synced_at: &'a str,
@@ -494,7 +670,11 @@ struct ReadyOutput<'a> {
     repository: &'a str,
     source: ReplicaSource,
     synced_at: &'a str,
+    replica_snapshot_hash: &'a str,
     input_hash: &'a str,
+    pending: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pending_operation_ids: Vec<String>,
     execution_scope: ExecutionScopeOutput<'a>,
     issues: Vec<ReadyIssue<'a>>,
     summary: ReadySummary,
@@ -510,6 +690,8 @@ struct ExecutionScopeOutput<'a> {
 
 #[derive(Serialize)]
 struct ReadyIssue<'a> {
+    #[serde(flatten)]
+    provenance: PendingProvenance,
     number: u64,
     url: &'a str,
     title: &'a str,
@@ -564,6 +746,8 @@ impl ReplicaSource {
 pub(crate) enum CliError {
     #[error(transparent)]
     Repository(#[from] RepositoryError),
+    #[error(transparent)]
+    IssueReference(#[from] IssueReferenceError),
     #[error("GRIT_GITHUB_API_URL is invalid: {0}")]
     ParseApiBase(url::ParseError),
     #[error("GRIT_GITHUB_API_URL must be a safe absolute HTTP(S) base URL")]
@@ -576,6 +760,21 @@ pub(crate) enum CliError {
     Store(#[from] StoreError),
     #[error(transparent)]
     Replica(#[from] ReplicaError),
+    #[error(transparent)]
+    ReplicaSync(#[from] ReplicaSyncError),
+    #[error(transparent)]
+    PriorityUpdate(#[from] PriorityUpdateError),
+    #[error(transparent)]
+    Outbox(#[from] OutboxError),
+    #[error(transparent)]
+    WorkingGraph(#[from] WorkingGraphError),
+    #[error(
+        "online Priority update was unavailable ({online}); the Pending mutation could not be queued: {queue}"
+    )]
+    OnlinePriorityUpdateAndQueueFailed {
+        online: String,
+        queue: PendingPriorityUpdateError,
+    },
     #[error("could not encode command JSON output: {0}")]
     EncodeOutput(serde_json::Error),
     #[error("next/v1 horizon must be between 1 and 3, not {0}")]

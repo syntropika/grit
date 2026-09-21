@@ -1,6 +1,8 @@
 use super::*;
 
-impl<'graph, 'issues, 'scope, 'pagerank> Search<'graph, 'issues, 'scope, 'pagerank> {
+impl<'graph, 'issues, 'scope, 'pagerank, 'working>
+    Search<'graph, 'issues, 'scope, 'pagerank, 'working>
+{
     pub(super) fn score_steps(
         &mut self,
         parent: &SearchState<'graph, 'issues, 'scope>,
@@ -16,7 +18,13 @@ impl<'graph, 'issues, 'scope, 'pagerank> Search<'graph, 'issues, 'scope, 'pagera
             let completion = rollout
                 .complete(step.issue.number)
                 .expect("scored frontiers contain only Executable Issues");
-            let checkpoint = partial.apply(step.clone(), completion.newly_ready(), rollout.graph());
+            let checkpoint = partial.apply(
+                step.clone(),
+                completion.newly_ready(),
+                rollout.graph(),
+                self.working,
+            );
+            self.track_partial(&partial);
             let upper =
                 self.potential_key(&rollout, &partial, remaining_after, potential_visit_limit);
             let structural = if include_structural {
@@ -138,8 +146,20 @@ impl<'graph, 'issues, 'scope, 'pagerank> Search<'graph, 'issues, 'scope, 'pagera
         left: &PartialRollout<'issues>,
         right: &PartialRollout<'issues>,
     ) -> Ordering {
-        let left = snapshot(left, self.root.graph(), self.pagerank, self.horizon);
-        let right = snapshot(right, self.root.graph(), self.pagerank, self.horizon);
+        let left = snapshot(
+            left,
+            self.root.graph(),
+            self.pagerank,
+            self.horizon,
+            self.working,
+        );
+        let right = snapshot(
+            right,
+            self.root.graph(),
+            self.pagerank,
+            self.horizon,
+            self.working,
+        );
         compare_same_first(&left, &right)
     }
 
@@ -215,7 +235,7 @@ impl<'graph, 'issues, 'scope, 'pagerank> Search<'graph, 'issues, 'scope, 'pagera
             }
             potential_counts[distance] += 1;
             if let Some(issue) = graph.issue(*number) {
-                let issue_priority = priority(issue);
+                let issue_priority = self.priority(issue);
                 if issue_priority == PriorityComparison::P0 {
                     potential_p0_counts[distance] += 1;
                 } else {
@@ -242,7 +262,7 @@ impl<'graph, 'issues, 'scope, 'pagerank> Search<'graph, 'issues, 'scope, 'pagera
             .unlocks
             .iter()
             .filter_map(|number| graph.issue(*number))
-            .filter(|issue| priority(issue) == PriorityComparison::P0)
+            .filter(|issue| self.priority(issue) == PriorityComparison::P0)
             .count();
         let mut cumulative_count = 0usize;
         let mut cumulative_p0_count = 0usize;
@@ -261,7 +281,7 @@ impl<'graph, 'issues, 'scope, 'pagerank> Search<'graph, 'issues, 'scope, 'pagera
         let mut profile = PriorityProfile::default();
         for number in &partial.unlocks {
             if let Some(issue) = graph.issue(*number) {
-                let issue_priority = priority(issue);
+                let issue_priority = self.priority(issue);
                 if issue_priority != PriorityComparison::P0 {
                     profile.record(issue_priority);
                 }
@@ -312,7 +332,7 @@ impl<'graph, 'issues, 'scope, 'pagerank> Search<'graph, 'issues, 'scope, 'pagera
         let mut profile = [0usize; 5];
         for number in &reached {
             if let Some(issue) = graph.issue(*number) {
-                profile[priority_profile_index(priority(issue))] += 1;
+                profile[priority_profile_index(self.priority(issue))] += 1;
             }
         }
         StructuralKey {

@@ -1,3 +1,12 @@
+pub(super) fn empty_outbox(repository: &str) -> crate::outbox::PendingMutationOutbox {
+    serde_json::from_value(serde_json::json!({
+        "schema_version": "grit.pending-mutations/v1",
+        "repository": repository,
+        "operations": []
+    }))
+    .expect("empty outbox")
+}
+
 use super::*;
 use crate::{
     model::{BlockerIdentity, BlockerScope, Dependency, IssueIdentity, Label, LocalReplica},
@@ -24,8 +33,17 @@ fn wide_p0_routes_complete_the_bounded_end_to_end_evaluation() {
         issues,
         dependencies,
     };
+    let graph_outbox = empty_outbox(&replica.repository);
+    let graph_working = WorkingGraph::project(&replica, &graph_outbox).expect("Working graph");
     let graph = OperationalGraph::prepare(&replica);
-    let result = evaluate(&graph, ExecutionScope::Available, None, 3, 8_192);
+    let result = evaluate(
+        &graph_working,
+        &graph,
+        ExecutionScope::Available,
+        None,
+        3,
+        8_192,
+    );
 
     assert_eq!(result.mode, RankingMode::P0Route);
     assert_eq!(result.candidate_count, FIRST_STEP_LIMIT);
@@ -42,9 +60,18 @@ fn wide_p0_routes_complete_the_bounded_end_to_end_evaluation() {
 fn horizon_one_evaluates_five_thousand_issues_without_discovery_limits() {
     let issues = (1..=5_000).map(|number| issue(number, false)).collect();
     let replica = replica(issues, Vec::new());
+    let graph_outbox = empty_outbox(&replica.repository);
+    let graph_working = WorkingGraph::project(&replica, &graph_outbox).expect("Working graph");
     let graph = OperationalGraph::prepare(&replica);
 
-    let result = evaluate(&graph, ExecutionScope::Available, None, 1, 1);
+    let result = evaluate(
+        &graph_working,
+        &graph,
+        ExecutionScope::Available,
+        None,
+        1,
+        1,
+    );
 
     assert_eq!(result.candidate_count, 5_000);
     assert_eq!(result.candidates.len(), 5_000);
@@ -55,9 +82,18 @@ fn horizon_one_evaluates_five_thousand_issues_without_discovery_limits() {
 fn multistep_search_scores_a_five_thousand_issue_frontier_with_bounded_materialization() {
     let issues = (1..=5_000).map(|number| issue(number, false)).collect();
     let replica = replica(issues, Vec::new());
+    let graph_outbox = empty_outbox(&replica.repository);
+    let graph_working = WorkingGraph::project(&replica, &graph_outbox).expect("Working graph");
     let graph = OperationalGraph::prepare(&replica);
 
-    let result = evaluate(&graph, ExecutionScope::Available, None, 2, 1);
+    let result = evaluate(
+        &graph_working,
+        &graph,
+        ExecutionScope::Available,
+        None,
+        2,
+        1,
+    );
 
     assert_eq!(result.candidate_count, FIRST_STEP_LIMIT);
     assert_eq!(result.candidates.len(), 1);
@@ -77,9 +113,18 @@ fn horizon_one_does_not_report_potential_limits_for_opaque_blocked_history() {
     let issues = (1..=2_001).map(|number| issue(number, false)).collect();
     let dependencies = (2..=2_001).map(external_dependency).collect();
     let replica = replica(issues, dependencies);
+    let graph_outbox = empty_outbox(&replica.repository);
+    let graph_working = WorkingGraph::project(&replica, &graph_outbox).expect("Working graph");
     let graph = OperationalGraph::prepare(&replica);
 
-    let result = evaluate(&graph, ExecutionScope::Available, None, 1, 1);
+    let result = evaluate(
+        &graph_working,
+        &graph,
+        ExecutionScope::Available,
+        None,
+        1,
+        1,
+    );
 
     assert_eq!(result.candidate_count, 1);
     assert_eq!(result.candidates[0].data().issue.number, 1);
@@ -100,9 +145,18 @@ fn horizon_one_batches_shared_p0_routes_over_satisfied_history() {
         dependencies.push(dependency(1, closed_blocker));
     }
     let replica = replica(issues, dependencies);
+    let graph_outbox = empty_outbox(&replica.repository);
+    let graph_working = WorkingGraph::project(&replica, &graph_outbox).expect("Working graph");
     let graph = OperationalGraph::prepare(&replica);
 
-    let result = evaluate(&graph, ExecutionScope::Available, None, 1, 1);
+    let result = evaluate(
+        &graph_working,
+        &graph,
+        ExecutionScope::Available,
+        None,
+        1,
+        1,
+    );
 
     assert_eq!(result.mode, RankingMode::P0Route);
     assert_eq!(result.candidate_count, 1);
@@ -127,10 +181,30 @@ fn bounded_search_is_invariant_to_issue_and_dependency_permutations() {
     dependencies.reverse();
     let second = replica(issues, dependencies);
 
+    let first_graph_outbox = empty_outbox(&first.repository);
+    let first_graph_working =
+        WorkingGraph::project(&first, &first_graph_outbox).expect("Working graph");
     let first_graph = OperationalGraph::prepare(&first);
+    let second_graph_outbox = empty_outbox(&second.repository);
+    let second_graph_working =
+        WorkingGraph::project(&second, &second_graph_outbox).expect("Working graph");
     let second_graph = OperationalGraph::prepare(&second);
-    let first_result = evaluate(&first_graph, ExecutionScope::Available, None, 3, 8_192);
-    let second_result = evaluate(&second_graph, ExecutionScope::Available, None, 3, 8_192);
+    let first_result = evaluate(
+        &first_graph_working,
+        &first_graph,
+        ExecutionScope::Available,
+        None,
+        3,
+        8_192,
+    );
+    let second_result = evaluate(
+        &second_graph_working,
+        &second_graph,
+        ExecutionScope::Available,
+        None,
+        3,
+        8_192,
+    );
 
     assert_eq!(
         search_signature(&first_result),
@@ -142,9 +216,18 @@ fn bounded_search_is_invariant_to_issue_and_dependency_permutations() {
 fn state_budget_is_reported_in_canonical_position() {
     let issues = (1..=10).map(|number| issue(number, false)).collect();
     let replica = replica(issues, Vec::new());
+    let graph_outbox = empty_outbox(&replica.repository);
+    let graph_working = WorkingGraph::project(&replica, &graph_outbox).expect("Working graph");
     let graph = OperationalGraph::prepare(&replica);
 
-    let result = evaluate(&graph, ExecutionScope::Available, None, 3, 1);
+    let result = evaluate(
+        &graph_working,
+        &graph,
+        ExecutionScope::Available,
+        None,
+        3,
+        1,
+    );
 
     assert_eq!(result.candidate_count, 10);
     assert_eq!(result.candidates.len(), 1);

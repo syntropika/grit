@@ -9,13 +9,14 @@ pub(super) fn frontier<'issues>(
     state: &RolloutState<'_, 'issues, '_>,
     remaining_steps: usize,
     p0_targets: &BTreeSet<u64>,
+    working: &WorkingGraph<'_>,
 ) -> Frontier<'issues> {
     let executable: BTreeMap<_, _> = state
         .executable()
         .into_iter()
         .map(|issue| (issue.number, issue))
         .collect();
-    if let Some(frontier) = p0_ready_frontier(&executable) {
+    if let Some(frontier) = p0_ready_frontier(&executable, working) {
         return frontier;
     }
 
@@ -43,12 +44,13 @@ pub(super) fn frontier<'issues>(
 pub(super) fn one_step_frontier<'issues>(
     analysis: &OneStepAnalysis<'issues>,
     p0_targets: &BTreeSet<u64>,
+    working: &WorkingGraph<'_>,
 ) -> Frontier<'issues> {
     let executable = analysis
         .executable()
         .map(|issue| (issue.number, issue))
         .collect::<BTreeMap<_, _>>();
-    if let Some(frontier) = p0_ready_frontier(&executable) {
+    if let Some(frontier) = p0_ready_frontier(&executable, working) {
         return frontier;
     }
     let route_by_step = analysis
@@ -74,11 +76,12 @@ pub(super) fn one_step_frontier<'issues>(
 
 fn p0_ready_frontier<'issues>(
     executable: &BTreeMap<u64, &'issues crate::model::Issue>,
+    working: &WorkingGraph<'_>,
 ) -> Option<Frontier<'issues>> {
     let steps = executable
         .values()
         .copied()
-        .filter(|issue| priority(issue) == PriorityComparison::P0)
+        .filter(|issue| priority(working, issue) == PriorityComparison::P0)
         .map(|issue| EvaluatedStep {
             issue,
             selection: StepSelection::P0Ready,

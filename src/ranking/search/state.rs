@@ -14,6 +14,7 @@ impl<'a> PartialRollout<'a> {
         step: EvaluatedStep<'a>,
         newly_ready: &[u64],
         graph: &crate::operational::OperationalGraph<'a>,
+        working: &WorkingGraph<'_>,
     ) -> PartialCheckpoint {
         let steps_len = self.steps.len();
         let unlock_curve_len = self.unlock_curve.len();
@@ -30,7 +31,7 @@ impl<'a> PartialRollout<'a> {
             .unlocks
             .iter()
             .filter_map(|number| graph.issue(*number))
-            .filter(|issue| priority(issue) == PriorityComparison::P0)
+            .filter(|issue| priority(working, issue) == PriorityComparison::P0)
             .count();
         self.p0_curve.push(unlocked_p0);
         PartialCheckpoint {
@@ -185,6 +186,8 @@ mod tests {
             issues: vec![issue(1), issue(2)],
             dependencies: Vec::new(),
         };
+        let outbox = super::super::tests::empty_outbox(&replica.repository);
+        let working = WorkingGraph::project(&replica, &outbox).expect("Working graph");
         let graph = crate::operational::OperationalGraph::prepare(&replica);
         let mut rollout = graph.rollout_state(ExecutionScope::Available);
         let mut partial = SearchState::root(rollout.clone(), 3).partial;
@@ -197,6 +200,7 @@ mod tests {
             },
             first_completion.newly_ready(),
             &graph,
+            &working,
         );
         let second_completion = rollout.complete(2).expect("Issue #2 is Executable");
         let _second = partial.apply(
@@ -206,6 +210,7 @@ mod tests {
             },
             second_completion.newly_ready(),
             &graph,
+            &working,
         );
 
         partial.undo(first);

@@ -6,6 +6,7 @@ mod snapshot;
 mod state;
 
 use std::{
+    cell::RefCell,
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet, VecDeque},
     num::NonZeroUsize,
@@ -26,7 +27,8 @@ use super::{
 use crate::{
     model::BlockerScope,
     operational::{ExecutionScope, OneStepAnalysis, RolloutState},
-    priority::PriorityComparison,
+    priority::{PriorityComparison, PriorityState},
+    working_graph::WorkingGraph,
 };
 
 pub(super) struct SearchResult<'a> {
@@ -34,9 +36,12 @@ pub(super) struct SearchResult<'a> {
     pub(super) candidate_count: usize,
     pub(super) candidates: Vec<EvaluatedCandidate<'a>>,
     pub(super) truncated_by: Vec<SearchRestriction>,
+    pub(super) provenance_numbers: BTreeSet<u64>,
 }
 
-struct Search<'graph, 'issues, 'scope, 'pagerank> {
+struct Search<'graph, 'issues, 'scope, 'pagerank, 'working> {
+    working: &'working WorkingGraph<'working>,
+    provenance_numbers: RefCell<BTreeSet<u64>>,
     root: RolloutState<'graph, 'issues, 'scope>,
     pagerank: Option<&'pagerank PageRank>,
     horizon: u8,
@@ -51,6 +56,7 @@ struct Search<'graph, 'issues, 'scope, 'pagerank> {
 }
 
 pub(super) fn evaluate<'graph, 'issues, 'scope, 'pagerank>(
+    working: &WorkingGraph<'_>,
     graph: &'graph crate::operational::OperationalGraph<'issues>,
     scope: ExecutionScope<'scope>,
     pagerank: Option<&'pagerank PageRank>,
@@ -65,7 +71,7 @@ pub(super) fn evaluate<'graph, 'issues, 'scope, 'pagerank>(
         .filter(|number| {
             graph
                 .issue(*number)
-                .is_some_and(|issue| priority(issue) == PriorityComparison::P0)
+                .is_some_and(|issue| priority(working, issue) == PriorityComparison::P0)
         })
         .collect::<BTreeSet<_>>();
     let potential_targets = if horizon == 1 {
@@ -88,7 +94,21 @@ pub(super) fn evaluate<'graph, 'issues, 'scope, 'pagerank>(
             )
         })
         .collect();
+    let provenance_numbers = graph
+        .open_numbers()
+        .iter()
+        .copied()
+        .filter(|number| {
+            graph.issue(*number).is_some_and(|issue| {
+                let base = PriorityState::from_issue_labels(&issue.labels).comparison();
+                (base == PriorityComparison::P0)
+                    != (priority(working, issue) == PriorityComparison::P0)
+            })
+        })
+        .collect();
     let search = Search {
+        working,
+        provenance_numbers: RefCell::new(provenance_numbers),
         root,
         pagerank,
         horizon,
@@ -104,13 +124,40 @@ pub(super) fn evaluate<'graph, 'issues, 'scope, 'pagerank>(
     search.run()
 }
 
-impl<'graph, 'issues, 'scope, 'pagerank> Search<'graph, 'issues, 'scope, 'pagerank> {
+impl<'graph, 'issues, 'scope, 'pagerank, 'working>
+    Search<'graph, 'issues, 'scope, 'pagerank, 'working>
+{
+    fn priority(&self, issue: &crate::model::Issue) -> PriorityComparison {
+        if self.working.priority_is_pending(issue.number) {
+            self.provenance_numbers.borrow_mut().insert(issue.number);
+        }
+        priority(self.working, issue)
+    }
+
+    fn track_partial(&self, partial: &PartialRollout<'_>) {
+        if self.working.is_pending() {
+            self.provenance_numbers.borrow_mut().extend(
+                partial
+                    .steps
+                    .iter()
+                    .map(|step| step.issue.number)
+                    .chain(partial.unlocks.iter().copied())
+                    .filter(|number| self.working.priority_is_pending(*number)),
+            );
+        }
+    }
+
     fn run(mut self) -> SearchResult<'issues> {
         let one_step_analysis = (self.horizon == 1).then(|| self.root.one_step_analysis());
         let first_frontier = if let Some(analysis) = &one_step_analysis {
-            one_step_frontier(analysis, &self.p0_targets)
+            one_step_frontier(analysis, &self.p0_targets, self.working)
         } else {
-            frontier(&self.root, self.horizon as usize, &self.p0_targets)
+            frontier(
+                &self.root,
+                self.horizon as usize,
+                &self.p0_targets,
+                self.working,
+            )
         };
         let mode = first_frontier.mode;
         if self.horizon == 1 {
@@ -121,7 +168,7 @@ impl<'graph, 'issues, 'scope, 'pagerank> Search<'graph, 'issues, 'scope, 'pagera
                     .as_ref()
                     .map(|analysis| analysis.unlocks_for(step.issue.number))
                     .unwrap_or(&[]);
-                let checkpoint = partial.apply(step, newly_ready, self.root.graph());
+                let checkpoint = partial.apply(step, newly_ready, self.root.graph(), self.working);
                 self.record(&partial);
                 partial.undo(checkpoint);
             }
@@ -150,7 +197,8 @@ impl<'graph, 'issues, 'scope, 'pagerank> Search<'graph, 'issues, 'scope, 'pagera
             let mut successors = Vec::new();
             for state in &beam {
                 let remaining = self.horizon as usize - state.partial.steps.len();
-                let next_frontier = frontier(&state.rollout, remaining, &self.p0_targets);
+                let next_frontier =
+                    frontier(&state.rollout, remaining, &self.p0_targets, self.working);
                 let branches = self.select_branches(state, next_frontier);
                 for scored in branches {
                     if let Some(successor) =
@@ -176,7 +224,14 @@ impl<'graph, 'issues, 'scope, 'pagerank> Search<'graph, 'issues, 'scope, 'pagera
     }
 
     fn record(&mut self, partial: &PartialRollout<'issues>) {
-        let candidate = snapshot(partial, self.root.graph(), self.pagerank, self.horizon);
+        self.track_partial(partial);
+        let candidate = snapshot(
+            partial,
+            self.root.graph(),
+            self.pagerank,
+            self.horizon,
+            self.working,
+        );
         let first_number = candidate.data().issue.number;
         let replace = self
             .best_by_first
@@ -193,6 +248,7 @@ impl<'graph, 'issues, 'scope, 'pagerank> Search<'graph, 'issues, 'scope, 'pagera
             candidate_count,
             candidates: self.best_by_first.into_values().collect(),
             truncated_by: self.restrictions.into_vec(),
+            provenance_numbers: self.provenance_numbers.into_inner(),
         }
     }
 
@@ -215,7 +271,12 @@ impl<'graph, 'issues, 'scope, 'pagerank> Search<'graph, 'issues, 'scope, 'pagera
             .complete(step.issue.number)
             .expect("search frontiers contain only Executable Issues");
         let mut partial = parent.partial.clone();
-        partial.apply(step.clone(), completion.newly_ready(), rollout.graph());
+        partial.apply(
+            step.clone(),
+            completion.newly_ready(),
+            rollout.graph(),
+            self.working,
+        );
         let mut causal = parent.causal.clone();
         causal.advance(step.issue.number, completion.newly_ready(), rollout.graph());
         let remaining = self.horizon as usize - partial.steps.len();
@@ -259,8 +320,8 @@ impl<'graph, 'issues, 'scope, 'pagerank> Search<'graph, 'issues, 'scope, 'pagera
                 .then_with(|| self.compare_immediate(left, right))
         });
         let by_priority = ranked_indices(&scored, |left, right| {
-            StepPriority::from(priority(left.step.issue))
-                .cmp(&StepPriority::from(priority(right.step.issue)))
+            StepPriority::from(self.priority(left.step.issue))
+                .cmp(&StepPriority::from(self.priority(right.step.issue)))
                 .then_with(|| self.compare_immediate(left, right))
         });
         let by_pagerank = if self.pagerank.is_some() {
