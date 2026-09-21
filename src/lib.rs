@@ -22,6 +22,7 @@ mod ranking;
 mod reconciliation;
 mod replica_sync;
 mod repository;
+mod skill;
 mod store;
 mod synchronization;
 mod triage;

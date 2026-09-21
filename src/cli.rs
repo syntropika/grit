@@ -62,6 +62,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Install the bundled Grit usage skill for coding agents.
+    Skill {
+        #[command(subcommand)]
+        command: crate::skill::SkillCommand,
+    },
     /// Sign in to GitHub, inspect authentication, or sign out.
     Auth {
         #[command(subcommand)]
@@ -348,6 +353,7 @@ pub(crate) fn execute() -> Result<(), CliError> {
     let cli = Cli::parse();
     match cli.command {
         Command::Auth { command } => crate::auth::execute(command).map_err(Into::into),
+        Command::Skill { command } => crate::skill::execute(command).map_err(Into::into),
         Command::Create {
             repo,
             title,
@@ -2338,6 +2344,8 @@ impl ReplicaSource {
 
 #[derive(Debug, Error)]
 pub(crate) enum CliError {
+    #[error(transparent)]
+    Skill(#[from] crate::skill::SkillError),
     #[error(transparent)]
     Repository(#[from] RepositoryError),
     #[error(transparent)]

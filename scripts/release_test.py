@@ -97,6 +97,17 @@ class ReleaseGuards(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "does not match package version"):
                 release.identity()
 
+    def test_release_identity_uses_the_manifest_package_name(self):
+        (self.output / "Cargo.toml").write_text('[package]\nname = "registry-name"\nversion = "1.2.3"\n')
+        (self.output / "Cargo.lock").write_text('[[package]]\nname = "registry-name"\nversion = "1.2.3"\n')
+        with (patch.object(release, "ROOT", self.output),
+              patch.object(release, "command", return_value=self.commit),
+              patch.dict(os.environ, GITHUB_REF="", GITHUB_SHA=self.commit)):
+            self.assertEqual(release.identity(), ("1.2.3", self.commit))
+            (self.output / "Cargo.lock").write_text('[[package]]\nname = "registry-name"\nversion = "1.2.2"\n')
+            with self.assertRaisesRegex(ValueError, "versions do not match"):
+                release.identity()
+
     def test_linux_binary_cannot_claim_an_older_glibc_floor(self):
         with patch.object(release, "command", return_value="Name: GLIBC_2.34\nName: GLIBC_2.39"):
             with self.assertRaisesRegex(ValueError, "requires glibc 2.39"):
