@@ -281,7 +281,7 @@ A future `plan/v2` may add joint capacity under the invariant `workers=1 == next
 
 ## Explanation and JSON
 
-Output includes `policy_version: "next/v1"`, `replica_snapshot_hash`, `input_hash`, `synced_at`, scope, mode, parameters, every metric's state, and the first component that decided against the runner-up. Every rollout step includes the recalculated mode that allowed it to be selected. When a local overlay exists, output also includes `pending: true` and the identifiers of operations that affected the result. When pruning occurred, `runner_up_scope` is `explored`; only a complete search may use `global`.
+Output includes `policy_version: "next/v1"`, `replica_snapshot_hash`, `input_hash`, `synced_at`, scope, mode, parameters, every metric's state, and the first component that decided against the runner-up. It also exposes deterministic `work.materialized_successors` and `work.probed_successors`; unlike elapsed time, these counts must be identical on cold and warm runs. Every rollout step includes the recalculated mode that allowed it to be selected. When a local overlay exists, output also includes `pending: true` and the identifiers of operations that affected the result. When pruning occurred, `runner_up_scope` is `explored`; only a complete search may use `global`.
 
 Minimum reason codes:
 
@@ -305,17 +305,11 @@ Results based on a Working graph mark affected edges, Issues, and reasons as `pe
 
 ## Scale cost and budget
 
-Preparation, readiness, SCC, and immediate unlocks cost `O(V+E)`. PageRank costs `O(I(V+E))` and is cached. Upper-bound construction is capped at `1,024 × candidates` in the shortlist and `512 × evaluated states` during search, plus memoized closures with maximum size `horizon + 1`. No probe exceeds 64 successors, and all probes together remain below 262,144. The combinatorial portion depends on these limits, shortlist, beam, branch, and state budgets rather than enumerating every possible plan.
+Preparation, readiness, SCC, and immediate unlocks cost `O(V+E)`. PageRank costs `O(I(V+E))`. Upper-bound construction is capped at `1,024 × candidates` in the shortlist and `512 × evaluated states` during search, plus feasible closures with maximum size `horizon + 1`. Outcomes that have no feasible bounded closure are excluded from upper-bound iteration. No probe exceeds 64 successors, and all probes together remain below 262,144. The combinatorial portion depends on these limits, shortlist, beam, branch, and state budgets rather than enumerating every possible plan.
 
-The deliberately unoptimized Python reference prototype produced the following results on the development machine:
+Grit persists the complete PageRank and bounded-search result as a disposable cache. Its key includes the effective Working-input hash, policy version, Planning horizon, alternative and state budgets, and PageRank parameters. The Working-input hash includes the replica snapshot, ordered Pending overlay, and normalized Execution scope. A cache hit still rebuilds and validates the Operational graph before rehydrating Issue references; malformed, stale, or semantically incompatible cache data is a miss. Cache hits never change deterministic work counts, result hashes, alternatives, or truncation reasons.
 
-| V | E | H=3 search | PageRank, 20 iterations |
-| ---: | ---: | ---: | ---: |
-| 100 | 206 | ~9 ms | <1 ms |
-| 1,000 | 2,335 | ~38 ms | ~4 ms |
-| 5,000 | 21,518 | ~151 ms | ~31 ms |
-
-These figures include the first diverse-pruning implementation that preserves the delayed-cascade regression, but they use relaxed reach as a proxy: they do not include the normative joint probe, ingestion, or final formatting. They validate base costs, not end-to-end performance or an SLA. The implementation gate for 5,000 Issues and 20,000 Dependencies is below 250 ms warm for local ranking and below 1 s cold on reference hardware, with sync measured separately. If it is not met, indexes, memoization, and state representation are optimized before weakening the semantic guarantees.
+The reproducible release benchmark uses 5,000 Issues, 20,000 distinct Dependencies, horizon 3, mixed feasible and infeasible AND closures, the complete normative probe/search policy, output assembly, cache publication or validated lookup, and analysis JSON serialization. Synchronization and fixture construction are outside the measurement. On the documented reference VM, five runs had a median cold time of about 662 ms and a median warm time of about 45 ms. The enforced gates remain below 1 s cold and below 250 ms warm. Exact hardware, fixture construction, phase results, and the command are recorded in `docs/performance/next-v1.md`.
 
 Exact betweenness, enumeration of every cycle, and unbounded transitive reach remain outside the hot path.
 
