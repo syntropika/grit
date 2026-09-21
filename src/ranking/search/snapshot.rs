@@ -12,11 +12,12 @@ pub(super) fn snapshot<'a>(
         .first()
         .expect("a recorded rollout has a first step")
         .issue;
-    let unlocks: Vec<_> = partial
+    let mut unlocks: Vec<_> = partial
         .unlocks
         .iter()
         .filter_map(|number| graph.issue(*number))
         .collect();
+    unlocks.sort_by_key(|issue| issue.stable_node_key());
     let mut priority_profile = PriorityProfile::default();
     for unlocked in &unlocks {
         let unlocked_priority = priority(working, unlocked);
@@ -78,13 +79,13 @@ pub(super) fn compare_same_first(
         .data()
         .steps
         .iter()
-        .map(|step| step.issue.number)
+        .map(|step| step.issue.stable_node_key())
         .collect();
     let right_sequence: Vec<_> = right
         .data()
         .steps
         .iter()
-        .map(|step| step.issue.number)
+        .map(|step| step.issue.stable_node_key())
         .collect();
     right_sequence.cmp(&left_sequence)
 }

@@ -12,7 +12,12 @@ next-work recommendations with an exact horizon-one option. Its offline browser 
 Issue graph with synchronized network and accessible table selection,
 composable filters, Dependency relationship isolation, and a bounded view for dense graphs.
 Public exports use a separate allowlisted model after a live Repository visibility check.
-Unavailable Priority updates are queued durably and projected into analysis with explicit Pending provenance.
+Unavailable Priority and Dependency updates are queued durably and projected into analysis with explicit Pending provenance.
+Grit also creates recoverable Draft Issues with stable temporary identities and marker-based reconciliation.
+Title, body, state, and assignment edits use field-aware Pending mutations.
+Generic labels and parent/sub-Issue relationships use idempotent set mutations.
+Structural plans share the cached Working-graph analysis used by next-work recommendations.
+Online and offline comments use durable Operation markers for safe recovery.
 
 ## Build and test
 
@@ -159,6 +164,7 @@ the default Planning horizon; horizons one and two remain available:
 grit next --repo OWNER/REPO
 grit next --repo OWNER/REPO --horizon 1
 grit next --repo OWNER/REPO --assignee LOGIN --horizon 3 --json
+grit next --repo OWNER/REPO --profile --json
 ```
 
 The `next/v1` policy first enforces Executable P0 and one-step P0-route gates.
@@ -171,21 +177,147 @@ though only work inside the active Execution scope can be simulated as a step.
 It never recommends blocked or out-of-scope work.
 
 Horizon one remains an exact comparison of the complete first-step frontier.
-For longer horizons, Grit exhaustively explores successors until the
-deterministic 8,192-state budget is reached. Exhausted searches report
-`truncated_by: ["state_budget"]`, set `search_complete` and
-`global_optimum_claimed` to false, and scope the runner-up to `explored`.
-Multi-step critical-route discovery lands separately; until then, a blocked P0
-at horizons two or three similarly reports `p0_frontier` instead of making an
-unsupported optimum claim.
+For longer horizons, deterministic shortlist, probe, branch, beam, and state
+budgets bound the search while preserving separate lanes for realized results,
+feasible joint rollouts, and delayed cascades. Every activated restriction is
+reported in `truncated_by`; a restricted result sets `search_complete` and
+`global_optimum_claimed` to false and scopes the runner-up to `explored`.
 
 Robot output reports both snapshot and effective-input hashes, metric states,
-the global runner-up comparison, structured reasons, and whether the result is
-a close structural tie. Pending recommendations, Issue references, comparison
-evidence, and reasons carry operation provenance. If no Issue is Executable,
-the command succeeds with a null recommendation and categorized blocker
-counts. Like `ready`, it attempts a pull Synchronization and falls back to the
-latest valid Local replica without mutating GitHub.
+deterministic main-search and probe work counts, the runner-up comparison,
+structured reasons, and whether the result is a close structural tie. Pending
+recommendations, Issue references, comparison evidence, and reasons carry
+operation provenance. If no
+Issue is Executable, the command succeeds with a null recommendation and
+categorized blocker counts. Like `ready`, it attempts a pull Synchronization
+and falls back to the latest valid Local replica without mutating GitHub.
+
+The ranking result is cached locally by effective input, policy version, and
+all result-affecting parameters. The cache is disposable and never replaces
+the Local replica or GitHub as the source of truth. `--profile` reports graph
+preparation, SCC, readiness, cache, PageRank, bounded search, output assembly,
+and analysis-serialization timings in microseconds; Synchronization is
+explicitly excluded. Human profiling does not perform an unused JSON
+serialization. See [`docs/performance/next-v1.md`](docs/performance/next-v1.md) for
+the 5,000-Issue reference benchmark.
+
+## Inspect a structural plan
+
+`grit plan` exposes the exact `next/v1` decision together with immediate
+parallel capacity and counterfactual Dependency layers:
+
+```bash
+grit plan --repo OWNER/REPO
+grit plan --repo OWNER/REPO --assignee LOGIN --horizon 3 --json
+```
+
+`plan` and `next` share the same Working graph, ordered Pending mutations,
+Execution scope, search, and cache. Pending priorities affect both the selected
+rollout and structural Issue annotations. The plan decision preserves the same
+input hash, completeness fields, and operation provenance as `next`; dependency
+layers describe topology and do not predict scheduling or duration.
+
+`parallel_now` is the complete Executable frontier for the active Execution
+scope. `dependency_layers` covers every open Issue in the Repository: layer 0
+contains all current Ready Issues, and each later finite layer follows the
+latest layer of all its open blockers. Every Issue records assignment,
+Execution-scope eligibility, and whether it is Executable now.
+
+Cycles, opaque External blockers, unknown internal blockers, and their
+affected descendants remain in `unresolved`; Grit does not assign them a
+misleading finite layer. These layers describe dependency topology under
+unlimited structural capacity. They are not dates, worker rounds, an ETA, or
+a Critical Path. `plan/v1` therefore rejects `--workers` explicitly.
+
+## Create Draft Issues
+
+Create a Draft Issue locally when authoring must continue without GitHub:
+
+```bash
+grit create --repo OWNER/REPO --title "Prepare the migration" --body "Acceptance notes"
+grit create --repo OWNER/REPO --title "Prepare the migration" --json
+```
+
+Creation returns a stable Temporary Issue ID and a key such as
+`OWNER/REPO#draft:TEMPORARY_ID`. The Draft participates provisionally in
+`ready` and `next`; that key can also be passed to `block` or `unblock` before
+GitHub assigns an Issue number. `grit reconcile` creates referenced Drafts
+before their dependent operations, stores the permanent number and node ID,
+and retains the temporary alias.
+
+Every non-idempotent create has a random, non-secret Operation marker persisted
+before the request. Grit embeds it in an invisible Markdown comment, removes it
+from normalized and user-facing data, and uses it only to recover an ambiguous
+response. Exactly one remote match is accepted; zero or multiple matches stay
+unresolved and are never retried blindly.
+
+## Comment online or offline
+
+Add Markdown comments to a synchronized Issue or a Draft Issue:
+
+```bash
+grit comment OWNER/REPO#42 --body "Deployment note"
+grit comment OWNER/REPO#draft:TEMPORARY_ID --body "Offline finding" --json
+```
+
+Grit persists the comment intent and a random Operation marker before making
+the GitHub request. With connectivity it immediately reconciles and publishes
+only verified readback; without connectivity it leaves a Pending comment in
+the Working graph. A comment on an unresolved Draft waits for that Draft's
+GitHub identity. If a response is lost after GitHub accepts the comment, the
+next reconciliation searches for the marker: exactly one match is recovered,
+while zero or multiple matches remain unresolved without a blind retry.
+Operation markers are omitted from human and JSON output and stripped from all
+normalized comment data consumed by graph and public serializers.
+
+## Edit Issue fields
+
+`update` changes exactly one logical field per invocation:
+
+```bash
+grit update OWNER/REPO#42 --title "A clearer title"
+grit update OWNER/REPO#42 --body "Revised Markdown"
+grit update OWNER/REPO#42 --state closed
+grit update OWNER/REPO#42 --assignee alice --assignee bob
+grit update OWNER/REPO#42 --clear-assignees
+grit update OWNER/REPO#42 --priority p1
+```
+
+Title, body, state, and assignment also accept a Draft key such as
+`OWNER/REPO#draft:TEMPORARY_ID`. Canonical Issues are updated online when
+GitHub is available; otherwise Grit records the base and desired values in the
+outbox and projects the desired field into `ready` and `next` without changing
+the Local replica. `grit reconcile` applies a Pending field only when GitHub
+still matches its base, treats the desired remote value as already satisfied,
+and exposes incompatible base/local/remote values as a conflict. Resolve a
+conflict explicitly with `grit resolve OPERATION --repo OWNER/REPO --local` or
+`--remote`; resolution always performs a fresh GitHub read before any write.
+
+## Change generic labels and parent relationships
+
+Generic labels use independent add/remove set semantics:
+
+```bash
+grit label OWNER/REPO#42 --add area:backend
+grit label OWNER/REPO#42 --remove risk:high
+```
+
+Canonical `priority:p0` through `priority:p4` labels are rejected here; change
+them only through `grit update ISSUE --priority`. Both generic-label commands
+accept Draft keys and project Pending changes without editing the Local
+replica.
+
+Parent relationships use a separate sub-Issue command:
+
+```bash
+grit sub-issue OWNER/REPO#10 --add OWNER/REPO#42
+grit sub-issue OWNER/REPO#10 --remove OWNER/REPO#42
+```
+
+The first reference is the parent. Grit queues unresolved Draft identities and
+replays the relationship after GitHub assigns their Issue IDs. Parent/sub-Issue
+relationships are decomposition metadata: they are never projected as
+Dependencies and do not affect readiness or ranking topology.
 
 ## Triage graph problems
 
@@ -220,8 +352,26 @@ The first command means “Issue #42 is blocked by Issue #7.” Grit writes the
 native GitHub `blocked_by` relationship, then performs a complete synchronized
 readback before atomically replacing the Local replica. Repeating either
 operation uses set semantics: an existing edge can be added again and an absent
-edge can be removed again without error. If the write outcome or readback is
-uncertain, the previous Local replica remains unchanged.
+edge can be removed again without error. If GitHub is unavailable or the write
+outcome is ambiguous and a valid Local replica exists, Grit queues the intent,
+leaves that replica unchanged, and immediately projects the edge into offline
+readiness and ranking. A blocker from another Repository is preserved as an
+opaque External blocker with unknown state until GitHub can synchronize it.
+
+Apply queued work explicitly after connectivity returns:
+
+```bash
+grit reconcile --repo OWNER/REPO
+grit reconcile --repo OWNER/REPO --json
+```
+
+Reconciliation refreshes GitHub first, applies each independent mutation
+branch, checkpoints attempted writes, and finishes with a complete synchronized
+readback before publishing the Local replica. Dependency changes use idempotent
+set semantics, so a retry after an ambiguous response observes the desired edge
+instead of duplicating or conflicting with it. A failed operation blocks only
+mutations that declare it as a prerequisite.
+
 
 ## Generate a static graph artifact
 

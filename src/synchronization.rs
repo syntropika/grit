@@ -4,8 +4,8 @@ use crate::{
     dependency_events::{DependencyEvent, RelationshipAction},
     github::{CommentChange, ConditionalPages, DependencyEventWindow, GitHubClient, GitHubError},
     model::{
-        BlockerIdentity, BlockerScope, Dependency, DependencyEventCheckpoint, Issue, IssueIdentity,
-        Label, LocalReplica, OrdinaryIssueCursor, SyncMetadata, Watermark,
+        BlockerIdentity, BlockerScope, Dependency, DependencyEdgeKey, DependencyEventCheckpoint,
+        Issue, IssueIdentity, Label, LocalReplica, OrdinaryIssueCursor, SyncMetadata, Watermark,
     },
     repository::Repository,
 };
@@ -116,10 +116,10 @@ fn refresh_incremental(
         .dependencies
         .iter()
         .cloned()
-        .map(|dependency| (DependencyKey::from(&dependency), dependency))
+        .map(|dependency| (DependencyEdgeKey::from_dependency(&dependency), dependency))
         .collect();
     for number in &changed_issue_numbers {
-        dependencies.retain(|key, _| key.blocked_number != *number);
+        dependencies.retain(|key, _| key.blocked_number() != *number);
         let issue = issues
             .iter()
             .find(|issue| issue.number == *number)
@@ -185,7 +185,7 @@ fn apply_dependency_events(
     client: &GitHubClient,
     repository: &Repository,
     issues: &mut Vec<Issue>,
-    dependencies: &mut BTreeMap<DependencyKey, Dependency>,
+    dependencies: &mut BTreeMap<DependencyEdgeKey, Dependency>,
     events: Vec<DependencyEvent>,
 ) -> Result<EventApplication, GitHubError> {
     let mut mutations = Vec::new();
@@ -226,11 +226,12 @@ fn apply_dependency_events(
             return Ok(EventApplication::NeedsFullReconciliation);
         }
 
-        let key = DependencyKey {
-            blocked_number: mutation.blocked.number,
-            blocker_repository: blocker_repository.to_ascii_lowercase(),
-            blocker_number: mutation.blocker.number,
-        };
+        let key = DependencyEdgeKey::new(
+            blocked_repository,
+            mutation.blocked.number,
+            blocker_repository,
+            mutation.blocker.number,
+        );
         match mutation.action {
             RelationshipAction::Remove => {
                 dependencies.remove(&key);
@@ -281,7 +282,7 @@ fn ensure_internal_issue(
     client: &GitHubClient,
     repository: &Repository,
     issues: &mut Vec<Issue>,
-    dependencies: &mut BTreeMap<DependencyKey, Dependency>,
+    dependencies: &mut BTreeMap<DependencyEdgeKey, Dependency>,
     number: u64,
 ) -> Result<bool, GitHubError> {
     if issues.iter().any(|issue| issue.number == number) {
@@ -330,29 +331,12 @@ fn merge_comments(issues: &mut [Issue], comments: Vec<CommentChange>) -> bool {
 }
 
 fn insert_dependencies(
-    target: &mut BTreeMap<DependencyKey, Dependency>,
+    target: &mut BTreeMap<DependencyEdgeKey, Dependency>,
     dependencies: Vec<Dependency>,
 ) {
     for dependency in dependencies {
         target
-            .entry(DependencyKey::from(&dependency))
+            .entry(DependencyEdgeKey::from_dependency(&dependency))
             .or_insert(dependency);
-    }
-}
-
-#[derive(Eq, Ord, PartialEq, PartialOrd)]
-struct DependencyKey {
-    blocked_number: u64,
-    blocker_repository: String,
-    blocker_number: u64,
-}
-
-impl From<&Dependency> for DependencyKey {
-    fn from(dependency: &Dependency) -> Self {
-        Self {
-            blocked_number: dependency.blocked.number,
-            blocker_repository: dependency.blocker.repository.to_ascii_lowercase(),
-            blocker_number: dependency.blocker.number,
-        }
     }
 }

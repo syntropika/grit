@@ -8,7 +8,7 @@ use super::{
     search::SearchRestriction,
 };
 use crate::{
-    model::Issue,
+    model::{Issue, TemporaryIssueId},
     operational::{OperationalGraph, ReadyAnalysis},
     priority::PriorityState,
     working_graph::{PendingProvenance, WorkingGraph},
@@ -16,15 +16,33 @@ use crate::{
 
 #[derive(Serialize)]
 pub(crate) struct NextAnalysis {
+    #[serde(flatten)]
+    decision: DecisionCore<NextParameters>,
+    alternatives: Vec<CandidateResult>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct PlanDecision {
+    #[serde(flatten)]
+    decision: DecisionCore<PlanParameters>,
+}
+
+#[derive(Serialize)]
+struct DecisionCore<P> {
+    parameters: P,
+    #[serde(flatten)]
+    result: DecisionResult,
+}
+
+#[derive(Serialize)]
+struct DecisionResult {
     input_hash: String,
     pending: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pending_operation_ids: Vec<String>,
     mode: RankingMode,
-    parameters: Parameters,
     metrics: MetricStates,
     recommendation: Option<CandidateResult>,
-    alternatives: Vec<CandidateResult>,
     comparison_to_runner_up: Option<ComparisonEvidence>,
     close_call: bool,
     search_complete: bool,
@@ -32,6 +50,28 @@ pub(crate) struct NextAnalysis {
     global_optimum_claimed: bool,
     runner_up_scope: RunnerUpScope,
     summary: NextSummary,
+    work: WorkCounts,
+}
+
+impl<P> DecisionCore<P> {
+    fn map_parameters<Q>(self, map: impl FnOnce(P) -> Q) -> DecisionCore<Q> {
+        DecisionCore {
+            parameters: map(self.parameters),
+            result: self.result,
+        }
+    }
+
+    fn recommendation(&self) -> Option<&CandidateResult> {
+        self.result.recommendation.as_ref()
+    }
+
+    fn summary(&self) -> &NextSummary {
+        &self.result.summary
+    }
+
+    fn truncation_warning(&self) -> Option<String> {
+        truncation_warning(self.result.search_complete, &self.result.truncated_by)
+    }
 }
 
 impl NextAnalysis {
@@ -51,63 +91,100 @@ impl NextAnalysis {
                 bucket_scale: None,
             }
         };
+        let search_complete = result.search_complete;
         Self {
-            input_hash: result.input_hash,
-            pending: result.pending,
-            pending_operation_ids: result.pending_operation_ids,
-            mode: result.mode,
-            parameters: Parameters {
-                horizon: result.horizon,
-                alternative_limit: ALTERNATIVE_LIMIT,
-                state_budget: result.state_budget,
-                pagerank: PageRankParameters {
-                    damping: pagerank::DAMPING,
-                    iterations: pagerank::ITERATIONS,
-                    bucket_scale: pagerank::BUCKET_SCALE as u64,
+            decision: DecisionCore {
+                parameters: NextParameters {
+                    common: CommonParameters {
+                        horizon: result.horizon,
+                        state_budget: result.state_budget,
+                        pagerank: PageRankParameters {
+                            damping: pagerank::DAMPING,
+                            iterations: pagerank::ITERATIONS,
+                            bucket_scale: pagerank::BUCKET_SCALE as u64,
+                        },
+                    },
+                    alternative_limit: ALTERNATIVE_LIMIT,
+                },
+                result: DecisionResult {
+                    input_hash: result.input_hash,
+                    pending: result.pending,
+                    pending_operation_ids: result.pending_operation_ids,
+                    mode: result.mode,
+                    metrics: MetricStates {
+                        unlock_profile: MetricState {
+                            state: MetricAvailability::Available,
+                        },
+                        pagerank,
+                    },
+                    recommendation: result.recommendation,
+                    comparison_to_runner_up: result.comparison_to_runner_up,
+                    close_call: result.close_call,
+                    search_complete,
+                    truncated_by: result.truncated_by,
+                    global_optimum_claimed: search_complete,
+                    runner_up_scope: if search_complete {
+                        RunnerUpScope::Global
+                    } else {
+                        RunnerUpScope::Explored
+                    },
+                    summary: result.summary,
+                    work: WorkCounts {
+                        materialized_successors: result.work.materialized_successors,
+                        probed_successors: result.work.probed_successors,
+                    },
                 },
             },
-            metrics: MetricStates {
-                unlock_profile: MetricState {
-                    state: MetricAvailability::Available,
-                },
-                pagerank,
-            },
-            recommendation: result.recommendation,
             alternatives: result.alternatives,
-            comparison_to_runner_up: result.comparison_to_runner_up,
-            close_call: result.close_call,
-            search_complete: result.search_complete,
-            truncated_by: result.truncated_by,
-            global_optimum_claimed: result.search_complete,
-            runner_up_scope: if result.search_complete {
-                RunnerUpScope::Global
-            } else {
-                RunnerUpScope::Explored
-            },
-            summary: result.summary,
         }
     }
 
     pub(crate) fn recommendation(&self) -> Option<&CandidateResult> {
-        self.recommendation.as_ref()
+        self.decision.recommendation()
     }
 
     pub(crate) fn summary(&self) -> &NextSummary {
-        &self.summary
+        self.decision.summary()
     }
 
     pub(crate) fn truncation_warning(&self) -> Option<String> {
-        (!self.search_complete).then(|| {
-            format!(
-                "next/v1 search was restricted by {}; this is the best explored recommendation and no global optimum is claimed",
-                self.truncated_by
-                    .iter()
-                    .map(|restriction| restriction.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        })
+        self.decision.truncation_warning()
     }
+
+    pub(crate) fn into_plan_decision(self) -> PlanDecision {
+        PlanDecision {
+            decision: self.decision.map_parameters(|parameters| PlanParameters {
+                common: parameters.common,
+            }),
+        }
+    }
+}
+
+impl PlanDecision {
+    pub(crate) fn recommendation(&self) -> Option<&CandidateResult> {
+        self.decision.recommendation()
+    }
+
+    pub(crate) fn summary(&self) -> &NextSummary {
+        self.decision.summary()
+    }
+
+    pub(crate) fn truncation_warning(&self) -> Option<String> {
+        self.decision.truncation_warning()
+    }
+}
+
+fn truncation_warning(search_complete: bool, truncated_by: &[SearchRestriction]) -> Option<String> {
+    (!search_complete).then(|| {
+        format!(
+            "next/v1 search was restricted by {}; this is the best explored recommendation and no global optimum is claimed",
+            truncated_by
+                .iter()
+                .map(|restriction| restriction.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })
 }
 
 pub(super) struct NextResult {
@@ -125,12 +202,31 @@ pub(super) struct NextResult {
     pub(super) search_complete: bool,
     pub(super) truncated_by: Vec<SearchRestriction>,
     pub(super) summary: NextSummary,
+    pub(super) work: super::search::SearchWork,
 }
 
 #[derive(Serialize)]
-struct Parameters {
-    horizon: u8,
+struct WorkCounts {
+    materialized_successors: usize,
+    probed_successors: usize,
+}
+
+#[derive(Serialize)]
+struct NextParameters {
+    #[serde(flatten)]
+    common: CommonParameters,
     alternative_limit: usize,
+}
+
+#[derive(Serialize)]
+struct PlanParameters {
+    #[serde(flatten)]
+    common: CommonParameters,
+}
+
+#[derive(Serialize)]
+struct CommonParameters {
+    horizon: u8,
     state_budget: usize,
     pagerank: PageRankParameters,
 }
@@ -198,8 +294,8 @@ impl CandidateResult {
             ""
         };
         format!(
-            "#{} {} [{}]{}: {} (unlocks {})",
-            self.first_issue.number,
+            "{} {} [{}]{}: {} (unlocks {})",
+            self.first_issue.key,
             self.first_issue.title,
             self.first_issue.priority.display_name(),
             pending,
@@ -214,7 +310,10 @@ pub(super) struct IssueReference {
     #[serde(flatten)]
     provenance: PendingProvenance,
     key: String,
-    number: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    number: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temporary_id: Option<TemporaryIssueId>,
     url: String,
     title: String,
     priority: PriorityState,
@@ -339,7 +438,7 @@ pub(super) fn candidate_output(
 ) -> CandidateResult {
     let (candidate, critical_route) = candidate.into_parts();
     let first_issue = issue_reference(working, candidate.issue);
-    let provenance = working.provenance_for_issues(
+    let provenance = working.ranking_provenance_for_issues(
         candidate
             .steps
             .iter()
@@ -403,8 +502,9 @@ pub(super) fn candidate_output(
 pub(super) fn issue_reference(working: &WorkingGraph<'_>, issue: &Issue) -> IssueReference {
     IssueReference {
         provenance: working.provenance_for_issue(issue.number),
-        key: format!("{}#{}", working.replica().repository, issue.number),
-        number: issue.number,
+        key: issue.display_key(&working.replica().repository),
+        number: (!issue.is_draft()).then_some(issue.number),
+        temporary_id: issue.temporary_id(),
         url: issue.url.clone(),
         title: issue.title.clone(),
         priority: working.priority(issue),

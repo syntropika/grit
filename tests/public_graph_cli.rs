@@ -264,6 +264,92 @@ fn generate_adversarial_public_site() -> GeneratedPublicSite {
 }
 
 #[test]
+fn public_export_ignores_pending_drafts_fields_and_comments_after_live_visibility_check() {
+    let mut github = Server::new();
+    let state = TempDir::new().expect("state directory");
+    let workspace = TempDir::new().expect("public workspace");
+    let directory = workspace.path().join("site");
+    let metadata = mock_public_metadata(&mut github, 2);
+    let inventory = mock_repository(
+        &mut github,
+        json!([issue(
+            1,
+            "Synchronized title",
+            "open",
+            1,
+            "private body",
+            "alice"
+        )])
+        .to_string(),
+        vec![(1, "[]".to_owned())],
+        "private comment",
+    );
+    let seed = public_graph_command(&state, &github.url(), &directory)
+        .output()
+        .expect("seed public site");
+    assert_success(&seed);
+    inventory.assert();
+    let original = fs::read(directory.join("graph.json")).expect("synchronized graph");
+    for arguments in [
+        vec![
+            "create",
+            "--repo",
+            "acme/widgets",
+            "--title",
+            "Pending Draft secret",
+            "--json",
+        ],
+        vec![
+            "update",
+            "acme/widgets#1",
+            "--title",
+            "Pending field secret",
+            "--json",
+        ],
+        vec![
+            "comment",
+            "acme/widgets#1",
+            "--body",
+            "Pending comment secret",
+            "--json",
+        ],
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_grit"));
+        command.args(arguments);
+        configure(&mut command, &state, &github.url());
+        command.env_remove("GH_TOKEN");
+        let queued = command.output().expect("queue local mutation");
+        assert_success(&queued);
+    }
+    let unavailable = github
+        .mock("GET", "/repos/acme/widgets/labels")
+        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+        .with_status(503)
+        .create();
+    let exported = public_graph_command(&state, &github.url(), &directory)
+        .output()
+        .expect("export synchronized fallback");
+    assert_success(&exported);
+    assert_eq!(
+        fs::read(directory.join("graph.json")).expect("public graph"),
+        original
+    );
+    for entry in fs::read_dir(&directory).expect("sealed bundle") {
+        let contents =
+            fs::read_to_string(entry.expect("bundle entry").path()).expect("bundle text");
+        for secret in [
+            "Pending Draft secret",
+            "Pending field secret",
+            "Pending comment secret",
+        ] {
+            assert!(!contents.contains(secret), "public export leaked {secret}");
+        }
+    }
+    metadata.assert();
+    unavailable.assert();
+}
+
+#[test]
 fn public_bundle_has_a_closed_manifest_and_renders_hostile_text_literally() {
     let site = generate_adversarial_public_site();
 

@@ -248,6 +248,7 @@ mod tests {
 
     fn issue(number: u64, state: &str) -> Issue {
         Issue {
+            identity: crate::model::IssueIdentityState::GitHub,
             id: number,
             node_id: format!("I_{number}"),
             number,

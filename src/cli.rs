@@ -1,28 +1,39 @@
-use std::{env, path::PathBuf};
+use std::{env, path::PathBuf, time::Instant};
 
-use clap::{Parser, Subcommand};
+use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use thiserror::Error;
 use url::Url;
 
 use crate::{
     auth::{AuthError, AuthToken},
+    comment_create::{self, PendingCommentCreateError},
+    dependency_update::{self, PendingDependencyUpdateError},
     github::{
         CreateLabelRequest, DependencyChange, DependencyIntent, GitHubClient, GitHubError,
         LabelCreation,
     },
     graph::{GraphError, PublicGraphOptions, confirm_public_repository, publish_site},
-    model::{LocalReplica, ReplicaError},
-    operational::{ExecutionScope, analyze_ready},
+    issue_create::{self, PendingIssueCreateError},
+    issue_field::{self, IssueField, IssueFieldUpdateError, IssueFieldValue, IssueStateValue},
+    metadata::{GenericLabel, MetadataError, MetadataSetTarget, PendingIssueOperand},
+    metadata_mutation::{self, MetadataMutationError, MetadataMutationOutcome, MetadataRequest},
+    model::{DependencyPresence, LocalReplica, ReplicaError, SetPresence, TemporaryIssueId},
+    operational::{ExecutionScope, PreparedRepository, analyze_ready},
     outbox::{OutboxError, OutboxStore, PendingMutation},
+    plan::{DependencyLayers, PlanIssue},
     priority::{
         DeclaredPriority, LogicalPriority, PrioritySelection, PriorityState,
         missing_canonical_labels, present_canonical_labels,
     },
     priority_update::{self, PendingPriorityUpdateError, PriorityUpdateError},
-    ranking::{self, NextAnalysis},
+    ranking::{self, NextAnalysis, PlanDecision},
+    reconciliation::{self, ReconciliationError, ResolutionChoice},
     replica_sync::{self, ReplicaSyncError},
-    repository::{IssueReference, IssueReferenceError, Repository, RepositoryError},
+    repository::{
+        IssueReference, IssueReferenceError, PendingIssueReference, PendingIssueReferenceError,
+        Repository, RepositoryError,
+    },
     store::{ReplicaStore, StoreError},
     triage::{self, TriageReport},
     working_graph::{PendingProvenance, WorkingGraph, WorkingGraphError},
@@ -34,7 +45,13 @@ const GRAPH_SCHEMA_VERSION: &str = "grit.graph/v1";
 const DEPENDENCY_MUTATION_SCHEMA_VERSION: &str = "grit.dependency-mutation/v1";
 const INIT_SCHEMA_VERSION: &str = "grit.init/v1";
 const TRIAGE_SCHEMA_VERSION: &str = "grit.triage/v1";
+const PLAN_SCHEMA_VERSION: &str = "grit.plan/v1";
 const PRIORITY_UPDATE_SCHEMA_VERSION: &str = "grit.priority-update/v1";
+const RESOLVE_SCHEMA_VERSION: &str = "grit.resolve/v1";
+const ISSUE_CREATE_SCHEMA_VERSION: &str = "grit.issue-create/v1";
+const COMMENT_CREATE_SCHEMA_VERSION: &str = "grit.comment-create/v1";
+const ISSUE_FIELD_UPDATE_SCHEMA_VERSION: &str = "grit.issue-field-update/v1";
+const METADATA_MUTATION_SCHEMA_VERSION: &str = "grit.metadata-set/v1";
 
 #[derive(Parser)]
 #[command(name = "grit", version, about)]
@@ -45,6 +62,32 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Create a provisional Draft Issue for later reconciliation.
+    Create {
+        /// Repository in OWNER/REPO form.
+        #[arg(long)]
+        repo: String,
+        /// Draft Issue title.
+        #[arg(long)]
+        title: String,
+        /// Draft Issue body in Markdown.
+        #[arg(long, default_value = "")]
+        body: String,
+        /// Emit versioned machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add a recoverable comment to an Issue or Draft Issue.
+    Comment {
+        /// Issue in OWNER/REPO#NUMBER or OWNER/REPO#draft:TEMPORARY_ID form.
+        issue: String,
+        /// Comment body in Markdown.
+        #[arg(long)]
+        body: String,
+        /// Emit versioned machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
     /// Recommend the best executable first step under next/v1.
     Next {
         /// Repository in OWNER/REPO form.
@@ -56,6 +99,27 @@ enum Command {
         /// Number of completions to evaluate, from one through the default three.
         #[arg(long, default_value_t = ranking::DEFAULT_HORIZON)]
         horizon: u8,
+        /// Emit versioned machine-readable output.
+        #[arg(long)]
+        json: bool,
+        /// Report local ranking phase timings; Synchronization is excluded.
+        #[arg(long)]
+        profile: bool,
+    },
+    /// Explain the best rollout and structural dependency layers.
+    Plan {
+        /// Repository in OWNER/REPO form.
+        #[arg(long)]
+        repo: String,
+        /// Select Ready work assigned to this GitHub login.
+        #[arg(long)]
+        assignee: Option<String>,
+        /// Number of completions to evaluate, from one through the default three.
+        #[arg(long, default_value_t = ranking::DEFAULT_HORIZON)]
+        horizon: u8,
+        /// Capacity is intentionally unsupported by plan/v1.
+        #[arg(long)]
+        workers: Option<usize>,
         /// Emit versioned machine-readable output.
         #[arg(long)]
         json: bool,
@@ -72,13 +136,74 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Update one Issue's logical Declared priority.
+    /// Update one logical Issue field.
+    #[command(group(
+        ArgGroup::new("issue_update")
+            .required(true)
+            .multiple(false)
+            .args(["priority", "title", "body", "state", "assignee", "clear_assignees"])
+    ))]
     Update {
-        /// Issue in OWNER/REPO#NUMBER form.
+        /// Issue in OWNER/REPO#NUMBER or OWNER/REPO#draft:TEMPORARY_ID form.
         issue: String,
         /// Desired logical Priority, or none to remove it.
         #[arg(long)]
-        priority: PrioritySelection,
+        priority: Option<PrioritySelection>,
+        /// Replace the Issue title.
+        #[arg(long)]
+        title: Option<String>,
+        /// Replace the Issue body Markdown.
+        #[arg(long)]
+        body: Option<String>,
+        /// Open or close the Issue.
+        #[arg(long)]
+        state: Option<IssueStateArgument>,
+        /// Replace the assignee set with these logins; repeat for multiple assignees.
+        #[arg(long, action = clap::ArgAction::Append)]
+        assignee: Vec<String>,
+        /// Remove every assignee.
+        #[arg(long)]
+        clear_assignees: bool,
+        /// Emit versioned machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add or remove one non-Priority Issue label.
+    #[command(group(
+        ArgGroup::new("label_intent")
+            .required(true)
+            .multiple(false)
+            .args(["add", "remove"])
+    ))]
+    Label {
+        /// Issue in OWNER/REPO#NUMBER or OWNER/REPO#draft:TEMPORARY_ID form.
+        issue: String,
+        /// Add this generic label.
+        #[arg(long)]
+        add: Option<String>,
+        /// Remove this generic label.
+        #[arg(long)]
+        remove: Option<String>,
+        /// Emit versioned machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add or remove a parent/sub-Issue relationship without creating a Dependency.
+    #[command(name = "sub-issue", group(
+        ArgGroup::new("sub_issue_intent")
+            .required(true)
+            .multiple(false)
+            .args(["add", "remove"])
+    ))]
+    SubIssue {
+        /// Parent Issue reference.
+        parent: String,
+        /// Add this Issue as a sub-Issue.
+        #[arg(long)]
+        add: Option<String>,
+        /// Remove this Issue as a sub-Issue.
+        #[arg(long)]
+        remove: Option<String>,
         /// Emit versioned machine-readable output.
         #[arg(long)]
         json: bool,
@@ -156,11 +281,68 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Reconcile Pending mutations against current GitHub state.
+    Reconcile {
+        /// Repository in OWNER/REPO form.
+        #[arg(long)]
+        repo: String,
+        /// Emit versioned machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Resolve one Pending scalar-field conflict explicitly.
+    #[command(group(
+        ArgGroup::new("resolution")
+            .required(true)
+            .multiple(false)
+            .args(["remote", "local", "priority"])
+    ))]
+    Resolve {
+        /// Pending mutation operation ID.
+        operation: String,
+        /// Repository in OWNER/REPO form.
+        #[arg(long)]
+        repo: String,
+        /// Accept GitHub's current value and retire the local intent.
+        #[arg(long)]
+        remote: bool,
+        /// Reaffirm the local value against the last observed GitHub value.
+        #[arg(long)]
+        local: bool,
+        /// Replace a conflicting Priority and rebase it on the last observed GitHub value.
+        #[arg(long)]
+        priority: Option<PrioritySelection>,
+        /// Emit versioned machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum IssueStateArgument {
+    Open,
+    Closed,
+}
+
+impl From<IssueStateArgument> for IssueStateValue {
+    fn from(value: IssueStateArgument) -> Self {
+        match value {
+            IssueStateArgument::Open => Self::Open,
+            IssueStateArgument::Closed => Self::Closed,
+        }
+    }
 }
 
 pub(crate) fn execute() -> Result<(), CliError> {
     let cli = Cli::parse();
     match cli.command {
+        Command::Create {
+            repo,
+            title,
+            body,
+            json,
+        } => create_issue(&Repository::parse(&repo)?, title, body, json),
+        Command::Comment { issue, body, json } => create_comment(&issue, body, json),
         Command::Graph {
             repo,
             output,
@@ -183,10 +365,25 @@ pub(crate) fn execute() -> Result<(), CliError> {
             assignee,
             horizon,
             json,
+            profile,
         } => next(
             &Repository::parse(&repo)?,
             assignee.as_deref(),
             horizon,
+            json,
+            profile,
+        ),
+        Command::Plan {
+            repo,
+            assignee,
+            horizon,
+            workers,
+            json,
+        } => plan(
+            &Repository::parse(&repo)?,
+            assignee.as_deref(),
+            horizon,
+            workers,
             json,
         ),
         Command::Triage {
@@ -197,8 +394,33 @@ pub(crate) fn execute() -> Result<(), CliError> {
         Command::Update {
             issue,
             priority,
+            title,
+            body,
+            state,
+            assignee,
+            clear_assignees,
             json,
-        } => update_priority(&issue, priority, json),
+        } => {
+            if let Some(priority) = priority {
+                update_priority(&issue, priority, json)
+            } else {
+                let (field, desired) =
+                    issue_field_request(title, body, state, assignee, clear_assignees);
+                update_issue_field(&issue, field, desired, json)
+            }
+        }
+        Command::Label {
+            issue,
+            add,
+            remove,
+            json,
+        } => mutate_generic_label(&issue, add, remove, json),
+        Command::SubIssue {
+            parent,
+            add,
+            remove,
+            json,
+        } => mutate_parent_relationship(&parent, add, remove, json),
         Command::Block { issue, by, json } => {
             mutate_dependency(&issue, &by, DependencyIntent::Block, json)
         }
@@ -212,7 +434,535 @@ pub(crate) fn execute() -> Result<(), CliError> {
             assignee,
             json,
         } => ready(&Repository::parse(&repo)?, assignee.as_deref(), json),
+        Command::Reconcile { repo, json } => reconcile(&Repository::parse(&repo)?, json),
+        Command::Resolve {
+            operation,
+            repo,
+            remote,
+            local,
+            priority,
+            json,
+        } => resolve_conflict(
+            &Repository::parse(&repo)?,
+            &operation,
+            resolution_choice(remote, local, priority),
+            json,
+        ),
     }
+}
+
+fn plan(
+    repository: &Repository,
+    assignee: Option<&str>,
+    horizon: u8,
+    workers: Option<usize>,
+    json: bool,
+) -> Result<(), CliError> {
+    if workers.is_some() {
+        return Err(CliError::UnsupportedPlanWorkers);
+    }
+    if !(ranking::MIN_HORIZON..=ranking::MAX_HORIZON).contains(&horizon) {
+        return Err(CliError::UnsupportedNextHorizon(horizon));
+    }
+    let (replica, source) = refresh_or_local(repository)?;
+    let scope = assignee
+        .map(ExecutionScope::Assignee)
+        .unwrap_or(ExecutionScope::Available);
+    let outbox = OutboxStore::discover(repository)?.load(repository)?;
+    let working = WorkingGraph::project(&replica, &outbox)?;
+    let prepared = PreparedRepository::prepare(&working);
+    let store = ReplicaStore::discover(repository)?;
+    let mut cache = ranking::RankingCache::at(store.repository_directory());
+    let decision = ranking::analyze_prepared(&prepared, scope, horizon, &mut cache)
+        .analysis
+        .into_plan_decision();
+    let structural = crate::plan::analyze(&prepared, scope);
+    let parallel_now = structural.parallel_now;
+    let dependency_layers = structural.dependency_layers;
+    let warnings = analysis_warnings(&working, source);
+
+    if json {
+        let output = PlanOutput {
+            schema_version: PLAN_SCHEMA_VERSION,
+            policy_version: ranking::POLICY_VERSION,
+            command: "plan",
+            repository: &replica.repository,
+            source,
+            synced_at: &replica.synced_at,
+            replica_snapshot_hash: &replica.input_hash,
+            execution_scope: execution_scope_output(assignee),
+            decision,
+            parallel_now,
+            dependency_layers,
+            warnings,
+        };
+        serde_json::to_writer(std::io::stdout().lock(), &output).map_err(CliError::EncodeOutput)?;
+        println!();
+    } else {
+        println!(
+            "plan/v1 for {} (synced_at {}):",
+            replica.repository, replica.synced_at
+        );
+        match decision.recommendation() {
+            Some(recommendation) => println!("{}", recommendation.human_summary()),
+            None => println!("{}", decision.summary().human_empty_summary()),
+        }
+        println!("parallel_now:");
+        for issue in &parallel_now {
+            println!("{} {}", issue.display_reference(), issue.title);
+        }
+        println!("dependency layers (counterfactual topology):");
+        for layer in dependency_layers.human_lines() {
+            println!("{layer}");
+        }
+        if let Some(warning) = decision.truncation_warning() {
+            eprintln!("warning: {warning}");
+        }
+        for warning in &warnings {
+            print_warning(warning);
+        }
+    }
+    Ok(())
+}
+
+fn mutate_generic_label(
+    issue: &str,
+    add: Option<String>,
+    remove: Option<String>,
+    json: bool,
+) -> Result<(), CliError> {
+    let issue = PendingIssueReference::parse(issue)?;
+    let (label, desired) = match (add, remove) {
+        (Some(label), None) => (GenericLabel::new(label)?, SetPresence::Present),
+        (None, Some(label)) => (GenericLabel::new(label)?, SetPresence::Absent),
+        _ => unreachable!("clap requires exactly one label intent"),
+    };
+    let client = optional_github_client()?;
+    let result = metadata_mutation::update_or_queue(
+        client.as_ref(),
+        MetadataRequest::GenericLabel {
+            issue: &issue,
+            label,
+            desired,
+        },
+    )?;
+    print_metadata_mutation(&result, json)
+}
+
+fn mutate_parent_relationship(
+    parent: &str,
+    add: Option<String>,
+    remove: Option<String>,
+    json: bool,
+) -> Result<(), CliError> {
+    let parent = PendingIssueReference::parse(parent)?;
+    let (child, desired) = match (add, remove) {
+        (Some(child), None) => (PendingIssueReference::parse(&child)?, SetPresence::Present),
+        (None, Some(child)) => (PendingIssueReference::parse(&child)?, SetPresence::Absent),
+        _ => unreachable!("clap requires exactly one sub-Issue intent"),
+    };
+    let client = optional_github_client()?;
+    let result = metadata_mutation::update_or_queue(
+        client.as_ref(),
+        MetadataRequest::ParentRelationship {
+            parent: &parent,
+            child: &child,
+            desired,
+        },
+    )?;
+    print_metadata_mutation(&result, json)
+}
+
+fn optional_github_client() -> Result<Option<GitHubClient>, CliError> {
+    match github_client() {
+        Ok(client) => Ok(Some(client)),
+        Err(CliError::Auth(_)) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn print_metadata_mutation(
+    result: &metadata_mutation::MetadataMutationResult,
+    json: bool,
+) -> Result<(), CliError> {
+    let (pending, result_name, operation, working_graph) = match &result.outcome {
+        MetadataMutationOutcome::Synchronized { change } => {
+            (false, metadata_change_name(*change), None, None)
+        }
+        MetadataMutationOutcome::Queued {
+            operation,
+            working_input_hash,
+        } => (
+            true,
+            "pending",
+            Some(MetadataOperationOutput {
+                id: operation.id(),
+                depends_on: operation.depends_on().to_vec(),
+            }),
+            Some(WorkingGraphSummary {
+                input_hash: working_input_hash,
+            }),
+        ),
+    };
+    let (label, relationship) = match &result.target {
+        MetadataSetTarget::GenericLabel { label, .. } => (Some(label.as_str()), None),
+        MetadataSetTarget::ParentRelationship { parent, child } => (
+            None,
+            Some(ParentRelationshipOutput {
+                parent: operand_key(&result.replica.repository, *parent),
+                child: operand_key(&result.replica.repository, *child),
+                kind: "parent_of",
+            }),
+        ),
+    };
+    let output = MetadataMutationOutput {
+        schema_version: METADATA_MUTATION_SCHEMA_VERSION,
+        command: if label.is_some() {
+            "label"
+        } else {
+            "sub-issue"
+        },
+        repository: &result.replica.repository,
+        result: result_name,
+        pending,
+        label,
+        relationship,
+        desired_present: result.desired.is_present(),
+        operation,
+        working_graph,
+        snapshot: snapshot_summary(&result.replica),
+    };
+    if json {
+        serde_json::to_writer(std::io::stdout().lock(), &output).map_err(CliError::EncodeOutput)?;
+        println!();
+    } else if pending {
+        println!(
+            "Queued {} as Pending mutation {}",
+            output.command,
+            output
+                .operation
+                .as_ref()
+                .expect("Pending metadata output has an operation")
+                .id
+        );
+    } else {
+        println!("{}: {}", output.command, output.result);
+    }
+    Ok(())
+}
+
+fn operand_key(repository: &str, operand: PendingIssueOperand) -> String {
+    operand
+        .temporary_id()
+        .map(|temporary_id| temporary_id.stable_node_key(repository))
+        .unwrap_or_else(|| format!("{repository}#{}", operand.number()))
+}
+
+fn metadata_change_name(change: crate::github::MetadataChange) -> &'static str {
+    match change {
+        crate::github::MetadataChange::Added => "added",
+        crate::github::MetadataChange::AlreadyPresent => "already_present",
+        crate::github::MetadataChange::Removed => "removed",
+        crate::github::MetadataChange::AlreadyAbsent => "already_absent",
+    }
+}
+
+fn create_issue(
+    repository: &Repository,
+    title: String,
+    body: String,
+    json: bool,
+) -> Result<(), CliError> {
+    let result = issue_create::queue(repository, title, body)?;
+    let output = IssueCreateOutput {
+        schema_version: ISSUE_CREATE_SCHEMA_VERSION,
+        command: "create",
+        repository: repository.full_name(),
+        pending: true,
+        draft: DraftIssueOutput {
+            temporary_id: result.temporary_id,
+            stable_node_key: &result.stable_node_key,
+            key: &result.key,
+        },
+        operation: DraftCreateOperationOutput {
+            id: result.operation.id(),
+            kind: "issue_create",
+        },
+        working_graph: WorkingGraphSummary {
+            input_hash: &result.working_input_hash,
+        },
+        snapshot: snapshot_summary(&result.replica),
+    };
+    if json {
+        serde_json::to_writer(std::io::stdout().lock(), &output).map_err(CliError::EncodeOutput)?;
+        println!();
+    } else {
+        println!(
+            "Queued Draft Issue {} as Pending mutation {}",
+            output.draft.key, output.operation.id
+        );
+    }
+    Ok(())
+}
+
+fn create_comment(issue: &str, body: String, json: bool) -> Result<(), CliError> {
+    let reference = PendingIssueReference::parse(issue)?;
+    let queued = comment_create::queue(&reference, body)?;
+    let operation_id = queued.operation.id().to_owned();
+    let mut replica = queued.replica;
+    let mut pending = true;
+    let mut result_name = "pending";
+    let mut remote = None;
+    let mut warning = None;
+    let mut working_input_hash = Some(queued.working_input_hash);
+
+    if let Some(client) = optional_github_client()? {
+        match reconciliation::reconcile(&client, reference.repository()) {
+            Ok(reconciled) => {
+                let operation = reconciled
+                    .operations
+                    .iter()
+                    .find(|operation| operation.id == operation_id)
+                    .expect("the queued comment participates in its immediate reconciliation");
+                if let reconciliation::OperationDetails::CommentCreate { remote: created } =
+                    &operation.details
+                {
+                    remote = created.clone();
+                }
+                match operation.outcome {
+                    reconciliation::Outcome::Applied => {
+                        pending = false;
+                        result_name = "created";
+                    }
+                    reconciliation::Outcome::AlreadySatisfied => {
+                        pending = false;
+                        result_name = "recovered";
+                    }
+                    reconciliation::Outcome::Checkpointed => {
+                        pending = false;
+                        result_name = "created";
+                    }
+                    reconciliation::Outcome::Failed
+                    | reconciliation::Outcome::Conflicting
+                    | reconciliation::Outcome::TransitivelyBlocked
+                    | reconciliation::Outcome::ResolvedRemote => {
+                        warning.clone_from(&operation.error);
+                    }
+                }
+                replica = reconciled.replica;
+                if pending {
+                    let outbox = OutboxStore::discover(reference.repository())?
+                        .load(reference.repository())?;
+                    working_input_hash = Some(
+                        WorkingGraph::project(&replica, &outbox)?
+                            .input_hash()
+                            .to_owned(),
+                    );
+                } else {
+                    working_input_hash = None;
+                }
+            }
+            Err(error) => {
+                warning = Some(format!(
+                    "GitHub reconciliation was unavailable; comment remains Pending: {error}"
+                ));
+            }
+        }
+    }
+
+    let output = CommentCreateOutput {
+        schema_version: COMMENT_CREATE_SCHEMA_VERSION,
+        command: "comment",
+        repository: &replica.repository,
+        issue: &queued.issue_key,
+        body: &queued.body,
+        result: result_name,
+        pending,
+        operation: CommentCreateOperationOutput {
+            id: &operation_id,
+            kind: "comment_create",
+            depends_on: queued.operation.depends_on(),
+        },
+        remote,
+        working_graph: working_input_hash
+            .as_deref()
+            .map(|input_hash| WorkingGraphSummary { input_hash }),
+        snapshot: snapshot_summary(&replica),
+        warning,
+    };
+    if json {
+        serde_json::to_writer(std::io::stdout().lock(), &output).map_err(CliError::EncodeOutput)?;
+        println!();
+    } else if output.pending {
+        println!(
+            "Queued comment on {} as Pending mutation {}",
+            output.issue, output.operation.id
+        );
+        if let Some(warning) = &output.warning {
+            eprintln!("warning: {warning}");
+        }
+    } else {
+        println!("Created comment on {}", output.issue);
+    }
+    Ok(())
+}
+
+fn issue_field_request(
+    title: Option<String>,
+    body: Option<String>,
+    state: Option<IssueStateArgument>,
+    assignees: Vec<String>,
+    clear_assignees: bool,
+) -> (IssueField, IssueFieldValue) {
+    if let Some(title) = title {
+        (IssueField::Title, IssueFieldValue::title(title))
+    } else if let Some(body) = body {
+        (IssueField::Body, IssueFieldValue::body(body))
+    } else if let Some(state) = state {
+        (IssueField::State, IssueFieldValue::state(state.into()))
+    } else if !assignees.is_empty() {
+        (IssueField::Assignees, IssueFieldValue::assignees(assignees))
+    } else if clear_assignees {
+        (
+            IssueField::Assignees,
+            IssueFieldValue::assignees(Vec::new()),
+        )
+    } else {
+        unreachable!("clap requires exactly one Issue-field update")
+    }
+}
+
+fn resolution_choice(
+    remote: bool,
+    local: bool,
+    priority: Option<PrioritySelection>,
+) -> ResolutionChoice {
+    match (remote, local, priority) {
+        (true, false, None) => ResolutionChoice::Remote,
+        (false, true, None) => ResolutionChoice::Local,
+        (false, false, Some(priority)) => ResolutionChoice::Replacement(priority),
+        _ => unreachable!("clap requires exactly one resolution choice"),
+    }
+}
+
+fn reconcile(repository: &Repository, json: bool) -> Result<(), CliError> {
+    let client = github_client()?;
+    let result = reconciliation::reconcile(&client, repository)?;
+    print_reconciliation(&result, "reconcile", json)
+}
+
+fn resolve_conflict(
+    repository: &Repository,
+    operation_id: &str,
+    choice: ResolutionChoice,
+    json: bool,
+) -> Result<(), CliError> {
+    let client = github_client()?;
+    let result = reconciliation::resolve(&client, repository, operation_id, choice)?;
+    if json {
+        let output = ResolveOutput {
+            schema_version: RESOLVE_SCHEMA_VERSION,
+            command: "resolve",
+            repository: &result.reconciliation.repository,
+            resolution: ResolutionOutput {
+                operation_id: &result.operation_id,
+                choice: result.choice,
+            },
+            operations: &result.reconciliation.operations,
+            summary: &result.reconciliation.summary,
+            snapshot: snapshot_summary(&result.reconciliation.replica),
+        };
+        serde_json::to_writer(std::io::stdout().lock(), &output).map_err(CliError::EncodeOutput)?;
+        println!();
+    } else {
+        println!(
+            "Resolved {} with --{}; reconciliation applied {}, found {} conflict(s), and left {} Pending operation(s)",
+            result.operation_id,
+            result.choice,
+            result.reconciliation.summary.applied,
+            result.reconciliation.summary.conflicting,
+            result.reconciliation.summary.remaining
+        );
+    }
+    Ok(())
+}
+
+fn print_reconciliation(
+    result: &reconciliation::ReconciliationResult,
+    command: &'static str,
+    json: bool,
+) -> Result<(), CliError> {
+    if json {
+        let output = ReconcileOutput {
+            schema_version: reconciliation::OUTPUT_SCHEMA_VERSION,
+            command,
+            repository: &result.repository,
+            operations: &result.operations,
+            summary: &result.summary,
+            snapshot: snapshot_summary(&result.replica),
+        };
+        serde_json::to_writer(std::io::stdout().lock(), &output).map_err(CliError::EncodeOutput)?;
+        println!();
+    } else {
+        println!(
+            "Reconciled {}: {} applied, {} already satisfied, {} conflict(s), {} transitively blocked, {} Pending",
+            result.repository,
+            result.summary.applied,
+            result.summary.already_satisfied,
+            result.summary.conflicting,
+            result.summary.transitively_blocked,
+            result.summary.remaining
+        );
+        for operation in &result.operations {
+            if operation.classification == reconciliation::Classification::Conflicting {
+                match &operation.details {
+                    reconciliation::OperationDetails::PriorityUpdate {
+                        base,
+                        local,
+                        remote,
+                    } => println!(
+                        "{} Issue #{} conflict: base {}, local {}, remote {}",
+                        operation.id,
+                        operation
+                            .issue_number
+                            .expect("Priority conflicts have a GitHub Issue number"),
+                        base.to_state().display_name(),
+                        local.to_state().display_name(),
+                        remote
+                            .as_ref()
+                            .map(LogicalPriority::to_state)
+                            .map(|priority| priority.display_name())
+                            .unwrap_or("missing")
+                    ),
+                    reconciliation::OperationDetails::IssueFieldUpdate {
+                        field,
+                        base,
+                        local,
+                        remote,
+                    } => println!(
+                        "{} Issue #{} {} conflict: base {}, local {}, remote {}",
+                        operation.id,
+                        operation
+                            .issue_number
+                            .expect("Issue-field conflicts have an Issue number"),
+                        field.name(),
+                        serde_json::to_string(base).expect("Issue-field values serialize"),
+                        serde_json::to_string(local).expect("Issue-field values serialize"),
+                        remote
+                            .as_ref()
+                            .map(|value| serde_json::to_string(value)
+                                .expect("Issue-field values serialize"))
+                            .unwrap_or_else(|| "missing".to_owned())
+                    ),
+                    reconciliation::OperationDetails::IssueCreate { .. }
+                    | reconciliation::OperationDetails::CommentCreate { .. }
+                    | reconciliation::OperationDetails::DependencyUpdate { .. }
+                    | reconciliation::OperationDetails::MetadataSetUpdate { .. } => {}
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn graph(
@@ -313,6 +1063,87 @@ fn initialize(repository: &Repository, json: bool) -> Result<(), CliError> {
             output.created_labels.join(", "),
             repository.full_name()
         );
+    }
+    Ok(())
+}
+
+fn update_issue_field(
+    issue: &str,
+    field: IssueField,
+    desired: IssueFieldValue,
+    json: bool,
+) -> Result<(), CliError> {
+    let reference = PendingIssueReference::parse(issue)?;
+    let client = match github_client() {
+        Ok(client) => Some(client),
+        Err(CliError::Auth(_)) => None,
+        Err(error) => return Err(error),
+    };
+    let result = issue_field::update_or_queue(client.as_ref(), &reference, field, desired)?;
+    print_issue_field_update(&result, json)
+}
+
+fn print_issue_field_update(
+    result: &issue_field::IssueFieldUpdateResult,
+    json: bool,
+) -> Result<(), CliError> {
+    let (status, pending, issue_url, operation, working_graph) = match &result.outcome {
+        issue_field::IssueFieldUpdateOutcome::Synchronized { issue_url } => {
+            ("synchronized", false, Some(issue_url.as_str()), None, None)
+        }
+        issue_field::IssueFieldUpdateOutcome::Queued {
+            issue_url,
+            operation,
+            working_input_hash,
+        } => (
+            "pending",
+            true,
+            issue_url.as_deref(),
+            Some(IssueFieldOperationOutput {
+                id: operation.id(),
+                kind: "issue_field_update",
+                depends_on: operation.depends_on().to_vec(),
+            }),
+            Some(WorkingGraphSummary {
+                input_hash: working_input_hash,
+            }),
+        ),
+    };
+    let output = IssueFieldUpdateOutput {
+        schema_version: ISSUE_FIELD_UPDATE_SCHEMA_VERSION,
+        command: "update",
+        status,
+        pending,
+        repository: &result.replica.repository,
+        issue: IssueFieldIssueOutput {
+            key: &result.issue_key,
+            number: issue_url.map(|_| result.issue_number),
+            temporary_id: result.temporary_id,
+            url: issue_url,
+        },
+        field: result.field,
+        base: &result.base,
+        local: &result.desired,
+        operation,
+        working_graph,
+        snapshot: snapshot_summary(&result.replica),
+    };
+    if json {
+        serde_json::to_writer(std::io::stdout().lock(), &output).map_err(CliError::EncodeOutput)?;
+        println!();
+    } else if pending {
+        println!(
+            "Queued {} {} update as Pending mutation {}",
+            output.issue.key,
+            output.field.name(),
+            output
+                .operation
+                .as_ref()
+                .expect("Pending field output includes an operation")
+                .id
+        );
+    } else {
+        println!("Updated {} {}", output.issue.key, output.field.name());
     }
     Ok(())
 }
@@ -472,6 +1303,7 @@ fn next(
     assignee: Option<&str>,
     horizon: u8,
     json: bool,
+    profile: bool,
 ) -> Result<(), CliError> {
     if !(ranking::MIN_HORIZON..=ranking::MAX_HORIZON).contains(&horizon) {
         return Err(CliError::UnsupportedNextHorizon(horizon));
@@ -482,7 +1314,17 @@ fn next(
     let scope = assignee
         .map(ExecutionScope::Assignee)
         .unwrap_or(ExecutionScope::Available);
-    let analysis = ranking::analyze(&working, scope, horizon);
+    let store = ReplicaStore::discover(repository)?;
+    let mut cache = ranking::RankingCache::at(store.repository_directory());
+    let run = ranking::analyze_profiled(&working, scope, horizon, &mut cache);
+    let analysis = run.analysis;
+    let analysis_serialization = (profile && json).then(|| {
+        let serialization_started = Instant::now();
+        let _ = serde_json::to_vec(&analysis).expect("Next analysis is serializable");
+        serialization_started.elapsed()
+    });
+    let performance =
+        profile.then(|| PerformanceOutput::from_profile(run.profile, analysis_serialization));
     let warnings = analysis_warnings(&working, source);
     if json {
         let output = NextOutput {
@@ -496,6 +1338,7 @@ fn next(
             execution_scope: execution_scope_output(assignee),
             analysis,
             warnings,
+            performance,
         };
         serde_json::to_writer(std::io::stdout().lock(), &output).map_err(CliError::EncodeOutput)?;
         println!();
@@ -513,6 +1356,9 @@ fn next(
         }
         for warning in &warnings {
             print_warning(warning);
+        }
+        if let Some(performance) = performance {
+            eprintln!("{}", performance.human_summary());
         }
     }
     Ok(())
@@ -556,24 +1402,43 @@ fn mutate_dependency(
     intent: DependencyIntent,
     json: bool,
 ) -> Result<(), CliError> {
-    let blocked = IssueReference::parse(blocked)?;
-    let blocker = IssueReference::parse(blocker)?;
-    let client = github_client()?;
-    let result = client.mutate_dependency(&blocked, &blocker, intent)?;
-
-    let replica = replica_sync::fetch(&client, blocked.repository()).map_err(|source| {
-        CliError::MutationSynchronization {
-            source: Box::new(source.into()),
+    let blocked = PendingIssueReference::parse(blocked)?;
+    let blocker = PendingIssueReference::parse(blocker)?;
+    let (Some(github_blocked), Some(github_blocker)) = (blocked.as_github(), blocker.as_github())
+    else {
+        return queue_dependency_update(
+            &blocked,
+            &blocker,
+            intent,
+            "Draft Issue identity requires reconciliation".to_owned(),
+            json,
+        );
+    };
+    let client = match github_client() {
+        Ok(client) => client,
+        Err(CliError::Auth(source)) => {
+            return queue_dependency_update(&blocked, &blocker, intent, source.to_string(), json);
         }
-    })?;
-    if replica.has_dependency(&blocked, &blocker) != intent.desired_present() {
+        Err(error) => return Err(error),
+    };
+    let result = match client.mutate_dependency(github_blocked, github_blocker, intent) {
+        Ok(result) => result,
+        Err(source) if source.permits_offline_queue() => {
+            return queue_dependency_update(&blocked, &blocker, intent, source.to_string(), json);
+        }
+        Err(source) => return Err(source.into()),
+    };
+
+    let replica = replica_sync::fetch(&client, github_blocked.repository())
+        .map_err(|source| CliError::MutationSynchronization { source })?;
+    if replica.has_dependency(github_blocked, github_blocker) != intent.desired_present() {
         return Err(CliError::MutationReadbackMismatch {
             blocked: blocked.stable_key(),
             blocker: blocker.stable_key(),
             expected: dependency_expected_relationship(intent),
         });
     }
-    ReplicaStore::discover(blocked.repository())
+    ReplicaStore::discover(github_blocked.repository())
         .map_err(|source| CliError::MutationPublication { source })?
         .publish(&replica)
         .map_err(|source| CliError::MutationPublication { source })?;
@@ -582,13 +1447,16 @@ fn mutate_dependency(
     let output = DependencyMutationOutput {
         schema_version: DEPENDENCY_MUTATION_SCHEMA_VERSION,
         command: dependency_command_name(intent),
-        repository: blocked.repository().full_name(),
-        result,
+        repository: github_blocked.repository().full_name(),
+        result: dependency_result_name(result),
+        pending: false,
         edge: DependencyEdgeOutput {
             blocked: blocked.stable_key(),
             blocker: blocker.stable_key(),
             kind: "blocked_by",
         },
+        operation: None,
+        working_graph: None,
         snapshot,
     };
     if json {
@@ -596,6 +1464,56 @@ fn mutate_dependency(
         println!();
     } else {
         println!("{}", dependency_human_message(&output.edge, result));
+    }
+    Ok(())
+}
+
+fn queue_dependency_update(
+    blocked: &PendingIssueReference,
+    blocker: &PendingIssueReference,
+    intent: DependencyIntent,
+    online_failure: String,
+    json: bool,
+) -> Result<(), CliError> {
+    let result = dependency_update::queue(
+        blocked,
+        blocker,
+        DependencyPresence::from_present(intent.desired_present()),
+    )
+    .map_err(|queue| CliError::OnlineDependencyUpdateAndQueueFailed {
+        online: online_failure,
+        queue,
+    })?;
+    let output = DependencyMutationOutput {
+        schema_version: DEPENDENCY_MUTATION_SCHEMA_VERSION,
+        command: dependency_command_name(intent),
+        repository: &result.replica.repository,
+        result: "pending",
+        pending: true,
+        edge: DependencyEdgeOutput {
+            blocked: blocked.stable_key(),
+            blocker: blocker.stable_key(),
+            kind: "blocked_by",
+        },
+        operation: Some(PendingDependencyOperationOutput::from(&result.operation)),
+        working_graph: Some(WorkingGraphSummary {
+            input_hash: &result.working_input_hash,
+        }),
+        snapshot: snapshot_summary(&result.replica),
+    };
+    if json {
+        serde_json::to_writer(std::io::stdout().lock(), &output).map_err(CliError::EncodeOutput)?;
+        println!();
+    } else {
+        println!(
+            "Queued {} as Pending mutation {}",
+            dependency_human_pending_message(&output.edge, intent),
+            output
+                .operation
+                .as_ref()
+                .expect("Pending output includes an operation")
+                .id
+        );
     }
     Ok(())
 }
@@ -647,19 +1565,26 @@ fn ready(repository: &Repository, assignee: Option<&str>, json: bool) -> Result<
     let scope = assignee
         .map(ExecutionScope::Assignee)
         .unwrap_or(ExecutionScope::Available);
-    let analysis = analyze_ready(&replica, scope);
+    let analysis = analyze_ready(working.replica(), scope);
     let warnings = analysis_warnings(&working, source);
     let issues: Vec<_> = analysis
         .executable
         .iter()
         .map(|issue| ReadyIssue {
             provenance: working.provenance_for_issue(issue.number),
-            number: issue.number,
+            key: issue.display_key(&replica.repository),
+            number: (!issue.is_draft()).then_some(issue.number),
+            temporary_id: issue.temporary_id(),
             url: &issue.url,
             title: &issue.title,
             ready: true,
             available: issue.assignees.is_empty(),
             priority: working.priority(issue),
+            labels: issue
+                .labels
+                .iter()
+                .map(|label| label.name.as_str())
+                .collect(),
             assignees: issue
                 .assignees
                 .iter()
@@ -698,8 +1623,8 @@ fn ready(repository: &Repository, assignee: Option<&str>, json: bool) -> Result<
         );
         for issue in &output.issues {
             println!(
-                "#{} {} [{}]",
-                issue.number,
+                "{} {} [{}]",
+                issue.key,
                 issue.title,
                 issue.priority.display_name()
             );
@@ -855,6 +1780,71 @@ struct SyncOutput<'a> {
 }
 
 #[derive(Serialize)]
+struct DependencyMutationOutput<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    repository: &'a str,
+    result: &'static str,
+    pending: bool,
+    edge: DependencyEdgeOutput,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    operation: Option<PendingDependencyOperationOutput<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    working_graph: Option<WorkingGraphSummary<'a>>,
+    snapshot: SnapshotSummary<'a>,
+}
+
+#[derive(Serialize)]
+struct PendingDependencyOperationOutput<'a> {
+    id: &'a str,
+    kind: &'static str,
+    desired_present: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    depends_on: Vec<String>,
+}
+
+impl<'a> From<&'a PendingMutation> for PendingDependencyOperationOutput<'a> {
+    fn from(operation: &'a PendingMutation) -> Self {
+        let (_, desired) = operation
+            .dependency_values()
+            .expect("Dependency output is built from a Dependency mutation");
+        Self {
+            id: operation.id(),
+            kind: "dependency_update",
+            desired_present: desired.is_present(),
+            depends_on: operation.depends_on().to_vec(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct ReconcileOutput<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    repository: &'a str,
+    operations: &'a [reconciliation::OperationResult],
+    summary: &'a reconciliation::ReconciliationSummary,
+    snapshot: SnapshotSummary<'a>,
+}
+
+#[derive(Serialize)]
+struct ResolveOutput<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    repository: &'a str,
+    resolution: ResolutionOutput<'a>,
+    operations: &'a [reconciliation::OperationResult],
+    summary: &'a reconciliation::ReconciliationSummary,
+    snapshot: SnapshotSummary<'a>,
+}
+
+#[derive(Serialize)]
+struct ResolutionOutput<'a> {
+    operation_id: &'a str,
+    choice: &'static str,
+}
+
+#[derive(Serialize)]
 struct GraphOutput<'a> {
     schema_version: &'static str,
     command: &'static str,
@@ -872,16 +1862,6 @@ struct GraphArtifactSummary<'a> {
     node_count: usize,
     edge_count: usize,
     artifact_hash: &'a str,
-}
-
-#[derive(Serialize)]
-struct DependencyMutationOutput<'a> {
-    schema_version: &'static str,
-    command: &'static str,
-    repository: &'a str,
-    result: DependencyChange,
-    edge: DependencyEdgeOutput,
-    snapshot: SnapshotSummary<'a>,
 }
 
 #[derive(Serialize)]
@@ -927,6 +1907,81 @@ struct NextOutput<'a> {
     #[serde(flatten)]
     analysis: NextAnalysis,
     warnings: Vec<ReadyWarning>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    performance: Option<PerformanceOutput>,
+}
+
+#[derive(Serialize)]
+struct PerformanceOutput {
+    unit: &'static str,
+    graph_preparation: u128,
+    scc_detection: u128,
+    readiness: u128,
+    cache_lookup: u128,
+    pagerank: u128,
+    search: u128,
+    output_assembly: u128,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    analysis_serialization: Option<u128>,
+    cache_publication: u128,
+    total_before_serialization: u128,
+    cache_hit: bool,
+    cache_published: bool,
+    synchronization_included: bool,
+}
+
+impl PerformanceOutput {
+    fn from_profile(
+        profile: ranking::AnalysisProfile,
+        analysis_serialization: Option<std::time::Duration>,
+    ) -> Self {
+        Self {
+            unit: "microseconds",
+            graph_preparation: profile.graph_preparation.as_micros(),
+            scc_detection: profile.scc_detection.as_micros(),
+            readiness: profile.readiness.as_micros(),
+            cache_lookup: profile.cache_lookup.as_micros(),
+            pagerank: profile.pagerank.as_micros(),
+            search: profile.search.as_micros(),
+            output_assembly: profile.output_assembly.as_micros(),
+            analysis_serialization: analysis_serialization.map(|duration| duration.as_micros()),
+            cache_publication: profile.cache_publication.as_micros(),
+            total_before_serialization: profile.total.as_micros(),
+            cache_hit: profile.cache_hit,
+            cache_published: profile.cache_published,
+            synchronization_included: false,
+        }
+    }
+
+    fn human_summary(&self) -> String {
+        format!(
+            "ranking profile (microseconds, Synchronization excluded): graph={} scc={} readiness={} cache={} pagerank={} search={} output={} cache_hit={}",
+            self.graph_preparation,
+            self.scc_detection,
+            self.readiness,
+            self.cache_lookup,
+            self.pagerank,
+            self.search,
+            self.output_assembly,
+            self.cache_hit,
+        )
+    }
+}
+
+#[derive(Serialize)]
+struct PlanOutput<'a> {
+    schema_version: &'static str,
+    policy_version: &'static str,
+    command: &'static str,
+    repository: &'a str,
+    source: ReplicaSource,
+    synced_at: &'a str,
+    replica_snapshot_hash: &'a str,
+    execution_scope: ExecutionScopeOutput<'a>,
+    decision: PlanDecision,
+    parallel_now: Vec<PlanIssue<'a>>,
+    dependency_layers: DependencyLayers<'a>,
+    warnings: Vec<ReadyWarning>,
 }
 
 #[derive(Serialize)]
@@ -946,6 +2001,76 @@ struct PriorityUpdateOutput<'a> {
     snapshot: SnapshotSummary<'a>,
 }
 
+#[derive(Serialize)]
+struct IssueFieldUpdateOutput<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    status: &'static str,
+    pending: bool,
+    repository: &'a str,
+    issue: IssueFieldIssueOutput<'a>,
+    field: IssueField,
+    base: &'a IssueFieldValue,
+    local: &'a IssueFieldValue,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    operation: Option<IssueFieldOperationOutput<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    working_graph: Option<WorkingGraphSummary<'a>>,
+    snapshot: SnapshotSummary<'a>,
+}
+
+#[derive(Serialize)]
+struct IssueFieldIssueOutput<'a> {
+    key: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    number: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temporary_id: Option<TemporaryIssueId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct IssueFieldOperationOutput<'a> {
+    id: &'a str,
+    kind: &'static str,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    depends_on: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct MetadataMutationOutput<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    repository: &'a str,
+    result: &'static str,
+    pending: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    relationship: Option<ParentRelationshipOutput>,
+    desired_present: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    operation: Option<MetadataOperationOutput<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    working_graph: Option<WorkingGraphSummary<'a>>,
+    snapshot: SnapshotSummary<'a>,
+}
+
+#[derive(Serialize)]
+struct ParentRelationshipOutput {
+    parent: String,
+    child: String,
+    kind: &'static str,
+}
+
+#[derive(Serialize)]
+struct MetadataOperationOutput<'a> {
+    id: &'a str,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    depends_on: Vec<String>,
+}
+
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum PriorityUpdateStatus {
@@ -959,15 +2084,21 @@ struct PendingOperationOutput<'a> {
     kind: &'static str,
     base: &'a LogicalPriority,
     desired: &'a LogicalPriority,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    depends_on: Vec<String>,
 }
 
 impl<'a> From<&'a PendingMutation> for PendingOperationOutput<'a> {
     fn from(operation: &'a PendingMutation) -> Self {
+        let (base, desired) = operation
+            .priority_values()
+            .expect("Priority output is built from a Priority mutation");
         Self {
             id: operation.id(),
             kind: "priority_update",
-            base: operation.base(),
-            desired: operation.desired(),
+            base,
+            desired,
+            depends_on: operation.depends_on().to_vec(),
         }
     }
 }
@@ -975,6 +2106,58 @@ impl<'a> From<&'a PendingMutation> for PendingOperationOutput<'a> {
 #[derive(Serialize)]
 struct WorkingGraphSummary<'a> {
     input_hash: &'a str,
+}
+
+#[derive(Serialize)]
+struct IssueCreateOutput<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    repository: &'a str,
+    pending: bool,
+    draft: DraftIssueOutput<'a>,
+    operation: DraftCreateOperationOutput<'a>,
+    working_graph: WorkingGraphSummary<'a>,
+    snapshot: SnapshotSummary<'a>,
+}
+
+#[derive(Serialize)]
+struct DraftIssueOutput<'a> {
+    temporary_id: TemporaryIssueId,
+    stable_node_key: &'a crate::model::StableNodeKey,
+    key: &'a str,
+}
+
+#[derive(Serialize)]
+struct DraftCreateOperationOutput<'a> {
+    id: &'a str,
+    kind: &'static str,
+}
+
+#[derive(Serialize)]
+struct CommentCreateOutput<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    repository: &'a str,
+    issue: &'a str,
+    body: &'a str,
+    result: &'static str,
+    pending: bool,
+    operation: CommentCreateOperationOutput<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote: Option<crate::model::CommentIdentity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    working_graph: Option<WorkingGraphSummary<'a>>,
+    snapshot: SnapshotSummary<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    warning: Option<String>,
+}
+
+#[derive(Serialize)]
+struct CommentCreateOperationOutput<'a> {
+    id: &'a str,
+    kind: &'static str,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    depends_on: &'a [String],
 }
 
 #[derive(Serialize)]
@@ -1023,12 +2206,17 @@ struct ExecutionScopeOutput<'a> {
 struct ReadyIssue<'a> {
     #[serde(flatten)]
     provenance: PendingProvenance,
-    number: u64,
+    key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    number: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temporary_id: Option<TemporaryIssueId>,
     url: &'a str,
     title: &'a str,
     ready: bool,
     available: bool,
     priority: PriorityState,
+    labels: Vec<&'a str>,
     assignees: Vec<&'a str>,
 }
 
@@ -1062,6 +2250,27 @@ fn dependency_command_name(intent: DependencyIntent) -> &'static str {
     match intent {
         DependencyIntent::Block => "block",
         DependencyIntent::Unblock => "unblock",
+    }
+}
+
+fn dependency_result_name(result: DependencyChange) -> &'static str {
+    match result {
+        DependencyChange::Created => "created",
+        DependencyChange::AlreadyPresent => "already_present",
+        DependencyChange::Removed => "removed",
+        DependencyChange::AlreadyAbsent => "already_absent",
+    }
+}
+
+fn dependency_human_pending_message(
+    edge: &DependencyEdgeOutput,
+    intent: DependencyIntent,
+) -> String {
+    match intent {
+        DependencyIntent::Block => format!("{} blocked by {}", edge.blocked, edge.blocker),
+        DependencyIntent::Unblock => {
+            format!("{} no longer blocked by {}", edge.blocked, edge.blocker)
+        }
     }
 }
 
@@ -1111,6 +2320,12 @@ pub(crate) enum CliError {
     Repository(#[from] RepositoryError),
     #[error(transparent)]
     IssueReference(#[from] IssueReferenceError),
+    #[error(transparent)]
+    PendingIssueReference(#[from] PendingIssueReferenceError),
+    #[error(transparent)]
+    PendingIssueCreate(#[from] PendingIssueCreateError),
+    #[error(transparent)]
+    PendingCommentCreate(#[from] PendingCommentCreateError),
     #[error("GRIT_GITHUB_API_URL is invalid: {0}")]
     ParseApiBase(url::ParseError),
     #[error("GRIT_GITHUB_API_URL must be a safe absolute HTTP(S) base URL")]
@@ -1128,6 +2343,14 @@ pub(crate) enum CliError {
     #[error(transparent)]
     PriorityUpdate(#[from] PriorityUpdateError),
     #[error(transparent)]
+    IssueFieldUpdate(#[from] IssueFieldUpdateError),
+    #[error(transparent)]
+    Metadata(#[from] MetadataError),
+    #[error(transparent)]
+    MetadataMutation(#[from] MetadataMutationError),
+    #[error(transparent)]
+    Reconciliation(#[from] ReconciliationError),
+    #[error(transparent)]
     Outbox(#[from] OutboxError),
     #[error(transparent)]
     WorkingGraph(#[from] WorkingGraphError),
@@ -1138,12 +2361,21 @@ pub(crate) enum CliError {
         online: String,
         queue: PendingPriorityUpdateError,
     },
+    #[error(
+        "online Dependency update was unavailable ({online}); the Pending mutation could not be queued: {queue}"
+    )]
+    OnlineDependencyUpdateAndQueueFailed {
+        online: String,
+        queue: PendingDependencyUpdateError,
+    },
     #[error(transparent)]
     Graph(#[from] GraphError),
     #[error("could not encode command JSON output: {0}")]
     EncodeOutput(serde_json::Error),
     #[error("next/v1 horizon must be between 1 and 3, not {0}")]
     UnsupportedNextHorizon(u8),
+    #[error("grit plan does not accept --workers in v1")]
+    UnsupportedPlanWorkers,
     #[error("GitHub refresh failed ({refresh}); no valid Local replica is available ({replica})")]
     RefreshAndReplicaUnavailable { refresh: String, replica: String },
     #[error(
@@ -1151,7 +2383,7 @@ pub(crate) enum CliError {
     )]
     MutationSynchronization {
         #[source]
-        source: Box<CliError>,
+        source: ReplicaSyncError,
     },
     #[error(
         "GitHub dependency operation completed and readback was verified, but Local replica publication failed: {source}"

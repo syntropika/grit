@@ -79,7 +79,7 @@ pub(super) fn evidence(
     ranking_provenance_context: &[u64],
 ) -> ComparisonEvidence {
     let descriptor = decision.descriptor();
-    let provenance = working.provenance_for_issues(
+    let provenance = working.ranking_provenance_for_issues(
         winner
             .data()
             .steps
