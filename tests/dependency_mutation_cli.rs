@@ -169,6 +169,7 @@ fn failed_synchronized_readback_leaves_the_replica_unchanged() {
     let locator = mock_blocker_locator(&mut github);
     let preflight = mock_preflight(&mut github, "[]");
     let accepted = mock_add_response(&mut github, 201);
+    let (labels, events) = mock_sync_metadata(&mut github);
     let failed_readback = mock_failed_inventory(&mut github, 503);
 
     let output = mutation_command(&state, &github.url(), "block")
@@ -182,6 +183,8 @@ fn failed_synchronized_readback_leaves_the_replica_unchanged() {
     locator.assert();
     preflight.assert();
     accepted.assert();
+    labels.assert();
+    events.assert();
     failed_readback.assert();
 }
 
@@ -447,6 +450,8 @@ fn assert_offline_ready(state: &TempDir, api_url: &str, expected: Vec<u64>) {
 }
 
 struct RepositoryMocks {
+    labels: Mock,
+    events: Mock,
     issues: Mock,
     comments: Mock,
     dependencies: Vec<Mock>,
@@ -454,6 +459,8 @@ struct RepositoryMocks {
 
 impl RepositoryMocks {
     fn assert(self) {
+        self.labels.assert();
+        self.events.assert();
         self.issues.assert();
         self.comments.assert();
         for dependency in self.dependencies {
@@ -463,6 +470,7 @@ impl RepositoryMocks {
 }
 
 fn mock_repository(github: &mut Server, issue_two_blockers: &str) -> RepositoryMocks {
+    let (labels, events) = mock_sync_metadata(github);
     let issues = github
         .mock("GET", "/repos/acme/widgets/issues")
         .match_query(Matcher::AllOf(vec![
@@ -505,6 +513,8 @@ fn mock_repository(github: &mut Server, issue_two_blockers: &str) -> RepositoryM
             .create(),
     ];
     RepositoryMocks {
+        labels,
+        events,
         issues,
         comments,
         dependencies,
@@ -595,4 +605,22 @@ fn read_request_headers(stream: &mut impl Read) {
         }
         request.push(byte[0]);
     }
+}
+
+fn mock_sync_metadata(github: &mut Server) -> (Mock, Mock) {
+    let labels = github
+        .mock("GET", "/repos/acme/widgets/labels")
+        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("[]")
+        .create();
+    let events = github
+        .mock("GET", "/repos/acme/widgets/issues/events")
+        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("[]")
+        .create();
+    (labels, events)
 }
