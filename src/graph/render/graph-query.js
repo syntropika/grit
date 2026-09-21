@@ -272,5 +272,5 @@
     return `${blocker}\u0000${blocked}`;
   }
 
-  globalThis.GritGraphQuery = Object.freeze({ create });
+  globalThis.HyfaGraphQuery = Object.freeze({ create });
 })();

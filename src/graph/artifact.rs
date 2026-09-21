@@ -18,11 +18,11 @@ use crate::{
     working_graph::{PendingProvenance, WorkingGraph},
 };
 
-pub(crate) const ARTIFACT_SCHEMA_VERSION: &str = "grit.graph-artifact/v2";
+pub(crate) const ARTIFACT_SCHEMA_VERSION: &str = "hyfa.graph-artifact/v2";
 
 #[derive(Clone, Copy, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 enum ArtifactSchemaVersion {
-    #[serde(rename = "grit.graph-artifact/v2")]
+    #[serde(rename = "hyfa.graph-artifact/v2")]
     V2,
 }
 
@@ -375,7 +375,7 @@ pub(super) fn build(
     horizon: u8,
 ) -> Result<GraphArtifact, GraphError> {
     let outbox = serde_json::from_value(serde_json::json!({
-        "schema_version": "grit.pending-mutations/v1",
+        "schema_version": "hyfa.pending-mutations/v1",
         "repository": replica.repository,
         "operations": [],
     }))

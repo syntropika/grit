@@ -7,7 +7,7 @@ use tempfile::TempDir;
 mod support;
 
 #[test]
-#[ignore = "requires a Chrome-compatible browser; run with GRIT_BROWSER set"]
+#[ignore = "requires a Chrome-compatible browser; run with HYFA_BROWSER set"]
 fn pending_draft_exploration_preserves_identity_filters_and_recommendation_evidence() {
     let state = TempDir::new().unwrap();
     let workspace = TempDir::new().unwrap();
@@ -100,7 +100,7 @@ fn pending_draft_exploration_preserves_identity_filters_and_recommendation_evide
         include_str!("fixtures/graph_working_browser_harness.js"),
     )
     .unwrap();
-    let browser = std::env::var_os("GRIT_BROWSER").unwrap_or_else(|| "google-chrome".into());
+    let browser = std::env::var_os("HYFA_BROWSER").unwrap_or_else(|| "google-chrome".into());
     let audit =
         support::browser::audit_local_page(&browser, &workspace.path().join("profile"), &harness);
     assert!(audit.result.get("error").is_none(), "{}", audit.result);
@@ -144,12 +144,12 @@ fn pending_draft_exploration_preserves_identity_filters_and_recommendation_evide
 }
 
 fn execute(state: &TempDir, api: &str, args: &[&str]) -> Value {
-    let output = Command::new(env!("CARGO_BIN_EXE_grit"))
+    let output = Command::new(env!("CARGO_BIN_EXE_hyfa"))
         .args(args)
         .env("GH_TOKEN", "local-fixture-token")
-        .env("GRIT_GITHUB_API_URL", api)
-        .env("GRIT_NO_KEYRING", "1")
-        .env("GRIT_STATE_DIR", state.path())
+        .env("HYFA_GITHUB_API_URL", api)
+        .env("HYFA_NO_KEYRING", "1")
+        .env("HYFA_STATE_DIR", state.path())
         .env("PATH", "")
         .output()
         .unwrap();

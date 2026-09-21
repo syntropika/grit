@@ -25,7 +25,7 @@ use crate::{
     store::{StoreError, repository_state_directory},
 };
 
-pub(crate) const OUTBOX_SCHEMA_VERSION: &str = "grit.pending-mutations/v1";
+pub(crate) const OUTBOX_SCHEMA_VERSION: &str = "hyfa.pending-mutations/v1";
 static OPERATION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1569,7 +1569,7 @@ mod tests {
     fn applying_plan_must_exactly_match_the_canonical_safe_plan() {
         let repository = Repository::parse("acme/reconcile").expect("repository");
         let outbox: PendingMutationOutbox = serde_json::from_value(json!({
-            "schema_version": "grit.pending-mutations/v1",
+            "schema_version": "hyfa.pending-mutations/v1",
             "repository": "acme/reconcile",
             "operations": [{
                 "kind": "priority_update",

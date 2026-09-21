@@ -1,12 +1,12 @@
-# Grit
+# Hyfa
 
-Grit analyzes work recorded in GitHub as a graph to identify blockers and recommend what to tackle next.
+Hyfa analyzes work recorded in GitHub as a graph to identify blockers and recommend what to tackle next.
 
 ## Language
 
 **Issue**:
-The canonical unit of work persisted in GitHub and the basic node analyzed by Grit.
-_Avoid_: Grit task, bead
+The canonical unit of work persisted in GitHub and the basic node analyzed by Hyfa.
+_Avoid_: Hyfa task, bead
 
 **Dependency**:
 A directed relationship between a dependent Issue and another Issue that must be resolved before it.
@@ -29,7 +29,7 @@ A Ready Issue with no assignee and therefore available as new work. Assignment a
 _Avoid_: Ready Issue, unblocked Issue
 
 **Execution scope**:
-The rule that determines which Ready Issues Grit may propose as steps in a calculation. By default it includes Available Issues; an explicit assignee filter changes it to the Issues assigned to that person.
+The rule that determines which Ready Issues Hyfa may propose as steps in a calculation. By default it includes Available Issues; an explicit assignee filter changes it to the Issues assigned to that person.
 _Avoid_: Graph scope, readiness, global availability
 
 **Executable Issue**:
@@ -37,7 +37,7 @@ A Ready Issue that belongs to the active Execution scope. Steps in `next` and ro
 _Avoid_: Available Issue, any Ready Issue, important Issue
 
 **Planning horizon**:
-The limit on future work that Grit simulates when comparing possible next steps. Anything beyond it is treated as downstream potential, not as part of the evaluated plan.
+The limit on future work that Hyfa simulates when comparing possible next steps. Anything beyond it is treated as downstream potential, not as part of the evaluated plan.
 _Avoid_: Complete plan, whole-backlog optimization
 
 **Dependency layer**:
@@ -77,7 +77,7 @@ The cumulative number of P0 Issues in the Unlock set after each rollout step. Wi
 _Avoid_: Critical distance, total open P0 count, priority score
 
 **Priority conflict**:
-The invalid state of an Issue containing more than one canonical `priority:*` label. Grit reports the conflict and ignores that Issue's Declared priority, but does not change its readiness or eligibility for calculated ranking.
+The invalid state of an Issue containing more than one canonical `priority:*` label. Hyfa reports the conflict and ignores that Issue's Declared priority, but does not change its readiness or eligibility for calculated ranking.
 _Avoid_: Dependency blocker, Mutation conflict, highest priority among the present labels
 
 **Priority update**:
@@ -85,7 +85,7 @@ The logical mutation that sets an Issue's Declared priority to one P0–P4 value
 _Avoid_: Replacing all labels, adding a second priority, Issue Field update
 
 **Repository initialization**:
-The explicit, idempotent preparation performed by `grit init` on a Repository. In v1 it creates any missing canonical `priority:p0`–`priority:p4` labels without renaming, deleting, or modifying existing labels and without assigning them to an Issue.
+The explicit, idempotent preparation performed by `hyfa init` on a Repository. In v1 it creates any missing canonical `priority:p0`–`priority:p4` labels without renaming, deleting, or modifying existing labels and without assigning them to an Issue.
 _Avoid_: Synchronization, analysis with side effects, destructive label migration
 
 **Structural centrality**:
@@ -105,7 +105,7 @@ The instant of the last complete Synchronization, exposed as `synced_at`. It rep
 _Avoid_: Age, watermark, freshness guarantee
 
 **Full reconciliation**:
-A complete Synchronization that rebuilds and compares current state when Grit cannot prove continuity of an incremental update.
+A complete Synchronization that rebuilds and compares current state when Hyfa cannot prove continuity of an incremental update.
 _Avoid_: Ordinary update, manual JSON repair
 
 **Pending mutation**:
@@ -133,11 +133,11 @@ The total, reproducible key used only for traversals and final tie-breaking: `(0
 _Avoid_: Declared priority, ranking score, creation date
 
 **Operation marker**:
-A random, non-secret identifier embedded as an invisible HTML comment in an Issue or comment created from a Pending mutation, allowing Grit to recognize a remote write whose outcome became uncertain. Grit removes it from all public and user-facing output.
+A random, non-secret identifier embedded as an invisible HTML comment in an Issue or comment created from a Pending mutation, allowing Hyfa to recognize a remote write whose outcome became uncertain. Hyfa removes it from all public and user-facing output.
 _Avoid_: User content, token, GitHub ID
 
 **Mutation conflict**:
-A Pending mutation whose relevant remote value no longer matches its base or desired result, preventing Grit from applying it without choosing between concurrent intentions.
+A Pending mutation whose relevant remote value no longer matches its base or desired result, preventing Hyfa from applying it without choosing between concurrent intentions.
 _Avoid_: Network failure, already-satisfied change, last-write-wins
 
 **Conflict resolution**:
@@ -145,7 +145,7 @@ The explicit, auditable decision that resolves a Mutation conflict by keeping th
 _Avoid_: Automatic resolution, silent last-write-wins, blind retry
 
 **Repository**:
-The GitHub repository whose work forms the boundary of a Grit analysis; every analysis belongs to exactly one.
+The GitHub repository whose work forms the boundary of a Hyfa analysis; every analysis belongs to exactly one.
 _Avoid_: Project, workspace, organization
 
 **Graph scope**:
@@ -158,4 +158,4 @@ _Avoid_: In-scope Issue, ignored dependency
 
 **Project**:
 An optional GitHub grouping for planning and presenting Issues; it neither defines the truth of the Issue graph nor is required to analyze it.
-_Avoid_: Canonical backlog, Grit database
+_Avoid_: Canonical backlog, Hyfa database

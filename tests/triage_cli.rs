@@ -15,7 +15,7 @@ fn triage_reports_actionable_operational_problems_and_ignores_closed_history() {
         .expect("live triage");
     assert_success(&output);
     let live: Value = serde_json::from_slice(&output.stdout).expect("triage JSON");
-    assert_eq!(live["schema_version"], "grit.triage/v1");
+    assert_eq!(live["schema_version"], "hyfa.triage/v1");
     assert_eq!(live["command"], "triage");
     assert_eq!(live["repository"], "acme/widgets");
     assert_eq!(live["source"], "live");
@@ -268,7 +268,7 @@ fn triage_command(
     json: bool,
     online: bool,
 ) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_grit"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hyfa"));
     command.args(["triage", "--repo", "acme/widgets"]);
     if let Some(assignee) = assignee {
         command.args(["--assignee", assignee]);
@@ -277,9 +277,9 @@ fn triage_command(
         command.arg("--json");
     }
     command
-        .env("GRIT_GITHUB_API_URL", api_url)
-        .env("GRIT_NO_KEYRING", "1")
-        .env("GRIT_STATE_DIR", state.path())
+        .env("HYFA_GITHUB_API_URL", api_url)
+        .env("HYFA_NO_KEYRING", "1")
+        .env("HYFA_STATE_DIR", state.path())
         .env("PATH", "");
     if online {
         command.env("GH_TOKEN", "automation-token");

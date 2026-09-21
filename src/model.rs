@@ -7,11 +7,15 @@ use uuid::Uuid;
 
 use crate::repository::IssueReference;
 
-pub(crate) const REPLICA_SCHEMA_VERSION: &str = "grit.local-replica/v1";
+pub(crate) const REPLICA_SCHEMA_VERSION: &str = "hyfa.local-replica/v1";
 
 pub(crate) fn strip_operation_markers(value: &str) -> String {
     let mut sanitized = crate::operation_marker::strip(value);
-    while let Some(start) = sanitized.find("<!-- grit:operation") {
+    while let Some(start) = ["<!-- hyfa:operation", "<!-- grit:operation"]
+        .into_iter()
+        .filter_map(|prefix| sanitized.find(prefix))
+        .min()
+    {
         let Some(relative_end) = sanitized[start..].find("-->") else {
             sanitized.truncate(start);
             break;

@@ -14,7 +14,7 @@ use crate::model::{BlockerIdentity, BlockerScope, Dependency, Issue, IssueIdenti
 #[test]
 #[ignore = "manual release-mode browser benchmark; run as documented in docs/benchmarks/graph-browser.md"]
 fn dense_graph_browser_benchmark() {
-    let browser = std::env::var_os("GRIT_BROWSER").unwrap_or_else(|| "google-chrome".into());
+    let browser = std::env::var_os("HYFA_BROWSER").unwrap_or_else(|| "google-chrome".into());
     for (node_count, edge_count) in [
         (100_usize, 400_usize),
         (1_000, 4_000),
@@ -95,12 +95,12 @@ fn dense_graph_browser_benchmark() {
             String::from_utf8_lossy(&output.stderr)
         );
         let dom = String::from_utf8(output.stdout).expect("benchmark browser DOM");
-        let load_ms = attribute(&dom, "data-grit-load-ms");
-        let browser_render_ms = attribute(&dom, "data-grit-render-ms");
-        let time_to_interactive_ms = attribute(&dom, "data-grit-time-to-interactive-ms");
-        let mode = attribute_text(&dom, "data-grit-network-mode");
-        let rendered_nodes = attribute(&dom, "data-grit-rendered-nodes") as usize;
-        let rendered_edges = attribute(&dom, "data-grit-rendered-edges") as usize;
+        let load_ms = attribute(&dom, "data-hyfa-load-ms");
+        let browser_render_ms = attribute(&dom, "data-hyfa-render-ms");
+        let time_to_interactive_ms = attribute(&dom, "data-hyfa-time-to-interactive-ms");
+        let mode = attribute_text(&dom, "data-hyfa-network-mode");
+        let rendered_nodes = attribute(&dom, "data-hyfa-rendered-nodes") as usize;
+        let rendered_edges = attribute(&dom, "data-hyfa-rendered-edges") as usize;
         let expected_mode = if node_count > presentation::FULL_NETWORK_MAX_NODES
             || edge_count > presentation::FULL_NETWORK_MAX_EDGES
         {

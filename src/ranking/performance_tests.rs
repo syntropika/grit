@@ -14,7 +14,7 @@ fn fixture_outbox(
     operations: serde_json::Value,
 ) -> crate::outbox::PendingMutationOutbox {
     serde_json::from_value(json!({
-        "schema_version": "grit.pending-mutations/v1",
+        "schema_version": "hyfa.pending-mutations/v1",
         "repository": repository,
         "operations": operations,
     }))

@@ -1,7 +1,7 @@
 use super::{AuthError, AuthToken, Host};
 
 // A dedicated namespace prevents logout from modifying other applications.
-const SERVICE: &str = "org.syntropika.grit.github-auth";
+const SERVICE: &str = "org.syntropika.hyfa.github-auth";
 
 pub(super) trait CredentialStore {
     fn get(&self, host: &Host) -> Result<Option<AuthToken>, AuthError>;
@@ -18,7 +18,7 @@ impl OsCredentialStore {
 
     fn entry(&self, host: &Host) -> Result<keyring::Entry, AuthError> {
         // Useful for headless sessions and hermetic tests; never fall back to plaintext.
-        if std::env::var("GRIT_NO_KEYRING").is_ok_and(|value| value == "1") {
+        if std::env::var("HYFA_NO_KEYRING").is_ok_and(|value| value == "1") {
             return Err(AuthError::SecureStore);
         }
         keyring::Entry::new(SERVICE, &host.0).map_err(|_| AuthError::SecureStore)
@@ -27,7 +27,7 @@ impl OsCredentialStore {
 
 impl CredentialStore for OsCredentialStore {
     fn get(&self, host: &Host) -> Result<Option<AuthToken>, AuthError> {
-        if std::env::var("GRIT_NO_KEYRING").is_ok_and(|value| value == "1") {
+        if std::env::var("HYFA_NO_KEYRING").is_ok_and(|value| value == "1") {
             return Ok(None);
         }
         match self.entry(host)?.get_password() {

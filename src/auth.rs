@@ -21,7 +21,7 @@ use device::{DeviceApi, SystemClock};
 use http::GitHubAuth;
 use store::{CredentialStore, OsCredentialStore};
 
-// Public identifier for Grit's official GitHub.com OAuth app, not a credential.
+// Public identifier for Hyfa's official GitHub.com OAuth app, not a credential.
 const GITHUB_CLIENT_ID: &str = "Ov23lie2fyBwnR4nRGgA";
 
 pub(crate) struct AuthToken {
@@ -143,11 +143,11 @@ impl Host {
 pub(crate) enum AuthCommand {
     /// Sign in with a browser device code or a token read from standard input.
     Login {
-        /// GitHub hostname, defaulting to GRIT_GITHUB_HOST or github.com.
+        /// GitHub hostname, defaulting to HYFA_GITHUB_HOST or github.com.
         #[arg(long)]
         hostname: Option<String>,
-        /// Override the public OAuth client ID; takes precedence over GRIT_GITHUB_CLIENT_ID.
-        /// Defaults to Grit's app on github.com; other hosts require their own app.
+        /// Override the public OAuth client ID; takes precedence over HYFA_GITHUB_CLIENT_ID.
+        /// Defaults to Hyfa's app on github.com; other hosts require their own app.
         #[arg(long, conflicts_with = "with_token")]
         client_id: Option<String>,
         /// Read a token from piped standard input and save it in the OS credential store.
@@ -162,7 +162,7 @@ pub(crate) enum AuthCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Remove Grit's saved credential for this host; leave GH_TOKEN unchanged.
+    /// Remove Hyfa's saved credential for this host; leave GH_TOKEN unchanged.
     Logout {
         #[arg(long)]
         hostname: Option<String>,
@@ -183,7 +183,7 @@ pub(crate) fn execute(command: AuthCommand) -> Result<(), AuthError> {
                 Some(configured_client_id(
                     &host,
                     client_id,
-                    env::var("GRIT_GITHUB_CLIENT_ID").ok(),
+                    env::var("HYFA_GITHUB_CLIENT_ID").ok(),
                 )?)
             };
             // Fail before asking for browser authorization when secure persistence is unavailable.
@@ -216,7 +216,7 @@ pub(crate) fn execute(command: AuthCommand) -> Result<(), AuthError> {
             );
             if token.expires_at.is_some() {
                 eprintln!(
-                    "GitHub issued an expiring credential. Run grit auth login again when it expires; automatic refresh is not supported."
+                    "GitHub issued an expiring credential. Run hyfa auth login again when it expires; automatic refresh is not supported."
                 );
             }
             if env::var("GH_TOKEN").is_ok_and(|value| !value.trim().is_empty()) {
@@ -230,7 +230,7 @@ pub(crate) fn execute(command: AuthCommand) -> Result<(), AuthError> {
             let found = discover_with(env::var("GH_TOKEN").ok(), || OsCredentialStore.get(&host))?;
             let account = GitHubAuth::new(&host)?.account(&found.token)?;
             let status = AuthStatus {
-                schema_version: "grit.auth/v1",
+                schema_version: "hyfa.auth/v1",
                 hostname: &host.0,
                 account: &account,
                 source: found.source,
@@ -254,9 +254,9 @@ pub(crate) fn execute(command: AuthCommand) -> Result<(), AuthError> {
             let host = configured_host(hostname)?;
             let removed = OsCredentialStore.delete(&host)?;
             if removed {
-                println!("Removed Grit's saved credential for {}.", host.0);
+                println!("Removed Hyfa's saved credential for {}.", host.0);
             } else {
-                println!("No Grit credential is saved for {}.", host.0);
+                println!("No Hyfa credential is saved for {}.", host.0);
             }
             println!("GH_TOKEN is unchanged. This does not revoke the token on GitHub.");
         }
@@ -267,7 +267,7 @@ pub(crate) fn execute(command: AuthCommand) -> Result<(), AuthError> {
 fn configured_host(hostname: Option<String>) -> Result<Host, AuthError> {
     Host::parse(
         &hostname
-            .or_else(|| env::var("GRIT_GITHUB_HOST").ok())
+            .or_else(|| env::var("HYFA_GITHUB_HOST").ok())
             .unwrap_or_else(|| "github.com".to_owned()),
     )
 }
@@ -323,14 +323,14 @@ fn verify_and_save(
 #[serde(rename_all = "snake_case")]
 enum CredentialSource {
     Environment,
-    Grit,
+    Hyfa,
 }
 
 impl CredentialSource {
     fn label(self) -> &'static str {
         match self {
             Self::Environment => "GH_TOKEN",
-            Self::Grit => "Grit's OS credential store",
+            Self::Hyfa => "Hyfa's OS credential store",
         }
     }
 }
@@ -354,7 +354,7 @@ fn discover_with(
         token.ensure_current()?;
         return Ok(Discovered {
             token,
-            source: CredentialSource::Grit,
+            source: CredentialSource::Hyfa,
         });
     }
     Err(AuthError::Unavailable)
@@ -374,7 +374,7 @@ struct AuthStatus<'a> {
 #[derive(Debug, Error)]
 pub(crate) enum AuthError {
     #[error(
-        "no saved Grit credential or non-empty GH_TOKEN is available; run grit auth login or set GH_TOKEN"
+        "no saved Hyfa credential or non-empty GH_TOKEN is available; run hyfa auth login or set GH_TOKEN"
     )]
     Unavailable,
     #[error(
@@ -382,7 +382,7 @@ pub(crate) enum AuthError {
     )]
     InvalidHost,
     #[error(
-        "this hostname requires its own GitHub OAuth app client ID: use --client-id or GRIT_GITHUB_CLIENT_ID with device flow enabled; alternatively use grit auth login --with-token or GH_TOKEN"
+        "this hostname requires its own GitHub OAuth app client ID: use --client-id or HYFA_GITHUB_CLIENT_ID with device flow enabled; alternatively use hyfa auth login --with-token or GH_TOKEN"
     )]
     MissingClientId,
     #[error("the GitHub OAuth app client ID is invalid")]
@@ -401,16 +401,16 @@ pub(crate) enum AuthError {
     SecureStore,
     #[error("GitHub authentication request failed; check your connection and try again")]
     Network,
-    #[error("GitHub rejected the credential; run grit auth login again or replace GH_TOKEN")]
+    #[error("GitHub rejected the credential; run hyfa auth login again or replace GH_TOKEN")]
     Rejected,
     #[error("GitHub authentication returned HTTP {0}; no credential was saved")]
     Http(u16),
     #[error("GitHub returned an invalid authentication response; no credential was saved")]
     Response,
-    #[error("GitHub device authorization expired; run grit auth login again")]
+    #[error("GitHub device authorization expired; run hyfa auth login again")]
     Expired,
     #[error(
-        "Grit's saved GitHub credential has expired; run grit auth login again (automatic token refresh is not supported)"
+        "Hyfa's saved GitHub credential has expired; run hyfa auth login again (automatic token refresh is not supported)"
     )]
     CredentialExpired,
     #[error("GitHub device authorization was denied; no credential was saved")]
@@ -419,9 +419,9 @@ pub(crate) enum AuthError {
         "device flow is disabled for this OAuth app; enable it in the app's GitHub settings or use --with-token"
     )]
     DeviceFlowDisabled,
-    #[error("GitHub rejected the OAuth app client ID; check --client-id or GRIT_GITHUB_CLIENT_ID")]
+    #[error("GitHub rejected the OAuth app client ID; check --client-id or HYFA_GITHUB_CLIENT_ID")]
     ClientRejected,
-    #[error("GitHub could not authorize this device; run grit auth login again")]
+    #[error("GitHub could not authorize this device; run hyfa auth login again")]
     DeviceRejected,
     #[error("could not write authentication status output")]
     Output,

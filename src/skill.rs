@@ -17,7 +17,7 @@ const SKILL_MARKDOWN: &str = include_str!("../.skill/SKILL.md");
 pub(crate) enum SkillCommand {
     /// Copy the bundled skill into the selected providers' skill directories, without network access.
     Install {
-        /// Comma-separated provider names, or '*' for all; see grit skill providers.
+        /// Comma-separated provider names, or '*' for all; see hyfa skill providers.
         #[arg(long, default_value = "universal")]
         providers: String,
         /// User scope is supported only for providers with a dedicated user skill directory.
@@ -212,7 +212,7 @@ mod tests {
             || panic!(),
         )
         .unwrap();
-        let staging = parent.join(format!(".grit.tmp-{}", std::process::id()));
+        let staging = parent.join(format!(".hyfa.tmp-{}", std::process::id()));
         fs::write(&staging, "existing work").unwrap();
         assert!(matches!(
             preflight(&request, |_| Ok(parent.clone())),

@@ -12,7 +12,7 @@ use tempfile::TempDir;
 fn canonical_priority_labels_are_rejected_by_the_generic_label_path() {
     let state = TempDir::new().expect("state directory");
     let unavailable = Server::new();
-    let output = grit(&state, &unavailable.url())
+    let output = hyfa(&state, &unavailable.url())
         .env_remove("GH_TOKEN")
         .args(["label", "acme/widgets#1", "--add", "Priority:P0", "--json"])
         .output()
@@ -35,7 +35,7 @@ fn offline_generic_label_uses_set_semantics_and_projects_into_the_working_graph(
     let synchronized = std::fs::read(&replica_path).expect("replica");
     let unavailable = Server::new();
 
-    let first = grit(&state, &unavailable.url())
+    let first = hyfa(&state, &unavailable.url())
         .env_remove("GH_TOKEN")
         .args(["label", "acme/widgets#1", "--add", "area:core", "--json"])
         .output()
@@ -46,7 +46,7 @@ fn offline_generic_label_uses_set_semantics_and_projects_into_the_working_graph(
     assert_eq!(first["label"], "area:core");
     assert_eq!(first["desired_present"], true);
 
-    let ready = grit(&state, &unavailable.url())
+    let ready = hyfa(&state, &unavailable.url())
         .env_remove("GH_TOKEN")
         .args(["ready", "--repo", "acme/widgets", "--json"])
         .output()
@@ -68,7 +68,7 @@ fn pending_parent_relationship_never_changes_dependency_readiness_or_ranking() {
     seed_replica(&mut github, &state);
     let unavailable = Server::new();
 
-    let before = grit(&state, &unavailable.url())
+    let before = hyfa(&state, &unavailable.url())
         .env_remove("GH_TOKEN")
         .args(["next", "--repo", "acme/widgets", "--json"])
         .output()
@@ -76,7 +76,7 @@ fn pending_parent_relationship_never_changes_dependency_readiness_or_ranking() {
     assert_success(&before);
     let before: Value = serde_json::from_slice(&before.stdout).expect("next JSON");
 
-    let parent = grit(&state, &unavailable.url())
+    let parent = hyfa(&state, &unavailable.url())
         .env_remove("GH_TOKEN")
         .args([
             "sub-issue",
@@ -92,7 +92,7 @@ fn pending_parent_relationship_never_changes_dependency_readiness_or_ranking() {
     assert_eq!(parent["pending"], true);
     assert_eq!(parent["relationship"]["kind"], "parent_of");
 
-    let after = grit(&state, &unavailable.url())
+    let after = hyfa(&state, &unavailable.url())
         .env_remove("GH_TOKEN")
         .args(["next", "--repo", "acme/widgets", "--json"])
         .output()
@@ -125,7 +125,7 @@ fn repeated_online_generic_label_add_is_idempotent_and_never_uses_priority_repla
     let writes = mock_generic_label_add(&mut github, Arc::clone(&remote), 1);
     let inventories = mock_dynamic_inventory(&mut github, Arc::clone(&remote), 2, 4);
 
-    let first = grit(&state, &github.url())
+    let first = hyfa(&state, &github.url())
         .args(["label", "acme/widgets#1", "--add", "area:core", "--json"])
         .output()
         .expect("add generic label");
@@ -133,7 +133,7 @@ fn repeated_online_generic_label_add_is_idempotent_and_never_uses_priority_repla
     let first: Value = serde_json::from_slice(&first.stdout).expect("first label JSON");
     assert_eq!(first["result"], "added");
 
-    let second = grit(&state, &github.url())
+    let second = hyfa(&state, &github.url())
         .args(["label", "acme/widgets#1", "--add", "AREA:CORE", "--json"])
         .output()
         .expect("repeat generic label");
@@ -152,7 +152,7 @@ fn duplicate_parent_intents_for_two_drafts_replay_once_after_identity_mapping() 
     let remote = Arc::new(Mutex::new(RemoteRepository::default()));
     let mut seed = Server::new();
     let inventory = mock_dynamic_inventory(&mut seed, Arc::clone(&remote), 1, 0);
-    let synced = grit(&state, &seed.url())
+    let synced = hyfa(&state, &seed.url())
         .args(["sync", "--repo", "acme/widgets", "--json"])
         .output()
         .expect("seed empty replica");
@@ -163,7 +163,7 @@ fn duplicate_parent_intents_for_two_drafts_replay_once_after_identity_mapping() 
     let child = queue_draft(&state, &seed.url(), "Child");
     let unavailable = Server::new();
     for _ in 0..2 {
-        let queued = grit(&state, &unavailable.url())
+        let queued = hyfa(&state, &unavailable.url())
             .env_remove("GH_TOKEN")
             .args([
                 "sub-issue",
@@ -176,7 +176,7 @@ fn duplicate_parent_intents_for_two_drafts_replay_once_after_identity_mapping() 
             .expect("queue duplicate parent relation");
         assert_success(&queued);
     }
-    let queued_label = grit(&state, &unavailable.url())
+    let queued_label = hyfa(&state, &unavailable.url())
         .env_remove("GH_TOKEN")
         .args(["label", child.as_str(), "--add", "area:draft", "--json"])
         .output()
@@ -191,7 +191,7 @@ fn duplicate_parent_intents_for_two_drafts_replay_once_after_identity_mapping() 
     let parent_write = mock_parent_add(&mut github, Arc::clone(&remote), 1);
     let label_write =
         mock_label_add_for_issue(&mut github, Arc::clone(&remote), 2, "area:draft", 1);
-    let reconciled = grit(&state, &github.url())
+    let reconciled = hyfa(&state, &github.url())
         .args(["reconcile", "--repo", "acme/widgets", "--json"])
         .output()
         .expect("reconcile Draft parent relations");
@@ -229,7 +229,7 @@ fn ordered_label_add_then_remove_reconciles_in_one_pass() {
         ["label", "acme/widgets#1", "--add", "area:core", "--json"],
         ["label", "acme/widgets#1", "--remove", "AREA:CORE", "--json"],
     ] {
-        let queued = grit(&state, &unavailable.url())
+        let queued = hyfa(&state, &unavailable.url())
             .env_remove("GH_TOKEN")
             .args(arguments)
             .output()
@@ -246,7 +246,7 @@ fn ordered_label_add_then_remove_reconciles_in_one_pass() {
     let fetches = mock_issue_fetch(&mut github, Arc::clone(&remote), 2);
     let add = mock_generic_label_add(&mut github, Arc::clone(&remote), 1);
     let remove = mock_generic_label_remove(&mut github, Arc::clone(&remote), 1);
-    let reconciled = grit(&state, &github.url())
+    let reconciled = hyfa(&state, &github.url())
         .args(["reconcile", "--repo", "acme/widgets", "--json"])
         .output()
         .expect("reconcile ordered label intents");
@@ -279,7 +279,7 @@ fn online_parent_removal_is_idempotent_set_mutation_not_a_dependency() {
     let subissues = mock_sub_issue_reads(&mut github, Arc::clone(&remote), 1, 2);
     let remove = mock_parent_remove(&mut github, Arc::clone(&remote), 1);
     let inventory = mock_dynamic_inventory(&mut github, Arc::clone(&remote), 1, 2);
-    let output = grit(&state, &github.url())
+    let output = hyfa(&state, &github.url())
         .args([
             "sub-issue",
             "acme/widgets#1",
@@ -327,7 +327,7 @@ fn ambiguous_label_write_is_queued_but_rejected_write_is_not() {
             .with_status(status)
             .expect(1)
             .create();
-        let output = grit(&state, &github.url())
+        let output = hyfa(&state, &github.url())
             .args(["label", "acme/widgets#1", "--add", "area:core", "--json"])
             .output()
             .expect("attempt label mutation");
@@ -371,7 +371,7 @@ fn successful_remote_label_write_with_failed_readback_keeps_local_state_unchange
         .with_status(500)
         .expect(1)
         .create();
-    let output = grit(&state, &github.url())
+    let output = hyfa(&state, &github.url())
         .args(["label", "acme/widgets#1", "--add", "area:core", "--json"])
         .output()
         .expect("mutate with failed readback");
@@ -399,7 +399,7 @@ fn corrupt_persisted_metadata_operand_fails_closed_without_a_panic() {
     let mut github = Server::new();
     seed_replica(&mut github, &state);
     let unavailable = Server::new();
-    let queued = grit(&state, &unavailable.url())
+    let queued = hyfa(&state, &unavailable.url())
         .env_remove("GH_TOKEN")
         .args(["label", "acme/widgets#1", "--add", "area:core", "--json"])
         .output()
@@ -410,7 +410,7 @@ fn corrupt_persisted_metadata_operand_fails_closed_without_a_panic() {
     outbox["operations"][0]["target"]["issue"]["number"] = json!(u64::MAX);
     std::fs::write(&path, serde_json::to_vec_pretty(&outbox).unwrap()).expect("corrupt outbox");
 
-    let output = grit(&state, &unavailable.url())
+    let output = hyfa(&state, &unavailable.url())
         .env_remove("GH_TOKEN")
         .args(["ready", "--repo", "acme/widgets", "--json"])
         .output()
@@ -430,11 +430,11 @@ fn concurrent_generic_label_queues_both_survive_restart() {
     let mut github = Server::new();
     seed_replica(&mut github, &state);
     let unavailable = Server::new();
-    let mut first = grit(&state, &unavailable.url());
+    let mut first = hyfa(&state, &unavailable.url());
     first
         .env_remove("GH_TOKEN")
         .args(["label", "acme/widgets#1", "--add", "area:first", "--json"]);
-    let mut second = grit(&state, &unavailable.url());
+    let mut second = hyfa(&state, &unavailable.url());
     second.env_remove("GH_TOKEN").args([
         "label",
         "acme/widgets#1",
@@ -449,7 +449,7 @@ fn concurrent_generic_label_queues_both_survive_restart() {
 
     let outbox = load_outbox(&state);
     assert_eq!(outbox["operations"].as_array().unwrap().len(), 2);
-    let ready = grit(&state, &unavailable.url())
+    let ready = hyfa(&state, &unavailable.url())
         .env_remove("GH_TOKEN")
         .args(["ready", "--repo", "acme/widgets", "--json"])
         .output()
@@ -520,7 +520,7 @@ fn seed_replica(github: &mut Server, state: &TempDir) {
         .with_body("[]")
         .expect(2)
         .create();
-    let output = grit(state, &github.url())
+    let output = hyfa(state, &github.url())
         .args(["sync", "--repo", "acme/widgets", "--json"])
         .output()
         .expect("seed replica");
@@ -737,7 +737,7 @@ fn mock_label_add_for_issue(
 }
 
 fn queue_draft(state: &TempDir, api_url: &str, title: &str) -> String {
-    let output = grit(state, api_url)
+    let output = hyfa(state, api_url)
         .args([
             "create",
             "--repo",
@@ -882,12 +882,12 @@ fn issue(number: u64) -> Value {
     })
 }
 
-fn grit(state: &TempDir, api_url: &str) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_grit"));
+fn hyfa(state: &TempDir, api_url: &str) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hyfa"));
     command
-        .env("GRIT_NO_KEYRING", "1")
-        .env("GRIT_STATE_DIR", state.path())
-        .env("GRIT_GITHUB_API_URL", api_url)
+        .env("HYFA_NO_KEYRING", "1")
+        .env("HYFA_STATE_DIR", state.path())
+        .env("HYFA_GITHUB_API_URL", api_url)
         .env("GH_TOKEN", "test-token");
     command
 }

@@ -29,7 +29,7 @@ use output::{NextResult, NextSummary};
 use pagerank::PageRank;
 
 pub(crate) const POLICY_VERSION: &str = "next/v1";
-pub(crate) const OUTPUT_SCHEMA_VERSION: &str = "grit.next/v1";
+pub(crate) const OUTPUT_SCHEMA_VERSION: &str = "hyfa.next/v1";
 pub(crate) const DEFAULT_HORIZON: u8 = 3;
 pub(crate) const MIN_HORIZON: u8 = 1;
 pub(crate) const MAX_HORIZON: u8 = 3;
@@ -332,7 +332,7 @@ fn priority(working: &WorkingGraph<'_>, issue: &Issue) -> PriorityComparison {
 fn effective_input_hash(working: &WorkingGraph<'_>, scope: ExecutionScope<'_>) -> String {
     let (mode, assignee) = scope.hash_key();
     let input = json!({
-        "schema_version": "grit.working-input/v1",
+        "schema_version": "hyfa.working-input/v1",
         "working_graph_hash": working.input_hash(),
         "execution_scope": {
             "mode": mode,
@@ -345,7 +345,7 @@ fn effective_input_hash(working: &WorkingGraph<'_>, scope: ExecutionScope<'_>) -
 
 fn ranking_cache_key(input_hash: &str, horizon: u8) -> String {
     let input = json!({
-        "schema_version": "grit.ranking-cache-key/v1",
+        "schema_version": "hyfa.ranking-cache-key/v1",
         "effective_input_hash": input_hash,
         "policy_version": POLICY_VERSION,
         "parameters": {

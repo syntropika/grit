@@ -1,26 +1,41 @@
 # Changelog
 
+## 0.2.0
+
+- Rename the CLI to `hyfa`, the source package to `syntropika-hyfa`, and the
+  repository to [`syntropika/hyfa`](https://github.com/syntropika/hyfa).
+- Ship `hyfa-v0.2.0-TARGET.tar.gz` archives containing the `hyfa` executable.
+  Update the graph explorers, bundled agent skill, documentation, and workflows.
+- Use `HYFA_*` environment variables, `hyfa.*` JSON schema identifiers, a
+  `hyfa` local state directory, and a separate Hyfa credential-store entry.
+  Scripts and integrations must adopt these names before upgrading.
+- Finish reconciling pending changes with the previous CLI before upgrading,
+  then run `hyfa auth login` and `hyfa sync --repo OWNER/REPO`. Existing state
+  and saved credentials are preserved but are not migrated automatically.
+- Continue recognizing historical operation markers in GitHub content so they
+  remain hidden and ambiguous writes can still be identified.
+
 ## 0.1.1
 
-- Use Grit's official OAuth App by default for browser login on GitHub.com:
-  run `grit auth login` without supplying a Client ID.
-- Keep custom app configuration through `--client-id` and
-  `GRIT_GITHUB_CLIENT_ID`. GitHub Enterprise hosts require their own app.
+- Use the official OAuth App by default for browser login on GitHub.com,
+  without requiring users to supply a Client ID.
+- Keep custom app configuration through `--client-id` and the environment.
+  GitHub Enterprise hosts require their own app.
 - Update the installation guide and quickstart for the configured login.
-- Bundle a Grit usage skill and install it offline with `grit skill install`,
-  using the native `skillinstaller` library for provider destinations.
-- Prepare source packaging as `syntropika-grit` while keeping the executable
-  named `grit`. Include the agent skill in source and binary distributions;
-  registry publication is deferred.
+- Bundle a usage skill and install it offline with the `skill install`
+  subcommand, using the native `skillinstaller` library for provider destinations.
+- Prepare source packaging with an organization-prefixed package name.
+  Include the agent skill in source and binary distributions; registry
+  publication is deferred.
 
 ## 0.1.0
 
-First release of Grit, a CLI for choosing executable work from GitHub Issues
+First public release of the CLI, for choosing executable work from GitHub Issues
 and understanding what it can unblock.
 
 - Sign in using browser device authorization or a token
   supplied on standard input. Store credentials in the operating system's
-  secure store; inspect the active account and remove Grit's saved login.
+  secure store; inspect the active account and remove the saved login.
 - Synchronize native Issue dependencies into a validated local replica.
   Analyze the latest successful snapshot when GitHub is unavailable.
 - List ready work, recommend a next Issue with bounded rollout evidence,

@@ -1,4 +1,4 @@
-# Grit usage guide
+# Hyfa usage guide
 
 This guide describes commands, synchronization, offline changes, and generated
 graphs. Start with the [README](../README.md) for a quick introduction and
@@ -8,46 +8,46 @@ graphs. Start with the [README](../README.md) for a quick introduction and
 
 | Task | Command |
 | --- | --- |
-| Sign in through a browser | `grit auth login` |
-| Inspect the active GitHub account | `grit auth status` |
-| Remove Grit's saved login | `grit auth logout` |
-| Install agent usage instructions in this project | `grit skill install` |
-| List supported skill providers | `grit skill providers` |
-| Refresh the local snapshot | `grit sync --repo OWNER/REPO` |
-| List executable Issues | `grit ready --repo OWNER/REPO` |
-| Recommend the next Issue | `grit next --repo OWNER/REPO` |
-| Inspect parallel work and dependency layers | `grit plan --repo OWNER/REPO` |
-| Diagnose blockers and cycles | `grit triage --repo OWNER/REPO` |
-| Generate the browser explorer | `grit graph --repo OWNER/REPO --output site/` |
-| Initialize priority labels | `grit init --repo OWNER/REPO` |
-| Apply pending changes | `grit reconcile --repo OWNER/REPO` |
+| Sign in through a browser | `hyfa auth login` |
+| Inspect the active GitHub account | `hyfa auth status` |
+| Remove Hyfa's saved login | `hyfa auth logout` |
+| Install agent usage instructions in this project | `hyfa skill install` |
+| List supported skill providers | `hyfa skill providers` |
+| Refresh the local snapshot | `hyfa sync --repo OWNER/REPO` |
+| List executable Issues | `hyfa ready --repo OWNER/REPO` |
+| Recommend the next Issue | `hyfa next --repo OWNER/REPO` |
+| Inspect parallel work and dependency layers | `hyfa plan --repo OWNER/REPO` |
+| Diagnose blockers and cycles | `hyfa triage --repo OWNER/REPO` |
+| Generate the browser explorer | `hyfa graph --repo OWNER/REPO --output site/` |
+| Initialize priority labels | `hyfa init --repo OWNER/REPO` |
+| Apply pending changes | `hyfa reconcile --repo OWNER/REPO` |
 
-Most commands accept `--json`. Run `grit COMMAND --help` for all arguments.
+Most commands accept `--json`. Run `hyfa COMMAND --help` for all arguments.
 Read commands attempt a GitHub refresh and can use the last valid snapshot
 when offline. They never replay pending writes.
 
 ## Synchronize a Repository
 
-Grit uses a non-empty `GH_TOKEN` first, then its host-specific saved credential.
+Hyfa uses a non-empty `GH_TOKEN` first, then its host-specific saved credential.
 See [authentication](installation.md#connect-to-github) for browser login, piped
 token login, and headless use:
 
 ```bash
-grit sync --repo OWNER/REPO
-grit sync --repo OWNER/REPO --json
+hyfa sync --repo OWNER/REPO
+hyfa sync --repo OWNER/REPO --json
 ```
 
-`--json` emits the versioned `grit.sync/v1` result envelope with Repository
+`--json` emits the versioned `hyfa.sync/v1` result envelope with Repository
 scope, `synced_at`, a deterministic input hash, and normalized entity counts.
 Neither output mode includes credentials or raw GitHub responses.
 
 The Local replica uses the operating system's application-data directory.
-Set `GRIT_STATE_DIR` to isolate it, for example in CI. `GRIT_GITHUB_API_URL`
-and `GRIT_GITHUB_HOST` support GitHub Enterprise and deterministic test
+Set `HYFA_STATE_DIR` to isolate it, for example in CI. `HYFA_GITHUB_API_URL`
+and `HYFA_GITHUB_HOST` support GitHub Enterprise and deterministic test
 servers; the API URL must be a credential-free HTTP(S) base URL.
-Saved Grit credentials are sent only to the selected host's canonical HTTPS
+Saved Hyfa credentials are sent only to the selected host's canonical HTTPS
 API. A custom API override requires an explicit environment token.
-Set `GRIT_NO_KEYRING=1` in tests to disable credential-store
+Set `HYFA_NO_KEYRING=1` in tests to disable credential-store
 discovery independently of local snapshot storage.
 
 The first synchronization retrieves every page of Issues and Repository Issue
@@ -61,31 +61,31 @@ representation fit in fewer than 100 items; it is never treated as a
 Repository-wide continuity guarantee.
 
 Dependency additions and removals use a separate Repository event checkpoint.
-Grit canonicalizes the mirrored `blocked_by` and `blocking` events into one
+Hyfa canonicalizes the mirrored `blocked_by` and `blocking` events into one
 edge direction and fetches any referenced in-scope Issue absent from the Local
 replica. A one-request GraphQL count probe also detects Issues that disappeared
 without a REST delta tombstone. If that count diverges, the checkpoint
 disappears from the available event history, no event-ID anchor exists, an
 event cannot be interpreted safely, or an Issue was transferred or deleted,
-Grit discards the partial delta and performs a Full reconciliation before
+Hyfa discards the partial delta and performs a Full reconciliation before
 publishing anything.
 
-Grit writes only a normalized model and atomically replaces the previous valid
+Hyfa writes only a normalized model and atomically replaces the previous valid
 replica after every required page has completed. A failed or rate-limited delta
 leaves the prior replica, internal watermark, and visible `synced_at` intact.
 
-The replica file format and location below `GRIT_STATE_DIR` are implementation
-details. Consumers should use Grit's versioned command output rather than read
+The replica file format and location below `HYFA_STATE_DIR` are implementation
+details. Consumers should use Hyfa's versioned command output rather than read
 the replica directly.
 
 ## Initialize Declared priority
 
-Grit v1 reads Declared priority only from `priority:p0` through `priority:p4`
+Hyfa v1 reads Declared priority only from `priority:p0` through `priority:p4`
 labels. Initialize missing labels explicitly:
 
 ```bash
-grit init --repo OWNER/REPO
-grit init --repo OWNER/REPO --json
+hyfa init --repo OWNER/REPO
+hyfa init --repo OWNER/REPO --json
 ```
 
 Initialization creates only missing canonical names. It never renames,
@@ -95,28 +95,28 @@ converge without further changes. Read commands never create labels.
 Update one Issue's logical Priority with a full Issue reference:
 
 ```bash
-grit update OWNER/REPO#NUMBER --priority p0
-grit update OWNER/REPO#NUMBER --priority none --json
+hyfa update OWNER/REPO#NUMBER --priority p0
+hyfa update OWNER/REPO#NUMBER --priority none --json
 ```
 
 A concrete value removes every other canonical Priority label and leaves
-exactly the requested one; `none` removes all canonical Priority labels. Grit
+exactly the requested one; `none` removes all canonical Priority labels. Hyfa
 preserves non-Priority labels and every other Issue field. It writes GitHub
 first, then synchronizes and verifies the logical result before publishing the
-Local replica. If GitHub is unavailable before Grit can confirm the update,
-Grit instead appends a versioned Pending mutation to a durable outbox. Each
+Local replica. If GitHub is unavailable before Hyfa can confirm the update,
+Hyfa instead appends a versioned Pending mutation to a durable outbox. Each
 operation retains the logical base and desired values; it never edits the Local
 replica or advances `synced_at`. The output reports both the previous and
 resulting Priority and whether the result is synchronized or pending.
 
 ## Enumerate Executable work
 
-`grit ready` refreshes the Local replica and lists the complete Executable
+`hyfa ready` refreshes the Local replica and lists the complete Executable
 frontier in ascending Issue-number order:
 
 ```bash
-grit ready --repo OWNER/REPO
-grit ready --repo OWNER/REPO --assignee LOGIN --json
+hyfa ready --repo OWNER/REPO
+hyfa ready --repo OWNER/REPO --assignee LOGIN --json
 ```
 
 Without `--assignee`, the Execution scope contains Ready unassigned Issues.
@@ -139,14 +139,14 @@ valid replica exists, the command fails instead of inventing an empty graph.
 
 ## Recommend the next Issue
 
-`grit next` evaluates rollouts of up to three Executable completions. Three is
+`hyfa next` evaluates rollouts of up to three Executable completions. Three is
 the default Planning horizon; horizons one and two remain available:
 
 ```bash
-grit next --repo OWNER/REPO
-grit next --repo OWNER/REPO --horizon 1
-grit next --repo OWNER/REPO --assignee LOGIN --horizon 3 --json
-grit next --repo OWNER/REPO --profile --json
+hyfa next --repo OWNER/REPO
+hyfa next --repo OWNER/REPO --horizon 1
+hyfa next --repo OWNER/REPO --assignee LOGIN --horizon 3 --json
+hyfa next --repo OWNER/REPO --profile --json
 ```
 
 The `next/v1` policy first enforces Executable P0 and feasible P0-route gates within the remaining Planning horizon.
@@ -186,12 +186,12 @@ the 5,000-Issue reference benchmark.
 
 ## Inspect a structural plan
 
-`grit plan` exposes the exact `next/v1` decision together with immediate
+`hyfa plan` exposes the exact `next/v1` decision together with immediate
 parallel capacity and counterfactual Dependency layers:
 
 ```bash
-grit plan --repo OWNER/REPO
-grit plan --repo OWNER/REPO --assignee LOGIN --horizon 3 --json
+hyfa plan --repo OWNER/REPO
+hyfa plan --repo OWNER/REPO --assignee LOGIN --horizon 3 --json
 ```
 
 `plan` and `next` share the same Working graph, ordered Pending mutations,
@@ -207,7 +207,7 @@ latest layer of all its open blockers. Every Issue records assignment,
 Execution-scope eligibility, and whether it is Executable now.
 
 Cycles, opaque External blockers, unknown internal blockers, and their
-affected descendants remain in `unresolved`; Grit does not assign them a
+affected descendants remain in `unresolved`; Hyfa does not assign them a
 misleading finite layer. These layers describe dependency topology under
 unlimited structural capacity. They are not dates, worker rounds, an ETA, or
 a Critical Path. `plan/v1` therefore rejects `--workers` explicitly.
@@ -217,19 +217,19 @@ a Critical Path. `plan/v1` therefore rejects `--workers` explicitly.
 Create a Draft Issue locally when authoring must continue without GitHub:
 
 ```bash
-grit create --repo OWNER/REPO --title "Prepare the migration" --body "Acceptance notes"
-grit create --repo OWNER/REPO --title "Prepare the migration" --json
+hyfa create --repo OWNER/REPO --title "Prepare the migration" --body "Acceptance notes"
+hyfa create --repo OWNER/REPO --title "Prepare the migration" --json
 ```
 
 Creation returns a stable Temporary Issue ID and a key such as
 `OWNER/REPO#draft:TEMPORARY_ID`. The Draft participates provisionally in
 `ready` and `next`; that key can also be passed to `block` or `unblock` before
-GitHub assigns an Issue number. `grit reconcile` creates referenced Drafts
+GitHub assigns an Issue number. `hyfa reconcile` creates referenced Drafts
 before their dependent operations, stores the permanent number and node ID,
 and retains the temporary alias.
 
 Every non-idempotent create has a random, non-secret Operation marker persisted
-before the request. Grit embeds it in an invisible Markdown comment, removes it
+before the request. Hyfa embeds it in an invisible Markdown comment, removes it
 from normalized and user-facing data, and uses it only to recover an ambiguous
 response. Exactly one remote match is accepted; zero or multiple matches stay
 unresolved and are never retried blindly.
@@ -239,11 +239,11 @@ unresolved and are never retried blindly.
 Add Markdown comments to a synchronized Issue or a Draft Issue:
 
 ```bash
-grit comment OWNER/REPO#42 --body "Deployment note"
-grit comment OWNER/REPO#draft:TEMPORARY_ID --body "Offline finding" --json
+hyfa comment OWNER/REPO#42 --body "Deployment note"
+hyfa comment OWNER/REPO#draft:TEMPORARY_ID --body "Offline finding" --json
 ```
 
-Grit persists the comment intent and a random Operation marker before making
+Hyfa persists the comment intent and a random Operation marker before making
 the GitHub request. With connectivity it immediately reconciles and publishes
 only verified readback; without connectivity it leaves a Pending comment in
 the Working graph. A comment on an unresolved Draft waits for that Draft's
@@ -258,22 +258,22 @@ normalized comment data consumed by graph and public serializers.
 `update` changes exactly one logical field per invocation:
 
 ```bash
-grit update OWNER/REPO#42 --title "A clearer title"
-grit update OWNER/REPO#42 --body "Revised Markdown"
-grit update OWNER/REPO#42 --state closed
-grit update OWNER/REPO#42 --assignee alice --assignee bob
-grit update OWNER/REPO#42 --clear-assignees
-grit update OWNER/REPO#42 --priority p1
+hyfa update OWNER/REPO#42 --title "A clearer title"
+hyfa update OWNER/REPO#42 --body "Revised Markdown"
+hyfa update OWNER/REPO#42 --state closed
+hyfa update OWNER/REPO#42 --assignee alice --assignee bob
+hyfa update OWNER/REPO#42 --clear-assignees
+hyfa update OWNER/REPO#42 --priority p1
 ```
 
 Title, body, state, and assignment also accept a Draft key such as
 `OWNER/REPO#draft:TEMPORARY_ID`. Canonical Issues are updated online when
-GitHub is available; otherwise Grit records the base and desired values in the
+GitHub is available; otherwise Hyfa records the base and desired values in the
 outbox and projects the desired field into `ready` and `next` without changing
-the Local replica. `grit reconcile` applies a Pending field only when GitHub
+the Local replica. `hyfa reconcile` applies a Pending field only when GitHub
 still matches its base, treats the desired remote value as already satisfied,
 and exposes incompatible base/local/remote values as a conflict. Resolve a
-conflict explicitly with `grit resolve OPERATION --repo OWNER/REPO --local` or
+conflict explicitly with `hyfa resolve OPERATION --repo OWNER/REPO --local` or
 `--remote`; resolution always performs a fresh GitHub read before any write.
 
 ## Change generic labels and parent relationships
@@ -281,35 +281,35 @@ conflict explicitly with `grit resolve OPERATION --repo OWNER/REPO --local` or
 Generic labels use independent add/remove set semantics:
 
 ```bash
-grit label OWNER/REPO#42 --add area:backend
-grit label OWNER/REPO#42 --remove risk:high
+hyfa label OWNER/REPO#42 --add area:backend
+hyfa label OWNER/REPO#42 --remove risk:high
 ```
 
 Canonical `priority:p0` through `priority:p4` labels are rejected here; change
-them only through `grit update ISSUE --priority`. Both generic-label commands
+them only through `hyfa update ISSUE --priority`. Both generic-label commands
 accept Draft keys and project Pending changes without editing the Local
 replica.
 
 Parent relationships use a separate sub-Issue command:
 
 ```bash
-grit sub-issue OWNER/REPO#10 --add OWNER/REPO#42
-grit sub-issue OWNER/REPO#10 --remove OWNER/REPO#42
+hyfa sub-issue OWNER/REPO#10 --add OWNER/REPO#42
+hyfa sub-issue OWNER/REPO#10 --remove OWNER/REPO#42
 ```
 
-The first reference is the parent. Grit queues unresolved Draft identities and
+The first reference is the parent. Hyfa queues unresolved Draft identities and
 replays the relationship after GitHub assigns their Issue IDs. Parent/sub-Issue
 relationships are decomposition metadata: they are never projected as
 Dependencies and do not affect readiness or ranking topology.
 
 ## Triage graph problems
 
-`grit triage` explains actionable graph problems without treating blocked work
+`hyfa triage` explains actionable graph problems without treating blocked work
 as executable:
 
 ```bash
-grit triage --repo OWNER/REPO
-grit triage --repo OWNER/REPO --assignee LOGIN --json
+hyfa triage --repo OWNER/REPO
+hyfa triage --repo OWNER/REPO --assignee LOGIN --json
 ```
 
 Diagnostics cover blocked P0 Issues, open or unknown External blockers, cyclic
@@ -327,16 +327,16 @@ unchanged `synced_at`.
 Use full Issue references so the direction remains explicit:
 
 ```bash
-grit block OWNER/REPO#42 --by OWNER/REPO#7
-grit unblock OWNER/REPO#42 --by OWNER/REPO#7 --json
+hyfa block OWNER/REPO#42 --by OWNER/REPO#7
+hyfa unblock OWNER/REPO#42 --by OWNER/REPO#7 --json
 ```
 
-The first command means “Issue #42 is blocked by Issue #7.” Grit writes the
+The first command means “Issue #42 is blocked by Issue #7.” Hyfa writes the
 native GitHub `blocked_by` relationship, then performs a complete synchronized
 readback before atomically replacing the Local replica. Repeating either
 operation uses set semantics: an existing edge can be added again and an absent
 edge can be removed again without error. If GitHub is unavailable or the write
-outcome is ambiguous and a valid Local replica exists, Grit queues the intent,
+outcome is ambiguous and a valid Local replica exists, Hyfa queues the intent,
 leaves that replica unchanged, and immediately projects the edge into offline
 readiness and ranking. A blocker from another Repository is preserved as an
 opaque External blocker with unknown state until GitHub can synchronize it.
@@ -344,8 +344,8 @@ opaque External blocker with unknown state until GitHub can synchronize it.
 Apply queued work explicitly after connectivity returns:
 
 ```bash
-grit reconcile --repo OWNER/REPO
-grit reconcile --repo OWNER/REPO --json
+hyfa reconcile --repo OWNER/REPO
+hyfa reconcile --repo OWNER/REPO --json
 ```
 
 Reconciliation refreshes GitHub first, applies each independent mutation
@@ -358,13 +358,13 @@ mutations that declare it as a prerequisite.
 
 ## Generate a static graph artifact
 
-`grit graph` writes a complete static site without a live service or
+`hyfa graph` writes a complete static site without a live service or
 browser-side GitHub client:
 
 ```bash
-grit graph --repo OWNER/REPO --output site/
-grit graph --repo OWNER/REPO --output site/ --json
-grit graph --repo OWNER/REPO --output site/ --assignee LOGIN --horizon 3
+hyfa graph --repo OWNER/REPO --output site/
+hyfa graph --repo OWNER/REPO --output site/ --json
+hyfa graph --repo OWNER/REPO --output site/ --assignee LOGIN --horizon 3
 ```
 
 Open `site/index.html` directly in a browser. The full explorer includes closed
@@ -377,10 +377,10 @@ accessible table below it. Fit the entire network, zoom around a point, or drag
 to pan; camera movements never change the positions or analysis stored in the
 artifact. Expand the map for immersive exploration. Advanced filters and
 relationship tools remain available alongside the map.
-The default Network view uses spatial coordinates calculated by Grit. Switch
+The default Network view uses spatial coordinates calculated by Hyfa. Switch
 to Dependency layers to inspect the structural arrangement. Both views use the
 same Issues, Dependencies, filters, and recommendation evidence.
-Historical dependencies use a separate arrangement calculated by Grit. Closed
+Historical dependencies use a separate arrangement calculated by Hyfa. Closed
 Issues have no operational dependency layer; the table identifies them as
 history instead of presenting them as unresolved work.
 
@@ -390,7 +390,7 @@ The target contains `index.html`, `app.css`, `graph-query.js`, `network-view.js`
 edge roles, normalized Issue fields, precomputed layered positions,
 operational counts, hashes, and provenance. Bodies, comments, raw API records,
 and Operation markers are not part of the artifact.
-The HTML also embeds `grit.graph-presentation/v1` data with precomputed network
+The HTML also embeds `hyfa.graph-presentation/v1` data with precomputed network
 coordinates. `graph.json` retains its dependency-layer positions; switching the
 browser view does not modify that artifact or its analysis.
 
@@ -400,7 +400,7 @@ Older artifacts without a closure reason remain readable and are treated as
 other closed work. Outcome presentation never changes operational readiness
 or ranking: closed Issues are not candidates for the next recommendation.
 
-The `grit.graph-artifact/v2` artifact also carries the exact precomputed `next/v1` analysis and the
+The `hyfa.graph-artifact/v2` artifact also carries the exact precomputed `next/v1` analysis and the
 matching structural `plan` for its Execution scope and horizon. Its summary
 shows the recommendation, decisive reason, distinct runner-up, search
 completeness, immediate parallel work, unresolved cycles, and unknown External
@@ -456,10 +456,10 @@ requested Repository. A Local replica never substitutes for this live
 visibility check.
 
 ```bash
-grit graph --repo OWNER/REPO --output site-public/ --public
-grit graph --repo OWNER/REPO --output site-public/ --public \
+hyfa graph --repo OWNER/REPO --output site-public/ --public
+hyfa graph --repo OWNER/REPO --output site-public/ --public \
   --public-label-prefix area: --public-label-prefix priority:
-grit graph --repo OWNER/REPO --output site-public/ --public \
+hyfa graph --repo OWNER/REPO --output site-public/ --public \
   --public-include-assignees
 ```
 
@@ -476,7 +476,7 @@ topology never enter the public model. Changes to excluded history, private
 text, identities, assignees, labels, or External-blocker details cannot change
 the public hash, readiness, ordering, internal edges, or coordinates.
 
-Before publication, Grit reparses and validates every JSON document in the
+Before publication, Hyfa reparses and validates every JSON document in the
 complete public staging directory, verifies its closed manifest and local
 runtime policy, scans every byte for excluded fixture values and common secret
 signatures, and only then atomically exchanges it with the previous sealed
@@ -485,10 +485,10 @@ remote assets, analytics, API clients, and service workers are rejected.
 
 ### Deploy the sealed graph to GitHub Pages
 
-The bundled Pages workflow builds Grit and runs the same fail-closed public
+The bundled Pages workflow builds Hyfa and runs the same fail-closed public
 generation path on pushes to `main`, every six hours, and on explicit manual
 runs. Build and deployment use separate jobs. Only the build job can read
-Issues; its `GITHUB_TOKEN` is exposed to Grit as `GH_TOKEN` only for graph
+Issues; its `GITHUB_TOKEN` is exposed to Hyfa as `GH_TOKEN` only for graph
 generation. The deployment job receives a separate job token that can write
 Pages but cannot read Issues.
 

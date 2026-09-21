@@ -37,7 +37,7 @@ fn update_repairs_a_conflict_and_preserves_concurrently_added_non_priority_label
         .expect("priority update");
     assert_success(&output);
     let output: Value = serde_json::from_slice(&output.stdout).expect("update JSON");
-    assert_eq!(output["schema_version"], "grit.priority-update/v1");
+    assert_eq!(output["schema_version"], "hyfa.priority-update/v1");
     assert_eq!(output["command"], "update");
     assert_eq!(output["repository"], "acme/widgets");
     assert_eq!(output["issue"]["key"], "acme/widgets#7");
@@ -333,16 +333,16 @@ fn update_command(state: &TempDir, api_url: &str, priority: &str, json: bool) ->
 }
 
 fn update_command_at(state: &Path, api_url: &str, priority: &str, json: bool) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_grit"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hyfa"));
     command.args(["update", "acme/widgets#7", "--priority", priority]);
     if json {
         command.arg("--json");
     }
     command
         .env("GH_TOKEN", "automation-token")
-        .env("GRIT_GITHUB_API_URL", api_url)
-        .env("GRIT_NO_KEYRING", "1")
-        .env("GRIT_STATE_DIR", state)
+        .env("HYFA_GITHUB_API_URL", api_url)
+        .env("HYFA_NO_KEYRING", "1")
+        .env("HYFA_STATE_DIR", state)
         .env("PATH", "");
     command
 }

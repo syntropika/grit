@@ -8,7 +8,7 @@ mod support;
 
 use support::browser::audit_local_page;
 
-const PUBLIC_ARTIFACT_SCHEMA: &str = "grit.public-graph/v1";
+const PUBLIC_ARTIFACT_SCHEMA: &str = "hyfa.public-graph/v1";
 
 #[test]
 fn pages_workflow_has_least_privilege_and_uploads_the_sealed_contract() {
@@ -61,7 +61,7 @@ fn pages_workflow_has_least_privilege_and_uploads_the_sealed_contract() {
         string_mapping(&graph_step["env"]),
         [
             ("GH_TOKEN", "${{ secrets.GITHUB_TOKEN }}"),
-            ("GRIT_STATE_DIR", "${{ runner.temp }}/grit-state"),
+            ("HYFA_STATE_DIR", "${{ runner.temp }}/hyfa-state"),
         ]
         .into_iter()
         .map(|(key, value)| (key.to_owned(), value.to_owned()))
@@ -75,7 +75,7 @@ fn pages_workflow_has_least_privilege_and_uploads_the_sealed_contract() {
         .join(" ");
     assert_eq!(
         command,
-        "./target/release/grit graph --repo \"${{ github.repository }}\" --output site-public/ --public"
+        "./target/release/hyfa graph --repo \"${{ github.repository }}\" --output site-public/ --public"
     );
     for step in build_steps {
         if step != graph_step {
@@ -124,7 +124,7 @@ fn pages_workflow_has_least_privilege_and_uploads_the_sealed_contract() {
     );
     assert_eq!(
         workflow["concurrency"]["group"].as_str(),
-        Some("grit-pages")
+        Some("hyfa-pages")
     );
     assert_eq!(
         workflow["concurrency"]["cancel-in-progress"].as_bool(),
@@ -325,7 +325,12 @@ fn generate_adversarial_public_site() -> GeneratedPublicSite {
     let issues = json!([
         issue(
             1,
-            "Root fetch() ServiceWorker <script>alert('title')</script><!-- grit:operation operation-secret -->",
+            concat!(
+                "Root fetch() ServiceWorker <script>alert('title')</script>",
+                "<!-- hyfa:operation operation-secret -->",
+                "<!-- grit:operation historical-secret -->",
+                "<!-- grit-operation:6ba7b810-9dad-11d1-80b4-00c04fd430c8 -->",
+            ),
             "open",
             101,
             "root body secret",
@@ -461,7 +466,7 @@ fn public_export_ignores_pending_drafts_fields_and_comments_after_live_visibilit
             "--json",
         ],
     ] {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_grit"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_hyfa"));
         command.args(arguments);
         configure(&mut command, &state, &github.url());
         command.env_remove("GH_TOKEN");
@@ -596,7 +601,7 @@ fn sealed_public_bundle_executes_no_user_markup_or_external_request() {
     )
     .expect("browser harness JavaScript");
 
-    let browser_binary = std::env::var_os("GRIT_BROWSER").unwrap_or_else(|| "google-chrome".into());
+    let browser_binary = std::env::var_os("HYFA_BROWSER").unwrap_or_else(|| "google-chrome".into());
     let browser_profile = TempDir::new().expect("temporary browser profile");
     let audit = audit_local_page(&browser_binary, browser_profile.path(), &harness);
     let result = audit.result;
@@ -621,7 +626,7 @@ fn browser_network_audit_detects_an_external_request_attempt() {
     )
     .expect("external request fixture");
     let profile = TempDir::new().expect("temporary browser profile");
-    let browser_binary = std::env::var_os("GRIT_BROWSER").unwrap_or_else(|| "google-chrome".into());
+    let browser_binary = std::env::var_os("HYFA_BROWSER").unwrap_or_else(|| "google-chrome".into());
 
     let audit = audit_local_page(&browser_binary, profile.path(), &page);
 
@@ -695,6 +700,8 @@ fn public_projection_excludes_private_fields_and_anonymizes_external_blockers() 
         "body secret",
         "Closed history secret",
         "operation-secret",
+        "historical-secret",
+        "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
         "label-operation",
         "secret:customer",
         "risk:high",
@@ -890,7 +897,7 @@ fn hidden_variant(second: bool) -> HiddenVariant {
 }
 
 fn public_graph_command(state: &TempDir, api_url: &str, output: &std::path::Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_grit"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hyfa"));
     command.args(["graph", "--repo", "acme/widgets", "--output"]);
     command.arg(output);
     command.args(["--public", "--json"]);
@@ -899,7 +906,7 @@ fn public_graph_command(state: &TempDir, api_url: &str, output: &std::path::Path
 }
 
 fn sync_command(state: &TempDir, api_url: &str) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_grit"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hyfa"));
     command.args(["sync", "--repo", "acme/widgets", "--json"]);
     configure(&mut command, state, api_url);
     command
@@ -908,9 +915,9 @@ fn sync_command(state: &TempDir, api_url: &str) -> Command {
 fn configure(command: &mut Command, state: &TempDir, api_url: &str) {
     command
         .env("GH_TOKEN", "automation-token")
-        .env("GRIT_GITHUB_API_URL", api_url)
-        .env("GRIT_NO_KEYRING", "1")
-        .env("GRIT_STATE_DIR", state.path())
+        .env("HYFA_GITHUB_API_URL", api_url)
+        .env("HYFA_NO_KEYRING", "1")
+        .env("HYFA_STATE_DIR", state.path())
         .env("PATH", "");
 }
 
@@ -1050,7 +1057,7 @@ fn issue(number: u64, title: &str, state: &str, id: u64, body: &str, assignee: &
         "user": {"id": 8000 + number, "node_id": format!("U_{number}"), "login": "author"},
         "assignees": [{"id": 9000 + number, "node_id": format!("A_{number}"), "login": assignee}],
         "labels": [
-            {"id": 10000 + number, "node_id": format!("L_area_{number}"), "name": "area:backend<img src=x onerror=alert(2)><!-- grit:operation label-operation -->", "color": "123456", "description": null},
+            {"id": 10000 + number, "node_id": format!("L_area_{number}"), "name": "area:backend<img src=x onerror=alert(2)><!-- hyfa:operation label-operation -->", "color": "123456", "description": null},
             {"id": 11000 + number, "node_id": "L_secret", "name": "secret:customer", "color": "654321", "description": "private"},
             {"id": 12000 + number, "node_id": format!("L_risk_{number}"), "name": "risk:high", "color": "abcdef", "description": null},
             {"id": 13000 + number, "node_id": format!("L_ready_{number}"), "name": "ready", "color": "abcdef", "description": null},

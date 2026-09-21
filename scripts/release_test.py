@@ -84,9 +84,9 @@ class ReleaseGuards(unittest.TestCase):
             for filename in release.ARCHIVE_FILES:
                 data = json.dumps(metadata).encode() if filename == "release.json" else b"fixture"
                 info = tarfile.TarInfo(f"{name}/{filename}")
-                info.mode = 0o755 if filename == "grit" else 0o644
+                info.mode = 0o755 if filename == "hyfa" else 0o644
                 info.size = len(data)
-                if unsafe and filename == "grit":
+                if unsafe and filename == "hyfa":
                     info.type = tarfile.SYMTYPE
                     info.linkname = "/unexpected/binary"
                     info.size = 0
@@ -111,20 +111,20 @@ class ReleaseGuards(unittest.TestCase):
     def test_linux_binary_cannot_claim_an_older_glibc_floor(self):
         with patch.object(release, "command", return_value="Name: GLIBC_2.34\nName: GLIBC_2.39"):
             with self.assertRaisesRegex(ValueError, "requires glibc 2.39"):
-                release.platform_requirement(Path("grit"), "x86_64-unknown-linux-gnu")
+                release.platform_requirement(Path("hyfa"), "x86_64-unknown-linux-gnu")
 
     def test_linux_binary_with_compatible_symbols_is_accepted(self):
         with patch.object(release, "command", return_value="Name: GLIBC_2.9\nName: GLIBC_2.34"):
-            self.assertEqual(release.platform_requirement(Path("grit"), "aarch64-unknown-linux-gnu"), "glibc 2.34")
+            self.assertEqual(release.platform_requirement(Path("hyfa"), "aarch64-unknown-linux-gnu"), "glibc 2.34")
 
     def test_macos_deployment_target_is_checked_in_binary(self):
         for minimum, allowed in (("13.0", True), ("13.0.0", True), ("13.0.1", False), ("14.0", False)):
             with patch.object(release, "command", return_value=f"cmd LC_BUILD_VERSION\ncmdsize 32\nplatform 1\nminos {minimum}\nsdk 15.5"):
                 if allowed:
-                    self.assertEqual(release.platform_requirement(Path("grit"), "aarch64-apple-darwin"), f"macOS {minimum}")
+                    self.assertEqual(release.platform_requirement(Path("hyfa"), "aarch64-apple-darwin"), f"macOS {minimum}")
                 else:
                     with self.assertRaisesRegex(ValueError, f"requires macOS {minimum}"):
-                        release.platform_requirement(Path("grit"), "aarch64-apple-darwin")
+                        release.platform_requirement(Path("hyfa"), "aarch64-apple-darwin")
 
     def test_macos_linker_tool_version_is_not_a_deployment_requirement(self):
         output = """Load command 10
@@ -142,19 +142,19 @@ Load command 11
   version 0.0
 """
         with patch.object(release, "command", return_value=output):
-            self.assertEqual(release.platform_requirement(Path("grit"), "aarch64-apple-darwin"), "macOS 13.0")
+            self.assertEqual(release.platform_requirement(Path("hyfa"), "aarch64-apple-darwin"), "macOS 13.0")
 
     def test_legacy_macos_minimum_version_command_is_supported(self):
         output = "cmd LC_VERSION_MIN_MACOSX\ncmdsize 16\nversion 13.0\nsdk 15.5"
         with patch.object(release, "command", return_value=output):
-            self.assertEqual(release.platform_requirement(Path("grit"), "x86_64-apple-darwin"), "macOS 13.0")
+            self.assertEqual(release.platform_requirement(Path("hyfa"), "x86_64-apple-darwin"), "macOS 13.0")
 
     def test_archive_links_keep_bundled_guides_and_pin_unbundled_sources(self):
         (self.output / "README.md").write_text("[Usage](docs/usage.md)\n[Contributing](CONTRIBUTING.md)\n")
         with patch.object(release, "ROOT", self.output):
             text = release.bundled_document("README.md", self.commit).decode()
         self.assertIn("](docs/usage.md)", text)
-        self.assertIn(f"](https://github.com/syntropika/grit/blob/{self.commit}/CONTRIBUTING.md)", text)
+        self.assertIn(f"](https://github.com/syntropika/hyfa/blob/{self.commit}/CONTRIBUTING.md)", text)
 
     def test_existing_draft_is_found_on_later_release_page(self):
         first_page = [{"tag_name": f"v0.0.{number}", "draft": False} for number in range(100)]

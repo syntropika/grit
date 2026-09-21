@@ -8,12 +8,12 @@ The factual comparisons and visualization research remain useful. The Pareto and
 
 ## Short answer
 
-Grit should not copy the Beads Viewer ranking as-is. Viewer brings together many valuable ideas—readiness, centrality metrics, cycle detection, parallel plans, and explanations—but its score mixes signals with different semantics and uncalibrated weights. PageRank is efficient and useful for showing structural importance; on its own, it is not a scheduling function, nor does it understand that an Issue may require **all** of its blockers.
+Hyfa should not copy the Beads Viewer ranking as-is. Viewer brings together many valuable ideas—readiness, centrality metrics, cycle detection, parallel plans, and explanations—but its score mixes signals with different semantics and uncalibrated weights. PageRank is efficient and useful for showing structural importance; on its own, it is not a scheduling function, nor does it understand that an Issue may require **all** of its blockers.
 
 The proposal is to separate four questions:
 
 1. **Readiness:** what work can be executed now? It is a constraint, not a compensable component of the score.
-2. **Marginal unblocking:** if we finish this Issue, which other Issues actually become ready? This should be the primary structural signal for `grit next`.
+2. **Marginal unblocking:** if we finish this Issue, which other Issues actually become ready? This should be the primary structural signal for `hyfa next`.
 3. **Potential impact:** what open work exists downstream, which chains does it support, and what declared value does it have? This helps rank and explain, without calling it work that has already been unblocked.
 4. **Graph diagnostics:** PageRank, betweenness, components, cycles, and bottlenecks. They are very useful for `triage`, `insights`, and visualization, but they should not all weigh into `next`.
 
@@ -31,7 +31,7 @@ Code and documentation from the following were audited:
 In this document:
 
 - **Observed** describes behavior that can be verified in code or documentation.
-- **Inference** explains its consequences for Grit.
+- **Inference** explains its consequences for Hyfa.
 - **Recommendation** proposes a decision that still needs to be validated with real data.
 
 ## What Beads and Beads Viewer contribute
@@ -42,15 +42,15 @@ In this document:
 
 No PageRank-like composite ranking equivalent to Viewer's was found in Beads core. What is worth copying is its operational contract: `ready`, `blocked`, unambiguous dependency mutations, graph checks, and a stable representation for automation.
 
-Its multi-repo support materializes or routes data into a local store; it does not turn GitHub into a live-query federated graph. It therefore does not contradict Grit's agreed scope of one repository per analysis.
+Its multi-repo support materializes or routes data into a local store; it does not turn GitHub into a live-query federated graph. It therefore does not contradict Hyfa's agreed scope of one repository per analysis.
 
-**Inference.** Grit can resemble Beads in vocabulary and ergonomics without copying JSONL, its database, synchronization, or federation. Nor should it promise `ready --claim`: GitHub does not offer a transaction that jointly checks and updates assignee, state, and Project fields with the same guarantees as Beads' local store.
+**Inference.** Hyfa can resemble Beads in vocabulary and ergonomics without copying JSONL, its database, synchronization, or federation. Nor should it promise `ready --claim`: GitHub does not offer a transaction that jointly checks and updates assignee, state, and Project fields with the same guarantees as Beads' local store.
 
 ### Beads Viewer
 
 **Observed.** Viewer builds its analytical graph using only blocking dependencies; stored edges run from the dependent Issue to the prerequisite. On that graph it calculates PageRank, betweenness, depth, slack, components, and cycles. It then produces triage, explained recommendations, and several robot formats. Its [robot workflow](https://github.com/Dicklesworthstone/beads_viewer/blob/fba4591a4b1553a988a7cf71e631c1fd570b1b32/README.md#L174-L285) and [graph export](https://github.com/Dicklesworthstone/beads_viewer/blob/fba4591a4b1553a988a7cf71e631c1fd570b1b32/README.md#L743-L787) are useful references.
 
-Viewer makes good choices that Grit should retain:
+Viewer makes good choices that Hyfa should retain:
 
 - readiness before recommending claimable work;
 - explanations and signal breakdowns;
@@ -61,7 +61,7 @@ Viewer makes good choices that Grit should retain:
 
 Its broad `--robot-*` namespace is not worth copying. A global `--json` with versioned schemas is smaller and more coherent.
 
-There are two signs that Grit needs a single source of truth for the analytical contract. Viewer's README still describes a combination of five weights that differs from the eight weights in the current code ([documentation](https://github.com/Dicklesworthstone/beads_viewer/blob/fba4591a4b1553a988a7cf71e631c1fd570b1b32/README.md#L1108-L1123), [implementation](https://github.com/Dicklesworthstone/beads_viewer/blob/fba4591a4b1553a988a7cf71e631c1fd570b1b32/pkg/analysis/priority.go#L53-L72)). It also advertises cycle enumeration, while the current code detects SCCs with Tarjan and retains one representative cycle per component ([documentation](https://github.com/Dicklesworthstone/beads_viewer/blob/fba4591a4b1553a988a7cf71e631c1fd570b1b32/README.md#L460-L470), [implementation](https://github.com/Dicklesworthstone/beads_viewer/blob/fba4591a4b1553a988a7cf71e631c1fd570b1b32/pkg/analysis/graph_cycles.go#L10-L54)). The SCC-bounded behavior is appropriate; what must be avoided is divergence among the schema, help text, and algorithm.
+There are two signs that Hyfa needs a single source of truth for the analytical contract. Viewer's README still describes a combination of five weights that differs from the eight weights in the current code ([documentation](https://github.com/Dicklesworthstone/beads_viewer/blob/fba4591a4b1553a988a7cf71e631c1fd570b1b32/README.md#L1108-L1123), [implementation](https://github.com/Dicklesworthstone/beads_viewer/blob/fba4591a4b1553a988a7cf71e631c1fd570b1b32/pkg/analysis/priority.go#L53-L72)). It also advertises cycle enumeration, while the current code detects SCCs with Tarjan and retains one representative cycle per component ([documentation](https://github.com/Dicklesworthstone/beads_viewer/blob/fba4591a4b1553a988a7cf71e631c1fd570b1b32/README.md#L460-L470), [implementation](https://github.com/Dicklesworthstone/beads_viewer/blob/fba4591a4b1553a988a7cf71e631c1fd570b1b32/pkg/analysis/graph_cycles.go#L10-L54)). The SCC-bounded behavior is appropriate; what must be avoided is divergence among the schema, help text, and algorithm.
 
 ## Audit of Viewer's ranking
 
@@ -80,7 +80,7 @@ Several signals count the same topology or age more than once. Moreover, high ri
 
 **Recommendation.** Keep staleness in a `needs-review` lane and separate `delivery_risk` from urgency. A `priority audit` must be calculated without using the declared priority it is intended to audit; `next` may respect it.
 
-Viewer contains another example of semantic drift: its `quickWins` heuristic calls low fan-out “simplicity,” even though that field counts how many Issues depend on the candidate. It ends up penalizing precisely the impact it is trying to find, without measuring actual effort ([code](https://github.com/Dicklesworthstone/beads_viewer/blob/fba4591a4b1553a988a7cf71e631c1fd570b1b32/pkg/analysis/triage.go#L864-L901)). Grit must derive quick-win from Effort and data coverage, not from the number of dependents.
+Viewer contains another example of semantic drift: its `quickWins` heuristic calls low fan-out “simplicity,” even though that field counts how many Issues depend on the candidate. It ends up penalizing precisely the impact it is trying to find, without measuring actual effort ([code](https://github.com/Dicklesworthstone/beads_viewer/blob/fba4591a4b1553a988a7cf71e631c1fd570b1b32/pkg/analysis/triage.go#L864-L901)). Hyfa must derive quick-win from Effort and data coverage, not from the number of dependents.
 
 ### Normalization depends too heavily on the observed set
 
@@ -143,7 +143,7 @@ The marginal gain increases after selecting B instead of decreasing. A and B are
 
 **Recommendation.** `plan` must perform a state rollout: choose only from the ready frontier, simulate closure, update blocker counters, and open the next frontier. To search for better combinations, it can use beam search over a small pool or bounded exact enumeration, honestly described as a heuristic. A parallel batch contains only work that is ready at the start; separately, it may explain which combination would enable the next wave.
 
-## Proposed ranking contract for Grit
+## Proposed ranking contract for Hyfa
 
 ### 1. Build the operational graph
 
@@ -164,7 +164,7 @@ Separate states should be exposed without collapsing them:
 
 ### 2. Apply a gate before scoring
 
-`grit next` considers only open, non-cyclic Issues without open or unknown blockers. A score never compensates for a lack of readiness.
+`hyfa next` considers only open, non-cyclic Issues without open or unknown blockers. A score never compensates for a lack of readiness.
 
 If the product needs it, it must separate:
 
@@ -243,17 +243,17 @@ For v1, a deterministic full recompute per snapshot is preferable to introducing
 ### Recommended surface
 
 ```text
-grit ready                 # executable set, unordered or with basic ordering
-grit next                  # best new executable work
-grit triage                # summary, blockers, hygiene, and recommendations
-grit plan                  # executable rollout and parallel lanes
-grit explain ISSUE         # signals, evidence, and trade-offs
-grit block A --by B        # creates a native dependency in GitHub
-grit unblock A --by B      # removes a dependency
-grit graph --output site/  # HTML + JSON artifact
-grit doctor                # auth, permissions, data, and cycles
-grit schema
-grit capabilities
+hyfa ready                 # executable set, unordered or with basic ordering
+hyfa next                  # best new executable work
+hyfa triage                # summary, blockers, hygiene, and recommendations
+hyfa plan                  # executable rollout and parallel lanes
+hyfa explain ISSUE         # signals, evidence, and trade-offs
+hyfa block A --by B        # creates a native dependency in GitHub
+hyfa unblock A --by B      # removes a dependency
+hyfa graph --output site/  # HTML + JSON artifact
+hyfa doctor                # auth, permissions, data, and cycles
+hyfa schema
+hyfa capabilities
 ```
 
 All commands should accept `--json`; there is no need to duplicate them as `--robot-next`, `--robot-plan`, etc. `next` is read-only in v1. A future `start` must declare its race conditions and detect a stale snapshot, not promise Beads' atomic claim.
@@ -262,7 +262,7 @@ All commands should accept `--json`; there is no need to duplicate them as `--ro
 
 ```json
 {
-  "schema_version": "grit/v1",
+  "schema_version": "hyfa/v1",
   "tool_version": "0.1.0",
   "command": "next",
   "generated_at": "2026-08-06T12:00:00Z",
@@ -311,9 +311,9 @@ Recommendation for v1:
 - offer an optional force-directed view for components;
 - use Sigma.js v3 + Graphology: Sigma uses WebGL and is designed for [thousands of nodes and edges](https://www.sigmajs.org/docs/); v4 is still marked alpha;
 - optionally run ForceAtlas2 in a Web Worker and use Barnes–Hut where appropriate: [Graphology ForceAtlas2](https://graphology.github.io/standard-library/layout-forceatlas2.html);
-- do not calculate in the browser metrics that Grit has already computed.
+- do not calculate in the browser metrics that Hyfa has already computed.
 
-Cytoscape.js would be a good alternative for modest graphs and rich client-side layouts/algorithms, but its [performance recommendations](https://js.cytoscape.org/#performance) warn about the cost of edges, labels, and styles. For Grit, Sigma requires less duplicate work and scales better as a renderer.
+Cytoscape.js would be a good alternative for modest graphs and rich client-side layouts/algorithms, but its [performance recommendations](https://js.cytoscape.org/#performance) warn about the cost of edges, labels, and styles. For Hyfa, Sigma requires less duplicate work and scales better as a renderer.
 
 ### Minimum interaction
 
@@ -331,7 +331,7 @@ As an initial guardrail to measure, the full graph can be shown up to approximat
 
 ## Public Pages without leaks
 
-GitHub warns that a Pages site may be [publicly available even if its source repository is private](https://docs.github.com/en/pages/getting-started-with-github-pages/configuring-a-publishing-source-for-your-github-pages-site). Grit's assumption should be simpler: every byte of the Pages artifact is public and cacheable.
+GitHub warns that a Pages site may be [publicly available even if its source repository is private](https://docs.github.com/en/pages/getting-started-with-github-pages/configuring-a-publishing-source-for-your-github-pages-site). Hyfa's assumption should be simpler: every byte of the Pages artifact is public and cacheable.
 
 ### Publishing pipeline
 
@@ -349,7 +349,7 @@ Sanitizing **before** public analysis is important. If PageRank, unlock counts, 
 
 ### Recommended fail-closed policy
 
-- `grit graph --public` checks that the analyzed repository is `PUBLIC`; any unknown visibility causes failure.
+- `hyfa graph --public` checks that the analyzed repository is `PUBLIC`; any unknown visibility causes failure.
 - Publish only Issues belonging to that public repository.
 - Omit Project data by default; allow it only if the Project is also public and every field is explicitly allowlisted for publication.
 - Reject `REDACTED` items, drafts, and edge endpoints that are not in the published graph.
@@ -458,7 +458,7 @@ Measure:
 - top-k/Kendall stability between snapshots;
 - cycle time, distinguishing correlation from causation.
 
-If PageRank or betweenness do not improve outcomes, acceptance, or stability, they remain visualization/diagnostic tools. There is no primary source demonstrating that PageRank is optimal for prioritizing backlogs; that effectiveness must be demonstrated in Grit's domain.
+If PageRank or betweenness do not improve outcomes, acceptance, or stability, they remain visualization/diagnostic tools. There is no primary source demonstrating that PageRank is optimal for prioritizing backlogs; that effectiveness must be demonstrated in Hyfa's domain.
 
 ## Decisions this research proposes but does not yet record
 

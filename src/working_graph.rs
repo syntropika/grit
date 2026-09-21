@@ -133,7 +133,7 @@ impl<'a> WorkingGraph<'a> {
             project_dependency_intents(effective_replica.to_mut(), dependency_intents)?;
         }
         let input = json!({
-            "schema_version": "grit.working-graph/v1",
+            "schema_version": "hyfa.working-graph/v1",
             "replica_snapshot_hash": replica.input_hash,
             "pending_mutations": outbox.operations(),
         });

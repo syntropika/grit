@@ -47,7 +47,7 @@ fn classify_scalar<T: Eq>(base: &T, desired: &T, remote: &T) -> ScalarClassifica
     }
 }
 
-pub(crate) const OUTPUT_SCHEMA_VERSION: &str = "grit.reconcile/v1";
+pub(crate) const OUTPUT_SCHEMA_VERSION: &str = "hyfa.reconcile/v1";
 
 #[derive(Clone, Copy)]
 pub(crate) enum ResolutionChoice {

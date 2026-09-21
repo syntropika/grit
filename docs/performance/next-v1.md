@@ -28,7 +28,7 @@ cargo test --release \
 
 The ignored test fails when cold local ranking plus serialization reaches one second or warm local ranking plus serialization reaches 250 milliseconds. It also fails if cold and warm serialized analyses differ.
 
-For an existing repository, `grit next --repo OWNER/REPO --profile --json` exposes the same phase boundaries. `performance.analysis_serialization` measures the flattened `NextAnalysis` document rather than claiming to time the self-describing outer profile envelope. Its `performance.synchronization_included` field is always `false`. Human profiling does not perform an otherwise unused JSON serialization.
+For an existing repository, `hyfa next --repo OWNER/REPO --profile --json` exposes the same phase boundaries. `performance.analysis_serialization` measures the flattened `NextAnalysis` document rather than claiming to time the self-describing outer profile envelope. Its `performance.synchronization_included` field is always `false`. Human profiling does not perform an otherwise unused JSON serialization.
 
 ## Results
 

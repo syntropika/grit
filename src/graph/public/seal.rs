@@ -286,7 +286,12 @@ fn collect_actor(values: &mut BTreeSet<String>, actor: &Actor) {
 }
 
 fn collect_marker_payloads(values: &mut BTreeSet<String>, text: &str) {
-    for prefix in ["<!-- grit:operation", "<!-- grit-operation:"] {
+    for prefix in [
+        "<!-- hyfa:operation",
+        "<!-- hyfa-operation:",
+        "<!-- grit:operation",
+        "<!-- grit-operation:",
+    ] {
         let mut remaining = text;
         while let Some(start) = remaining.find(prefix) {
             let payload = &remaining[start + prefix.len()..];

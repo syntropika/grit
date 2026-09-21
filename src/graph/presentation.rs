@@ -63,7 +63,7 @@ fn build_with_limits(
         Vec::new()
     };
     GraphPresentation {
-        schema_version: "grit.graph-presentation/v1",
+        schema_version: "hyfa.graph-presentation/v1",
         mode: if constrained {
             PresentationMode::Constrained
         } else {
@@ -180,7 +180,7 @@ mod tests {
         let presentation = build_with_limits(&artifact, 3, usize::MAX, 2);
         let value = serde_json::to_value(presentation).expect("presentation JSON");
 
-        assert_eq!(value["schema_version"], "grit.graph-presentation/v1");
+        assert_eq!(value["schema_version"], "hyfa.graph-presentation/v1");
         assert_eq!(value["mode"], "constrained");
         assert_eq!(value["initial_network_node_limit"], 2);
         assert_eq!(

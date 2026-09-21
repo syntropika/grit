@@ -41,7 +41,7 @@ fn init_creates_only_missing_priority_labels_and_then_converges() {
         .expect("first init");
     assert_success(&first);
     let first: Value = serde_json::from_slice(&first.stdout).expect("init JSON");
-    assert_eq!(first["schema_version"], "grit.init/v1");
+    assert_eq!(first["schema_version"], "hyfa.init/v1");
     assert_eq!(first["command"], "init");
     assert_eq!(first["repository"], "acme/widgets");
     assert_eq!(
@@ -294,7 +294,7 @@ fn a_legacy_replica_does_not_claim_its_unknown_label_catalog_is_empty() {
     let issues: Vec<Value> = Vec::new();
     let dependencies: Vec<Value> = Vec::new();
     let hash_input = LegacyHashInput {
-        schema_version: "grit.local-replica/v1",
+        schema_version: "hyfa.local-replica/v1",
         repository: "acme/widgets",
         issues: &issues,
         dependencies: &dependencies,
@@ -303,7 +303,7 @@ fn a_legacy_replica_does_not_claim_its_unknown_label_catalog_is_empty() {
         serde_json::to_vec(&hash_input).expect("legacy hash input"),
     ));
     let replica = json!({
-        "schema_version": "grit.local-replica/v1",
+        "schema_version": "hyfa.local-replica/v1",
         "repository": "acme/widgets",
         "synced_at": "2026-08-01T00:00:00Z",
         "input_hash": input_hash,
@@ -396,37 +396,37 @@ fn issue_with_fields(number: u64, labels: Vec<Value>) -> Value {
 }
 
 fn init_command(state: &TempDir, api_url: &str) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_grit"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hyfa"));
     command.args(["init", "--repo", "acme/widgets", "--json"]);
     command
         .env("GH_TOKEN", "automation-token")
-        .env("GRIT_GITHUB_API_URL", api_url)
-        .env("GRIT_NO_KEYRING", "1")
-        .env("GRIT_STATE_DIR", state.path())
+        .env("HYFA_GITHUB_API_URL", api_url)
+        .env("HYFA_NO_KEYRING", "1")
+        .env("HYFA_STATE_DIR", state.path())
         .env("PATH", "");
     command
 }
 
 fn ready_command(state: &TempDir, api_url: &str) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_grit"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hyfa"));
     command.args(["ready", "--repo", "acme/widgets", "--json"]);
     command
         .env("GH_TOKEN", "automation-token")
-        .env("GRIT_GITHUB_API_URL", api_url)
-        .env("GRIT_NO_KEYRING", "1")
-        .env("GRIT_STATE_DIR", state.path())
+        .env("HYFA_GITHUB_API_URL", api_url)
+        .env("HYFA_NO_KEYRING", "1")
+        .env("HYFA_STATE_DIR", state.path())
         .env("PATH", "");
     command
 }
 
 fn ready_command_human(state: &TempDir, api_url: &str) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_grit"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hyfa"));
     command.args(["ready", "--repo", "acme/widgets"]);
     command
         .env("GH_TOKEN", "automation-token")
-        .env("GRIT_GITHUB_API_URL", api_url)
-        .env("GRIT_NO_KEYRING", "1")
-        .env("GRIT_STATE_DIR", state.path())
+        .env("HYFA_GITHUB_API_URL", api_url)
+        .env("HYFA_NO_KEYRING", "1")
+        .env("HYFA_STATE_DIR", state.path())
         .env("PATH", "");
     command
 }

@@ -1,12 +1,12 @@
 # `next/v1` ranking and planning
 
-**Status:** normative Grit v1 contract  
+**Status:** normative Hyfa v1 contract\
 **Decision:** ADR 0028  
 **Scope:** one Repository, its Operational graph, open Issues, and unsatisfied GitHub-native Dependencies
 
 ## Objective
 
-`grit next` must return executable work and explain why it is the best first step found. The policy favors unlocking real work, respects human priority without turning Grit into a label sorter, and keeps cost predictable with thousands of Issues.
+`hyfa next` must return executable work and explain why it is the best first step found. The policy favors unlocking real work, respects human priority without turning Hyfa into a label sorter, and keeps cost predictable with thousands of Issues.
 
 There is no universal decimal score. `next/v1` uses an ordered key made of observable measures. Every comparison is explained by showing the first component on which two alternatives differ.
 
@@ -24,7 +24,7 @@ There is no universal decimal score. `next/v1` uses an ordered key made of obser
 
 ## Graph preparation
 
-For every snapshot, Grit:
+For every snapshot, Hyfa:
 
 1. Builds the Operational graph from open Issues and unsatisfied Dependencies.
 2. Deduplicates edges.
@@ -34,7 +34,7 @@ For every snapshot, Grit:
 6. Retains External blockers as an opaque boundary: verifiably closed satisfies the dependency; open or unknown blocks it.
 7. Builds blocker → dependent and dependent → blocker indexes.
 
-For PageRank, Grit condenses the graph by component before calculation and deduplicates edges between components again. Edge orientation propagates pressure from dependents toward blockers. `next/v1` fixes damping at `0.85`, starts from a uniform vector, redistributes dangling mass uniformly, and performs 20 power iterations. It uses `binary64` and accumulates nodes and edges by Stable node key so quantization remains stable. The tie-break uses the integer bucket `floor(score * 1_000_000)`, not the raw `float`. An executable candidate can never belong to a cyclic SCC, so it directly uses the score of its singleton component; SCC scores do not need to be distributed among candidates. Betweenness is not part of the `next/v1` hot path.
+For PageRank, Hyfa condenses the graph by component before calculation and deduplicates edges between components again. Edge orientation propagates pressure from dependents toward blockers. `next/v1` fixes damping at `0.85`, starts from a uniform vector, redistributes dangling mass uniformly, and performs 20 power iterations. It uses `binary64` and accumulates nodes and edges by Stable node key so quantization remains stable. The tie-break uses the integer bucket `floor(score * 1_000_000)`, not the raw `float`. An executable candidate can never belong to a cyclic SCC, so it directly uses the score of its singleton component; SCC scores do not need to be distributed among candidates. Betweenness is not part of the `next/v1` hot path.
 
 ## Candidate gate
 
@@ -64,13 +64,13 @@ The only human-supplied ranking input is one canonical `priority:p0`–`priority
 - P4: minimum.
 - Priority conflict: reported as a warning and compared as neutral because its declared priority is ignored.
 
-P1–P4 are ordinal. Grit does not invent cardinal distances such as “P1 is worth four times P3.”
+P1–P4 are ordinal. Hyfa does not invent cardinal distances such as “P1 is worth four times P3.”
 
 ## Rollout and Unlock profile
 
 A rollout is a simulated sequence of up to `horizon` completions. The Ready frontier is recalculated after every step.
 
-Before selecting each step, Grit reruns the gate with the remaining horizon and selects one of three modes: Executable P0, qualifying P0 route, or normal. This preserves P0 precedence within the rollout's fixed budget; it does not claim to match separate new invocations of `next`, which would reset the full horizon.
+Before selecting each step, Hyfa reruns the gate with the remaining horizon and selects one of three modes: Executable P0, qualifying P0 route, or normal. This preserves P0 precedence within the rollout's fixed budget; it does not claim to match separate new invocations of `next`, which would reset the full horizon.
 
 The **Unlock set** contains the distinct Issues that transition from blocked to Ready for the first time during the rollout. It does not contain an Issue merely because that Issue was completed, and it does not duplicate an Issue that is later completed within the same rollout.
 
@@ -95,7 +95,7 @@ If any P0 is Executable, only those P0 Issues are first-step candidates; prerequ
 
 ### P0 blocked but reachable
 
-When no P0 is executable, Grit calculates the transitive closure of open prerequisites required to make each blocked P0 Ready. A P0 qualifies for the expedite mode only when:
+When no P0 is executable, Hyfa calculates the transitive closure of open prerequisites required to make each blocked P0 Ready. A P0 qualifies for the expedite mode only when:
 
 - its closure is acyclic;
 - it contains no open or unknown External blocker;
@@ -164,7 +164,7 @@ Default `next/v1` values:
 | Probe work budget | 262,144 successors per command |
 | Deterministic budget | 8,192 materialized successors |
 
-With horizon 1, Grit evaluates every candidate exactly using blocker counters in `O(V+E)`.
+With horizon 1, Hyfa evaluates every candidate exactly using blocker counters in `O(V+E)`.
 
 For larger horizons, the shortlist is the deterministic union of:
 
@@ -232,7 +232,7 @@ When PageRank is globally omitted, its quota is empty and round-robin fills thos
 
 A state consumes `state_budget` when the main search materializes a successor by appending one executable step; the root does not count. Successors internal to a probe consume only the probe's local and global budgets. Both counters follow the deterministic orders above and are checked before materializing the next successor. Cache state, allocation, and memory therefore cannot alter what work fits within either budget.
 
-The deterministic state and probe budgets bound ranking work. Wall-clock cancellation belongs outside the ranking engine and aborts the command rather than changing the explored set or returning a load-dependent recommendation. Grit records every discard caused by shortlist, P0 frontier, downstream metric limit, branch, beam, or state. The result remains executable, but search is declared complete only when no candidate or state was discarded:
+The deterministic state and probe budgets bound ranking work. Wall-clock cancellation belongs outside the ranking engine and aborts the command rather than changing the explored set or returning a load-dependent recommendation. Hyfa records every discard caused by shortlist, P0 frontier, downstream metric limit, branch, beam, or state. The result remains executable, but search is declared complete only when no candidate or state was discarded:
 
 ```json
 {
@@ -248,15 +248,15 @@ Ranking is recalculated from the effective input and cached by `input_hash`, pol
 
 ## `next`, `ready`, and `plan`
 
-### `grit next`
+### `hyfa next`
 
-Returns one recommendation, the best rollout that justifies it, and alternatives. Before comparing candidates, Grit keeps only the best explored rollout for each first Issue; alternatives and the runner-up always have a different first step. A complete tie between rollouts for the same candidate is resolved by the ascending full sequence of Stable node keys, with `no_step` last. It is read-only: it attempts a pull sync but never publishes Pending mutations.
+Returns one recommendation, the best rollout that justifies it, and alternatives. Before comparing candidates, Hyfa keeps only the best explored rollout for each first Issue; alternatives and the runner-up always have a different first step. A complete tie between rollouts for the same candidate is resolved by the ascending full sequence of Stable node keys, with `no_step` last. It is read-only: it attempts a pull sync but never publishes Pending mutations.
 
-### `grit ready`
+### `hyfa ready`
 
 Returns the complete executable frontier. Its purpose is to enumerate state, not promise that its first item is a recommendation; default ordering is deterministic by Stable node key.
 
-### `grit plan`
+### `hyfa plan`
 
 Without explicit capacity, it returns:
 
@@ -264,7 +264,7 @@ Without explicit capacity, it returns:
 - `parallel_now`, the complete frontier of Executable Issues in the active scope;
 - `dependency_layers`, counterfactual topological layers rather than dates.
 
-Given the same input and parameters, that lane's first step and explanation are exactly those of `grit next`; `plan` does not maintain an alternative ranking.
+Given the same input and parameters, that lane's first step and explanation are exactly those of `hyfa next`; `plan` does not maintain an alternative ranking.
 
 `dependency_layers` applies an infinite-capacity structural counterfactual over the entire Graph scope, not only the Execution scope:
 
@@ -273,11 +273,11 @@ Given the same input and parameters, that lane's first step and explanation are 
 - an Issue without open internal blockers already belongs to `layer 0`;
 - membership in an SCC, an open or unknown External blocker, or any blocker without a finite layer places the Issue in `unresolved`, without a layer number.
 
-Because Dependencies use AND semantics, an Issue appears only after the last layer of all its blockers. A layer may contain assigned work or work outside the Execution scope and marks it as such; this explains topology but does not authorize Grit to recommend it as a step.
+Because Dependencies use AND semantics, an Issue appears only after the last layer of all its blockers. A layer may contain assigned work or work outside the Execution scope and marks it as such; this explains topology but does not authorize Hyfa to recommend it as a step.
 
-Grit v1 does not accept `--workers N`. Selecting sets introduces another decision function—overlap, wide P0 closures, each worker's skills, and parallel rounds—that cannot honestly be derived from `next/v1`. `parallel_now` exposes all immediate capacity, and `dependency_layers` shows only the structural counterfactual; neither represents barriers or assignments.
+Hyfa v1 does not accept `--workers N`. Selecting sets introduces another decision function—overlap, wide P0 closures, each worker's skills, and parallel rounds—that cannot honestly be derived from `next/v1`. `parallel_now` exposes all immediate capacity, and `dependency_layers` shows only the structural counterfactual; neither represents barriers or assignments.
 
-A future `plan/v2` may add joint capacity under the invariant `workers=1 == next`, `critical_rounds` for P0, and its own budgets. Without Effort or temporal capacity, Grit v1 does not call these layers `critical_path`, an ETA, or a calendar. It may display `remaining_dependency_depth`, but it does not pretend to know duration.
+A future `plan/v2` may add joint capacity under the invariant `workers=1 == next`, `critical_rounds` for P0, and its own budgets. Without Effort or temporal capacity, Hyfa v1 does not call these layers `critical_path`, an ETA, or a calendar. It may display `remaining_dependency_depth`, but it does not pretend to know duration.
 
 ## Explanation and JSON
 
@@ -309,7 +309,7 @@ Results based on a Working graph mark affected edges, Issues, and reasons as `pe
 
 Preparation, readiness, SCC, and immediate unlocks cost `O(V+E)`. PageRank costs `O(I(V+E))`. Upper-bound construction is capped at `1,024 × candidates` in the shortlist and `512 × evaluated states` during search, plus feasible closures with maximum size `horizon + 1`. Outcomes that have no feasible bounded closure are excluded from upper-bound iteration. No probe exceeds 64 successors, and all probes together remain below 262,144. The combinatorial portion depends on these limits, shortlist, beam, branch, and state budgets rather than enumerating every possible plan.
 
-Grit persists the complete PageRank and bounded-search result as a disposable cache. Its key includes the effective Working-input hash, policy version, Planning horizon, alternative and state budgets, and PageRank parameters. The Working-input hash includes the replica snapshot, ordered Pending overlay, and normalized Execution scope. A cache hit still rebuilds and validates the Operational graph before rehydrating Issue references; malformed, stale, or semantically incompatible cache data is a miss. Cache hits never change deterministic work counts, result hashes, alternatives, or truncation reasons.
+Hyfa persists the complete PageRank and bounded-search result as a disposable cache. Its key includes the effective Working-input hash, policy version, Planning horizon, alternative and state budgets, and PageRank parameters. The Working-input hash includes the replica snapshot, ordered Pending overlay, and normalized Execution scope. A cache hit still rebuilds and validates the Operational graph before rehydrating Issue references; malformed, stale, or semantically incompatible cache data is a miss. Cache hits never change deterministic work counts, result hashes, alternatives, or truncation reasons.
 
 The reproducible release benchmark uses 5,000 Issues, 20,000 distinct Dependencies, horizon 3, mixed feasible and infeasible AND closures, the complete normative probe/search policy, output assembly, cache publication or validated lookup, and analysis JSON serialization. Synchronization and fixture construction are outside the measurement. On the documented reference VM, five runs had a median cold time of about 662 ms and a median warm time of about 45 ms. The enforced gates remain below 1 s cold and below 250 ms warm. Exact hardware, fixture construction, phase results, and the command are recorded in `docs/performance/next-v1.md`.
 

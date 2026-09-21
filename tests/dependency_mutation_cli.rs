@@ -616,11 +616,11 @@ fn a_concurrent_remove_is_reconciled_as_already_absent() {
 fn dependency_references_reject_ambiguous_or_zero_issue_forms_before_authentication() {
     let state = TempDir::new().expect("temporary state directory");
     for reference in ["42", "acme/widgets", "acme/widgets#0", "acme/widgets#2#3"] {
-        let output = Command::new(env!("CARGO_BIN_EXE_grit"))
+        let output = Command::new(env!("CARGO_BIN_EXE_hyfa"))
             .args(["block", reference, "--by", "acme/widgets#1", "--json"])
             .env_remove("GH_TOKEN")
-            .env("GRIT_NO_KEYRING", "1")
-            .env("GRIT_STATE_DIR", state.path())
+            .env("HYFA_NO_KEYRING", "1")
+            .env("HYFA_STATE_DIR", state.path())
             .env("PATH", "")
             .output()
             .expect("invalid Issue reference");
@@ -634,7 +634,7 @@ fn dependency_references_reject_ambiguous_or_zero_issue_forms_before_authenticat
 }
 
 fn assert_mutation_output(output: &Value, command: &str, result: &str, dependency_count: u64) {
-    assert_eq!(output["schema_version"], "grit.dependency-mutation/v1");
+    assert_eq!(output["schema_version"], "hyfa.dependency-mutation/v1");
     assert_eq!(output["command"], command);
     assert_eq!(output["repository"], "acme/widgets");
     assert_eq!(output["result"], result);
@@ -668,43 +668,43 @@ fn dependency_command(
     blocked: &str,
     blocker: &str,
 ) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_grit"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hyfa"));
     command.args([command_name, blocked, "--by", blocker, "--json"]);
     command
         .env("GH_TOKEN", "automation-token")
-        .env("GRIT_GITHUB_API_URL", api_url)
-        .env("GRIT_NO_KEYRING", "1")
-        .env("GRIT_STATE_DIR", state.path())
+        .env("HYFA_GITHUB_API_URL", api_url)
+        .env("HYFA_NO_KEYRING", "1")
+        .env("HYFA_STATE_DIR", state.path())
         .env("PATH", "");
     command
 }
 
 fn next_command(state: &TempDir, api_url: &str) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_grit"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hyfa"));
     command.args(["next", "--repo", "acme/widgets", "--json"]);
     command
         .env("GH_TOKEN", "automation-token")
-        .env("GRIT_GITHUB_API_URL", api_url)
-        .env("GRIT_NO_KEYRING", "1")
-        .env("GRIT_STATE_DIR", state.path())
+        .env("HYFA_GITHUB_API_URL", api_url)
+        .env("HYFA_NO_KEYRING", "1")
+        .env("HYFA_STATE_DIR", state.path())
         .env("PATH", "");
     command
 }
 
 fn reconcile_command(state: &TempDir, api_url: &str) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_grit"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hyfa"));
     command.args(["reconcile", "--repo", "acme/widgets", "--json"]);
     command
         .env("GH_TOKEN", "automation-token")
-        .env("GRIT_GITHUB_API_URL", api_url)
-        .env("GRIT_NO_KEYRING", "1")
-        .env("GRIT_STATE_DIR", state.path())
+        .env("HYFA_GITHUB_API_URL", api_url)
+        .env("HYFA_NO_KEYRING", "1")
+        .env("HYFA_STATE_DIR", state.path())
         .env("PATH", "");
     command
 }
 
 fn priority_command(state: &TempDir, api_url: &str, issue_number: u64, priority: &str) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_grit"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hyfa"));
     command.args([
         "update",
         &format!("acme/widgets#{issue_number}"),
@@ -714,45 +714,45 @@ fn priority_command(state: &TempDir, api_url: &str, issue_number: u64, priority:
     ]);
     command
         .env("GH_TOKEN", "automation-token")
-        .env("GRIT_GITHUB_API_URL", api_url)
-        .env("GRIT_NO_KEYRING", "1")
-        .env("GRIT_STATE_DIR", state.path())
+        .env("HYFA_GITHUB_API_URL", api_url)
+        .env("HYFA_NO_KEYRING", "1")
+        .env("HYFA_STATE_DIR", state.path())
         .env("PATH", "");
     command
 }
 
 fn mutation_command_human(state: &TempDir, api_url: &str, command_name: &str) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_grit"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hyfa"));
     command.args([command_name, "acme/widgets#2", "--by", "acme/widgets#1"]);
     command
         .env("GH_TOKEN", "automation-token")
-        .env("GRIT_GITHUB_API_URL", api_url)
-        .env("GRIT_NO_KEYRING", "1")
-        .env("GRIT_STATE_DIR", state.path())
+        .env("HYFA_GITHUB_API_URL", api_url)
+        .env("HYFA_NO_KEYRING", "1")
+        .env("HYFA_STATE_DIR", state.path())
         .env("PATH", "");
     command
 }
 
 fn ready_command(state: &TempDir, api_url: &str) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_grit"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hyfa"));
     command.args(["ready", "--repo", "acme/widgets", "--json"]);
     command
         .env("GH_TOKEN", "automation-token")
-        .env("GRIT_GITHUB_API_URL", api_url)
-        .env("GRIT_NO_KEYRING", "1")
-        .env("GRIT_STATE_DIR", state.path())
+        .env("HYFA_GITHUB_API_URL", api_url)
+        .env("HYFA_NO_KEYRING", "1")
+        .env("HYFA_STATE_DIR", state.path())
         .env("PATH", "");
     command
 }
 
 fn sync_command(state: &TempDir, api_url: &str) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_grit"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hyfa"));
     command.args(["sync", "--repo", "acme/widgets", "--json"]);
     command
         .env("GH_TOKEN", "automation-token")
-        .env("GRIT_GITHUB_API_URL", api_url)
-        .env("GRIT_NO_KEYRING", "1")
-        .env("GRIT_STATE_DIR", state.path())
+        .env("HYFA_GITHUB_API_URL", api_url)
+        .env("HYFA_NO_KEYRING", "1")
+        .env("HYFA_STATE_DIR", state.path())
         .env("PATH", "");
     command
 }

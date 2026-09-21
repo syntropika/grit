@@ -6,7 +6,7 @@ Verification date: August 7, 2026.
 
 GitHub now allows `Priority` to be stored directly on an Issue through **organization-level Issue Fields**, without the Issue belonging to a Project. At the time of this research, this looked like the most natural source because the value lives on the Issue and is consistent across all Projects.
 
-The decisive limitation is that Issue Fields are only available for repositories owned by an **organization**. They do not work in repositories owned by personal accounts. For those repositories, Grit would need a fallback—for example, labels—or would have to declare them out of scope.
+The decisive limitation is that Issue Fields are only available for repositories owned by an **organization**. They do not work in repositories owned by personal accounts. For those repositories, Hyfa would need a fallback—for example, labels—or would have to declare them out of scope.
 
 GitHub announced general availability on July 2, 2026 for all organizations on Free, Team, Enterprise, and GitHub Enterprise Cloud with data residency; it will arrive in GitHub Enterprise Server 3.23. [Official general availability announcement](https://github.blog/changelog/2026-07-02-issue-fields-are-now-generally-available/)
 
@@ -31,7 +31,7 @@ The change is saved automatically. People with `triage` access or higher can edi
 
 ## Issue Field versus Project Field
 
-| Mechanism | Where the value lives | Scope | Consequence for Grit |
+| Mechanism | Where the value lives | Scope | Consequence for Hyfa |
 | --- | --- | --- | --- |
 | Organization Issue Field | On the Issue | All repositories in the same organization | Recommended; no Project required |
 | Project custom field | On a Project item | One specific Project | The same Issue can have different priorities in different Projects |
@@ -81,11 +81,11 @@ priority:p3
 priority:p4
 ```
 
-They work in any repository and are already included in the REST Issue listing. However, GitHub does not prevent an Issue from having multiple priority labels simultaneously; Grit would have to detect that state as a conflict and not silently choose one of them. [Labels REST API](https://docs.github.com/en/rest/issues/labels)
+They work in any repository and are already included in the REST Issue listing. However, GitHub does not prevent an Issue from having multiple priority labels simultaneously; Hyfa would have to detect that state as a conflict and not silently choose one of them. [Labels REST API](https://docs.github.com/en/rest/issues/labels)
 
-## Initial recommendation for Grit v1 (superseded)
+## Initial recommendation for Hyfa v1 (superseded)
 
-This recommendation predates ADR 0021. Grit v1 ultimately chose canonical `priority:p0` through `priority:p4` labels as its only priority source so organization-owned and personal repositories share one implementation. The API findings above remain useful background; the list below records the earlier proposal and is not normative.
+This recommendation predates ADR 0021. Hyfa v1 ultimately chose canonical `priority:p0` through `priority:p4` labels as its only priority source so organization-owned and personal repositories share one implementation. The API findings above remain useful background; the list below records the earlier proposal and is not normative.
 
 1. Use a configurable single-select Organization Issue Field, named `Priority` by default, as the primary source.
 2. Discover the field and its options; do not hard-code only the English names, because GitHub allows them to be customized. The configured order of the options should define the priority order.

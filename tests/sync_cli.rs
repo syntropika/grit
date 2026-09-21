@@ -52,7 +52,7 @@ fn sync_uses_gh_token_and_reports_a_versioned_snapshot() {
     let state = TempDir::new().expect("temporary state directory");
     let output = sync_command(&state, &github.url(), "acme/widgets", true)
         .output()
-        .expect("run grit");
+        .expect("run hyfa");
 
     assert!(
         output.status.success(),
@@ -60,12 +60,12 @@ fn sync_uses_gh_token_and_reports_a_versioned_snapshot() {
         String::from_utf8_lossy(&output.stderr)
     );
     let document: Value = serde_json::from_slice(&output.stdout).expect("versioned JSON output");
-    assert_eq!(document["schema_version"], "grit.sync/v1");
+    assert_eq!(document["schema_version"], "hyfa.sync/v1");
     assert_eq!(document["command"], "sync");
     assert_eq!(document["repository"], "acme/widgets");
     assert_eq!(
         document["snapshot"]["schema_version"],
-        "grit.local-replica/v1"
+        "hyfa.local-replica/v1"
     );
     assert_eq!(document["snapshot"]["issue_count"], 1);
     assert_eq!(document["snapshot"]["comment_count"], 0);
@@ -118,7 +118,7 @@ fn sync_uses_environment_token_without_external_executables() {
     let output = sync_command(&state, &github.url(), "acme/empty", true)
         .env("GH_TOKEN", "environment-token")
         .output()
-        .expect("run grit");
+        .expect("run hyfa");
 
     assert!(
         output.status.success(),
@@ -218,7 +218,7 @@ fn sync_paginates_and_persists_only_normalized_issue_data() {
     let state = TempDir::new().expect("temporary state directory");
     let output = sync_command(&state, &github.url(), "acme/widgets", true)
         .output()
-        .expect("run grit");
+        .expect("run hyfa");
 
     assert!(
         output.status.success(),
@@ -414,9 +414,9 @@ fn sync_reports_human_output_using_environment_authentication() {
     let state = TempDir::new().expect("temporary state directory");
     let output = sync_command(&state, &github.url(), "acme/empty", false)
         .env("GH_TOKEN", "human-token")
-        .env("GRIT_GITHUB_HOST", "github.com")
+        .env("HYFA_GITHUB_HOST", "github.com")
         .output()
-        .expect("run grit");
+        .expect("run hyfa");
 
     assert!(
         output.status.success(),
@@ -440,10 +440,10 @@ fn authentication_failure_does_not_publish_a_replica() {
     let output = sync_command(&state, "http://127.0.0.1:1", "acme/widgets", true)
         .env_remove("GH_TOKEN")
         .output()
-        .expect("run grit");
+        .expect("run hyfa");
 
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("no saved Grit credential"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("no saved Hyfa credential"));
     assert!(!state.path().join("repositories").exists());
 }
 
@@ -488,7 +488,7 @@ fn sync_rebuilds_a_corrupt_local_replica_when_github_is_available() {
     );
     let rebuilt: Value = serde_json::from_slice(&fs::read(replica_path).expect("rebuilt replica"))
         .expect("rebuilt replica JSON");
-    assert_eq!(rebuilt["schema_version"], "grit.local-replica/v1");
+    assert_eq!(rebuilt["schema_version"], "hyfa.local-replica/v1");
     assert_eq!(rebuilt["issues"], serde_json::json!([]));
     issues.assert();
     comments.assert();
@@ -520,7 +520,7 @@ fn rate_limit_failure_is_actionable_and_does_not_publish_a_replica() {
 
     let output = sync_command(&state, &github.url(), "acme/widgets", true)
         .output()
-        .expect("run grit");
+        .expect("run hyfa");
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -555,7 +555,7 @@ fn interrupted_response_does_not_publish_a_replica() {
 
     let output = sync_command(&state, &github.url(), "acme/widgets", true)
         .output()
-        .expect("run grit");
+        .expect("run hyfa");
 
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("invalid JSON"));
@@ -576,7 +576,7 @@ fn sync_rejects_an_unsafe_api_base_before_authentication() {
         let state = TempDir::new().expect("temporary state directory");
         let output = sync_command(&state, unsafe_base, "acme/widgets", true)
             .output()
-            .expect("run grit");
+            .expect("run hyfa");
 
         assert!(
             !output.status.success(),
@@ -632,16 +632,16 @@ fn mock_events(
 }
 
 fn sync_command(state: &TempDir, api_url: &str, repository: &str, json: bool) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_grit"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hyfa"));
     command.args(["sync", "--repo", repository]);
     if json {
         command.arg("--json");
     }
     command
         .env("GH_TOKEN", "automation-token")
-        .env("GRIT_GITHUB_API_URL", api_url)
-        .env("GRIT_NO_KEYRING", "1")
-        .env("GRIT_STATE_DIR", state.path())
+        .env("HYFA_GITHUB_API_URL", api_url)
+        .env("HYFA_NO_KEYRING", "1")
+        .env("HYFA_STATE_DIR", state.path())
         .env("PATH", "");
     command
 }

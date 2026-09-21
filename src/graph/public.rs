@@ -20,7 +20,7 @@ use crate::model::{BlockerScope, LocalReplica};
 
 pub(crate) use repository::{ConfirmedPublicRepository, confirm_public_repository};
 
-pub(crate) const PUBLIC_ARTIFACT_SCHEMA_VERSION: &str = "grit.public-graph/v1";
+pub(crate) const PUBLIC_ARTIFACT_SCHEMA_VERSION: &str = "hyfa.public-graph/v1";
 
 pub(crate) struct PublicGraphOptions {
     pub(crate) label_prefixes: Vec<String>,
@@ -34,7 +34,7 @@ struct NormalizedOptions {
 
 #[derive(Clone, Copy, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 enum PublicSchemaVersion {
-    #[serde(rename = "grit.public-graph/v1")]
+    #[serde(rename = "hyfa.public-graph/v1")]
     V1,
 }
 

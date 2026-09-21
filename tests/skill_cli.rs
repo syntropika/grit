@@ -4,13 +4,13 @@ use std::{
     process::{Command, Output},
 };
 
-fn grit(project: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_grit"));
+fn hyfa(project: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hyfa"));
     command
         .current_dir(project)
-        .env("GRIT_NO_KEYRING", "1")
+        .env("HYFA_NO_KEYRING", "1")
         .env_remove("GH_TOKEN")
-        .env("GRIT_GITHUB_API_URL", "invalid-api-must-not-be-read")
+        .env("HYFA_GITHUB_API_URL", "invalid-api-must-not-be-read")
         .env("PATH", "");
     command
 }
@@ -28,12 +28,12 @@ fn success(output: Output) -> String {
 fn default_install_copies_the_embedded_skill_offline_into_the_current_project() {
     let project = tempfile::tempdir().unwrap();
     let output = success(
-        grit(project.path())
+        hyfa(project.path())
             .args(["skill", "install"])
             .output()
             .unwrap(),
     );
-    let destination = project.path().join(".agents/skills/grit");
+    let destination = project.path().join(".agents/skills/hyfa");
     assert!(
         !fs::symlink_metadata(&destination)
             .unwrap()
@@ -53,7 +53,7 @@ fn provider_normalization_avoids_duplicates_and_explicit_project_root_is_honored
     let working = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
     let output = success(
-        grit(working.path())
+        hyfa(working.path())
             .args([
                 "skill",
                 "install",
@@ -68,13 +68,13 @@ fn provider_normalization_avoids_duplicates_and_explicit_project_root_is_honored
     assert!(
         project
             .path()
-            .join(".agents/skills/grit/SKILL.md")
+            .join(".agents/skills/hyfa/SKILL.md")
             .is_file()
     );
     assert!(
         project
             .path()
-            .join(".claude/skills/grit/SKILL.md")
+            .join(".claude/skills/hyfa/SKILL.md")
             .is_file()
     );
     assert!(!project.path().join(".codex").exists());
@@ -86,15 +86,15 @@ fn provider_normalization_avoids_duplicates_and_explicit_project_root_is_honored
 fn existing_install_is_preserved_until_force_is_explicit() {
     let project = tempfile::tempdir().unwrap();
     success(
-        grit(project.path())
+        hyfa(project.path())
             .args(["skill", "install"])
             .output()
             .unwrap(),
     );
-    let destination = project.path().join(".agents/skills/grit");
+    let destination = project.path().join(".agents/skills/hyfa");
     fs::write(destination.join("SKILL.md"), "local customization").unwrap();
     fs::write(destination.join("local.txt"), "local file").unwrap();
-    let output = grit(project.path())
+    let output = hyfa(project.path())
         .args(["skill", "install"])
         .output()
         .unwrap();
@@ -105,7 +105,7 @@ fn existing_install_is_preserved_until_force_is_explicit() {
         "local customization"
     );
     success(
-        grit(project.path())
+        hyfa(project.path())
             .args(["skill", "install", "--force"])
             .output()
             .unwrap(),
@@ -120,10 +120,10 @@ fn existing_install_is_preserved_until_force_is_explicit() {
 #[test]
 fn all_existing_destinations_are_checked_before_any_provider_is_installed() {
     let project = tempfile::tempdir().unwrap();
-    let existing = project.path().join(".claude/skills/grit");
+    let existing = project.path().join(".claude/skills/hyfa");
     fs::create_dir_all(&existing).unwrap();
     fs::write(existing.join("SKILL.md"), "keep this").unwrap();
-    let output = grit(project.path())
+    let output = hyfa(project.path())
         .args(["skill", "install", "--providers", "universal,claude-code"])
         .output()
         .unwrap();
@@ -150,7 +150,7 @@ fn invalid_providers_and_user_scope_misconfiguration_do_not_write_files() {
             "codex",
         ],
     ] {
-        let output = grit(project.path()).args(args).output().unwrap();
+        let output = hyfa(project.path()).args(args).output().unwrap();
         assert!(!output.status.success());
         assert!(output.stdout.is_empty());
         assert!(fs::read_dir(project.path()).unwrap().next().is_none());
@@ -161,7 +161,7 @@ fn invalid_providers_and_user_scope_misconfiguration_do_not_write_files() {
 fn providers_and_help_are_available_without_authentication() {
     let project = tempfile::tempdir().unwrap();
     let output = success(
-        grit(project.path())
+        hyfa(project.path())
             .args(["skill", "providers"])
             .output()
             .unwrap(),
@@ -169,7 +169,7 @@ fn providers_and_help_are_available_without_authentication() {
     assert!(output.lines().any(|line| line.starts_with("codex\t")));
     assert!(output.lines().any(|line| line.starts_with("universal\t")));
     let output = success(
-        grit(project.path())
+        hyfa(project.path())
             .args(["skill", "install", "--help"])
             .output()
             .unwrap(),
@@ -191,9 +191,9 @@ fn symlinked_destinations_and_ancestors_are_never_followed_even_with_force() {
             symlink(outside.path(), project.path().join(".agents")).unwrap();
         } else {
             fs::create_dir_all(project.path().join(".agents/skills")).unwrap();
-            symlink(outside.path(), project.path().join(".agents/skills/grit")).unwrap();
+            symlink(outside.path(), project.path().join(".agents/skills/hyfa")).unwrap();
         }
-        let output = grit(project.path())
+        let output = hyfa(project.path())
             .args(["skill", "install", "--force"])
             .output()
             .unwrap();
@@ -213,9 +213,9 @@ fn broken_destination_symlink_is_preserved() {
     let project = tempfile::tempdir().unwrap();
     let parent = project.path().join(".agents/skills");
     fs::create_dir_all(&parent).unwrap();
-    let link = parent.join("grit");
+    let link = parent.join("hyfa");
     std::os::unix::fs::symlink(project.path().join("missing"), &link).unwrap();
-    let output = grit(project.path())
+    let output = hyfa(project.path())
         .args(["skill", "install"])
         .output()
         .unwrap();

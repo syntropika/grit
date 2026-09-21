@@ -39,7 +39,7 @@ fn offline_priority_activates_a_bounded_p0_route_and_marks_its_rollout() {
     mocks.assert();
     drop(github);
 
-    let queued = Command::new(env!("CARGO_BIN_EXE_grit"))
+    let queued = Command::new(env!("CARGO_BIN_EXE_hyfa"))
         .args([
             "update",
             "acme/pending-p0-route#3",
@@ -47,9 +47,9 @@ fn offline_priority_activates_a_bounded_p0_route_and_marks_its_rollout() {
             "p0",
             "--json",
         ])
-        .env("GRIT_NO_KEYRING", "1")
-        .env("GRIT_STATE_DIR", state.path())
-        .env("GRIT_GITHUB_API_URL", &api_url)
+        .env("HYFA_NO_KEYRING", "1")
+        .env("HYFA_STATE_DIR", state.path())
+        .env("HYFA_GITHUB_API_URL", &api_url)
         .env("GH_TOKEN", "test-token")
         .env("PATH", "")
         .output()
@@ -129,10 +129,10 @@ fn next_evaluates_the_complete_frontier_with_and_unlocks_and_deduplication() {
 
     let output = next_command(&state, &github.url(), "acme/next", true)
         .output()
-        .expect("run grit next");
+        .expect("run hyfa next");
     assert_success(&output);
     let next: Value = serde_json::from_slice(&output.stdout).expect("next JSON");
-    assert_eq!(next["schema_version"], "grit.next/v1");
+    assert_eq!(next["schema_version"], "hyfa.next/v1");
     assert_eq!(next["policy_version"], "next/v1");
     assert_eq!(next["parameters"]["horizon"], 1);
     assert_eq!(next["mode"], "normal");
@@ -189,7 +189,7 @@ fn next_evaluates_the_complete_frontier_with_and_unlocks_and_deduplication() {
 
     let ready = ready_command(&state, &github.url(), "acme/next")
         .output()
-        .expect("offline grit ready");
+        .expect("offline hyfa ready");
     assert_success(&ready);
     let ready: Value = serde_json::from_slice(&ready.stdout).expect("ready JSON");
     let ready_numbers = ready["issues"]
@@ -583,7 +583,7 @@ fn delayed_cascade_survives_one_hundred_twenty_nine_better_immediate_results() {
     mocks.assert();
     drop(github);
 
-    let queued = Command::new(env!("CARGO_BIN_EXE_grit"))
+    let queued = Command::new(env!("CARGO_BIN_EXE_hyfa"))
         .args([
             "update",
             "acme/delayed-cascade#1000",
@@ -591,9 +591,9 @@ fn delayed_cascade_survives_one_hundred_twenty_nine_better_immediate_results() {
             "p1",
             "--json",
         ])
-        .env("GRIT_NO_KEYRING", "1")
-        .env("GRIT_STATE_DIR", state.path())
-        .env("GRIT_GITHUB_API_URL", &api_url)
+        .env("HYFA_NO_KEYRING", "1")
+        .env("HYFA_STATE_DIR", state.path())
+        .env("HYFA_GITHUB_API_URL", &api_url)
         .env("GH_TOKEN", "test-token")
         .env("PATH", "")
         .output()
@@ -1301,10 +1301,10 @@ fn empty_graph_omits_pagerank_globally_and_out_of_range_horizon_is_rejected() {
     assert_eq!(output["alternatives"], json!([]));
     mocks.assert();
 
-    let unsupported = Command::new(env!("CARGO_BIN_EXE_grit"))
+    let unsupported = Command::new(env!("CARGO_BIN_EXE_hyfa"))
         .args(["next", "--repo", "acme/empty", "--horizon", "4", "--json"])
-        .env("GRIT_NO_KEYRING", "1")
-        .env("GRIT_STATE_DIR", state.path())
+        .env("HYFA_NO_KEYRING", "1")
+        .env("HYFA_STATE_DIR", state.path())
         .env("PATH", "")
         .output()
         .expect("unsupported horizon");
@@ -1411,12 +1411,12 @@ fn next_default_command(state: &TempDir, api_url: &str, repository: &str, online
 }
 
 fn next_default_human_command(state: &TempDir, api_url: &str, repository: &str) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_grit"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hyfa"));
     command.args(["next", "--repo", repository]);
     command
-        .env("GRIT_GITHUB_API_URL", api_url)
-        .env("GRIT_NO_KEYRING", "1")
-        .env("GRIT_STATE_DIR", state.path())
+        .env("HYFA_GITHUB_API_URL", api_url)
+        .env("HYFA_NO_KEYRING", "1")
+        .env("HYFA_STATE_DIR", state.path())
         .env_remove("GH_TOKEN")
         .env("PATH", "");
     command
@@ -1429,15 +1429,15 @@ fn next_command_with_horizon(
     online: bool,
     horizon: Option<u8>,
 ) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_grit"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hyfa"));
     command.args(["next", "--repo", repository, "--json"]);
     if let Some(horizon) = horizon {
         command.args(["--horizon", &horizon.to_string()]);
     }
     command
-        .env("GRIT_GITHUB_API_URL", api_url)
-        .env("GRIT_NO_KEYRING", "1")
-        .env("GRIT_STATE_DIR", state.path())
+        .env("HYFA_GITHUB_API_URL", api_url)
+        .env("HYFA_NO_KEYRING", "1")
+        .env("HYFA_STATE_DIR", state.path())
         .env("PATH", "");
     if online {
         command.env("GH_TOKEN", "automation-token");
@@ -1470,12 +1470,12 @@ fn unlock_numbers(candidate: &Value) -> Vec<u64> {
 }
 
 fn ready_command(state: &TempDir, api_url: &str, repository: &str) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_grit"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hyfa"));
     command.args(["ready", "--repo", repository, "--json"]);
     command
-        .env("GRIT_GITHUB_API_URL", api_url)
-        .env("GRIT_NO_KEYRING", "1")
-        .env("GRIT_STATE_DIR", state.path())
+        .env("HYFA_GITHUB_API_URL", api_url)
+        .env("HYFA_NO_KEYRING", "1")
+        .env("HYFA_STATE_DIR", state.path())
         .env_remove("GH_TOKEN")
         .env("PATH", "");
     command

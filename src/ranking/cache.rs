@@ -20,7 +20,7 @@ use crate::{
     working_graph::WorkingGraph,
 };
 
-const CACHE_SCHEMA_VERSION: &str = "grit.ranking-cache/v1";
+const CACHE_SCHEMA_VERSION: &str = "hyfa.ranking-cache/v1";
 const CACHE_FILE_NAME: &str = "ranking-next-v1-cache.json";
 
 #[derive(Default)]

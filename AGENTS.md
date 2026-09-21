@@ -1,4 +1,4 @@
-# Working on Grit
+# Working on Hyfa
 
 Read [CONTEXT.md](CONTEXT.md) and the relevant [ADRs](docs/adr/) before changing
 domain behavior. [CONTRIBUTING.md](CONTRIBUTING.md) provides build and validation
@@ -56,7 +56,7 @@ responsible module over expanding unrelated CLI orchestration.
   merely because its version string matches; build it from the release commit.
 - Use mocked GitHub and temporary state in tests. Never point tests at a real
   repository or a user's existing replica/outbox.
-- Set `GRIT_NO_KEYRING=1` in CLI fixtures so tests cannot discover an operator's
+- Set `HYFA_NO_KEYRING=1` in CLI fixtures so tests cannot discover an operator's
   saved login. Auth unit tests inject their own HTTP and credential-store fakes.
 - Run the relevant checks from `CONTRIBUTING.md`. Changes to generated HTML
   require real browser verification, including keyboard and mobile behavior.
@@ -65,5 +65,5 @@ responsible module over expanding unrelated CLI orchestration.
   detail in `docs/usage.md`, contributor setup in `CONTRIBUTING.md`, and agent
   instructions here. Persist all prose and generated UI copy in English.
 - Store temporary reports, screenshots, and traces outside the checkout under
-  `/home/cerberus/.codex-artifacts/home/cerberus/Projects/grit/` in this workspace.
+  `/home/cerberus/.codex-artifacts/<absolute-project-path-without-leading-slash>/` in this workspace.
   Do not commit credentials, Local replicas, outboxes, or generated exports.

@@ -62,7 +62,15 @@ pub(super) fn validate(
         if node.url != repository.issue_url(node.number) {
             return Err(GraphError::InvalidCanonicalIssueUrl(node.number));
         }
-        if node.title.contains("<!-- grit:operation") {
+        if [
+            "<!-- hyfa:operation",
+            "<!-- hyfa-operation:",
+            "<!-- grit:operation",
+            "<!-- grit-operation:",
+        ]
+        .iter()
+        .any(|prefix| node.title.contains(prefix))
+        {
             return Err(GraphError::InvalidField("title"));
         }
         if let Some(labels) = &node.labels {

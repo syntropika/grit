@@ -1,22 +1,22 @@
 [package]
-name = "syntropika-grit"
-version = "0.1.1"
+name = "syntropika-hyfa"
+version = "0.2.0"
 edition = "2024"
 description = "Graph-ranked Issues and Tasks for GitHub"
 license = "MIT"
 rust-version = "1.94.0"
-repository = "https://github.com/syntropika/grit"
-homepage = "https://github.com/syntropika/grit"
+repository = "https://github.com/syntropika/hyfa"
+homepage = "https://github.com/syntropika/hyfa"
 readme = "README.md"
 keywords = ["github", "issues", "graph", "agents", "cli"]
 categories = ["command-line-utilities", "development-tools"]
 include = ["src/**", "tests/**", ".skill/**", "Cargo.toml", "Cargo.lock", "LICENSE", "README.md", "CHANGELOG.md", "docs/**", "CONTEXT.md"]
 
 [lib]
-name = "grit"
+name = "hyfa"
 
 [[bin]]
-name = "grit"
+name = "hyfa"
 path = "src/main.rs"
 
 [dependencies]

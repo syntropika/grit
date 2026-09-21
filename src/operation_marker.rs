@@ -1,8 +1,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-const PREFIX: &str = "<!-- grit-operation:";
+const PREFIX: &str = "<!-- hyfa-operation:";
+// Historical remote content must remain recognizable after the CLI rename.
+const READ_PREFIXES: [&str; 2] = [PREFIX, "<!-- grit-operation:"];
 const SUFFIX: &str = " -->";
 const UUID_LENGTH: usize = 36;
+
+fn find_prefix(body: &str) -> Option<(usize, &str)> {
+    READ_PREFIXES
+        .into_iter()
+        .filter_map(|prefix| body.find(prefix).map(|start| (start, prefix)))
+        .min_by_key(|(start, _)| *start)
+}
 
 pub(crate) fn embed(body: &str, marker: &str) -> String {
     let comment = format!("{PREFIX}{marker}{SUFFIX}");
@@ -16,9 +25,9 @@ pub(crate) fn embed(body: &str, marker: &str) -> String {
 pub(crate) fn values(body: &str) -> Vec<&str> {
     let mut values = Vec::new();
     let mut search_from = 0;
-    while let Some(relative_start) = body[search_from..].find(PREFIX) {
+    while let Some((relative_start, prefix)) = find_prefix(&body[search_from..]) {
         let start = search_from + relative_start;
-        let value_start = start + PREFIX.len();
+        let value_start = start + prefix.len();
         let value_end = value_start.saturating_add(UUID_LENGTH);
         let Some(value) = body.get(value_start..value_end) else {
             search_from = value_start;
@@ -42,9 +51,9 @@ pub(crate) fn values(body: &str) -> Vec<&str> {
 pub(crate) fn strip(body: &str) -> String {
     let mut visible = body.to_owned();
     let mut search_from = 0;
-    while let Some(relative_start) = visible[search_from..].find(PREFIX) {
+    while let Some((relative_start, prefix)) = find_prefix(&visible[search_from..]) {
         let start = search_from + relative_start;
-        let value_start = start + PREFIX.len();
+        let value_start = start + prefix.len();
         let value_end = value_start.saturating_add(UUID_LENGTH);
         let Some(value) = visible.get(value_start..value_end) else {
             search_from = value_start;
@@ -136,11 +145,28 @@ mod tests {
     }
 
     #[test]
+    fn historical_markers_are_recognized_without_emitting_the_old_prefix() {
+        let marker = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
+        let historical = format!("Visible Markdown\n\n<!-- grit-operation:{marker} -->");
+        assert_eq!(values(&historical), [marker]);
+        assert_eq!(strip(&historical), "Visible Markdown");
+        assert!(embed("", marker).starts_with("<!-- hyfa-operation:"));
+
+        let mixed = embed(&historical, marker);
+        assert_eq!(values(&mixed), [marker, marker]);
+        assert_eq!(strip(&mixed), "Visible Markdown");
+        assert_eq!(
+            strip(&format!("{}\n\n{historical}", embed("", marker))),
+            "\n\nVisible Markdown"
+        );
+    }
+
+    #[test]
     fn malformed_or_noncanonical_marker_like_comments_remain_visible() {
         let body = concat!(
-            "before <!-- grit-operation:not-a-uuid --> middle ",
-            "<!-- grit-operation:6BA7B810-9DAD-11D1-80B4-00C04FD430C8 --> after ",
-            "<!-- grit-operation:unterminated"
+            "before <!-- hyfa-operation:not-a-uuid --> middle ",
+            "<!-- hyfa-operation:6BA7B810-9DAD-11D1-80B4-00C04FD430C8 --> after ",
+            "<!-- hyfa-operation:unterminated"
         );
         assert!(values(body).is_empty());
         assert_eq!(strip(body), body);

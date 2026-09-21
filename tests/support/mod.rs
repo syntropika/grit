@@ -38,13 +38,13 @@ pub(crate) fn comment_delta_query(since: &str, page: Option<u64>) -> Matcher {
 }
 
 pub(crate) fn sync_command(state: &TempDir, api_url: &str, repository: &str) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_grit"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hyfa"));
     command.args(["sync", "--repo", repository, "--json"]);
     command
         .env("GH_TOKEN", "automation-token")
-        .env("GRIT_GITHUB_API_URL", api_url)
-        .env("GRIT_NO_KEYRING", "1")
-        .env("GRIT_STATE_DIR", state.path())
+        .env("HYFA_GITHUB_API_URL", api_url)
+        .env("HYFA_NO_KEYRING", "1")
+        .env("HYFA_STATE_DIR", state.path())
         .env("PATH", "");
     command
 }

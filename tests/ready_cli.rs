@@ -31,14 +31,14 @@ fn ready_separates_readiness_from_default_and_assignee_execution_scopes() {
     let state = TempDir::new().expect("temporary state directory");
     let default = ready_command(&state, &github.url(), None)
         .output()
-        .expect("run grit ready");
+        .expect("run hyfa ready");
     assert!(
         default.status.success(),
         "stderr: {}",
         String::from_utf8_lossy(&default.stderr)
     );
     let default: Value = serde_json::from_slice(&default.stdout).expect("ready JSON");
-    assert_eq!(default["schema_version"], "grit.ready/v1");
+    assert_eq!(default["schema_version"], "hyfa.ready/v1");
     assert_eq!(default["command"], "ready");
     assert_eq!(default["repository"], "acme/widgets");
     assert_eq!(default["source"], "live");
@@ -64,7 +64,7 @@ fn ready_separates_readiness_from_default_and_assignee_execution_scopes() {
 
     let assigned = ready_command(&state, &github.url(), Some("alice"))
         .output()
-        .expect("run grit ready for assignee");
+        .expect("run hyfa ready for assignee");
     assert!(
         assigned.status.success(),
         "stderr: {}",
@@ -142,7 +142,7 @@ fn ready_respects_cycles_and_and_dependencies_and_every_external_state() {
 
     let output = ready_command_for(&state, &github.url(), "acme/graph", None)
         .output()
-        .expect("run grit ready");
+        .expect("run hyfa ready");
     assert!(
         output.status.success(),
         "stderr: {}",
@@ -377,16 +377,16 @@ fn ready_command_for(
     repository: &str,
     assignee: Option<&str>,
 ) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_grit"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hyfa"));
     command.args(["ready", "--repo", repository, "--json"]);
     if let Some(assignee) = assignee {
         command.args(["--assignee", assignee]);
     }
     command
         .env("GH_TOKEN", "automation-token")
-        .env("GRIT_GITHUB_API_URL", api_url)
-        .env("GRIT_NO_KEYRING", "1")
-        .env("GRIT_STATE_DIR", state.path())
+        .env("HYFA_GITHUB_API_URL", api_url)
+        .env("HYFA_NO_KEYRING", "1")
+        .env("HYFA_STATE_DIR", state.path())
         .env("PATH", "");
     command
 }

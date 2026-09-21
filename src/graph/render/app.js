@@ -19,8 +19,8 @@
   const presentation = JSON.parse(
     document.querySelector("#graph-presentation-data").textContent
   );
-  const networkView = globalThis.GritNetworkView.create(graph, presentation);
-  const query = globalThis.GritGraphQuery.create(graph);
+  const networkView = globalThis.HyfaNetworkView.create(graph, presentation);
+  const query = globalThis.HyfaGraphQuery.create(graph);
   const canvas = document.querySelector("#graph-canvas");
   const viewport = document.querySelector("#graph-viewport");
   const nodeLayer = document.querySelector("#graph-nodes");
@@ -64,7 +64,7 @@
   let zoom = 1;
   let labelZoom = null;
   let mapOrigin = { x: 0, y: 0 };
-  const camera = globalThis.GritGraphCamera.create(canvas, viewport, updateCameraLabels);
+  const camera = globalThis.HyfaGraphCamera.create(canvas, viewport, updateCameraLabels);
 
   const initialRenderStartedAt = performance.now();
   renderGraph(networkView.current(), "initial overview");
@@ -75,10 +75,10 @@
   applyView();
   camera.fit();
   document.body.getBoundingClientRect();
-  document.documentElement.dataset.gritLoadMs = applicationStartedAt.toFixed(3);
-  document.documentElement.dataset.gritRenderMs = initialRenderDuration.toFixed(3);
-  document.documentElement.dataset.gritTimeToInteractiveMs = performance.now().toFixed(3);
-  document.documentElement.dataset.gritNetworkMode = presentation.mode;
+  document.documentElement.dataset.hyfaLoadMs = applicationStartedAt.toFixed(3);
+  document.documentElement.dataset.hyfaRenderMs = initialRenderDuration.toFixed(3);
+  document.documentElement.dataset.hyfaTimeToInteractiveMs = performance.now().toFixed(3);
+  document.documentElement.dataset.hyfaNetworkMode = presentation.mode;
 
   function lifecycleForStatus(status) {
     if (status === "ready" || status === "blocked" || status === "external_open") return "open";
@@ -187,8 +187,8 @@
       text.textContent = label.text;
       layerLabels.append(text);
     }
-    document.documentElement.dataset.gritRenderedNodes = String(renderedNodes.length);
-    document.documentElement.dataset.gritRenderedEdges = String(edgeLayer.children.length);
+    document.documentElement.dataset.hyfaRenderedNodes = String(renderedNodes.length);
+    document.documentElement.dataset.hyfaRenderedEdges = String(edgeLayer.children.length);
     const selectedKey = detailPanel.dataset.selectedKey;
     const selectedGraphNode = selectedKey ? graphElement(selectedKey) : null;
     if (selectedGraphNode) {

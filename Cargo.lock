@@ -2168,8 +2168,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "syntropika-grit"
-version = "0.1.1"
+name = "syntropika-hyfa"
+version = "0.2.0"
 dependencies = [
  "aho-corasick",
  "chrono",

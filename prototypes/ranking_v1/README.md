@@ -1,6 +1,6 @@
 # PROTOTYPE — `next/v1` ranking
 
-Question: does a weight-free, bounded policy choose useful first steps across dependency chains, AND dependencies, fan-out, missing priorities, and critical P0 work without reducing Grit to a priority-label sorter?
+Question: does a weight-free, bounded policy choose useful first steps across dependency chains, AND dependencies, fan-out, missing priorities, and critical P0 work without reducing Hyfa to a priority-label sorter?
 
 This is throwaway Python code for validating the decision model. It has no persistence and does not call GitHub.
 

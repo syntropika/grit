@@ -37,7 +37,7 @@ test("owns reset, full, and bounded-neighborhood window state", () => {
 });
 
 test("uses the complete network as the initial full-mode window", () => {
-  const view = globalThis.GritNetworkView.create(graph, {
+  const view = globalThis.HyfaNetworkView.create(graph, {
     mode: "full",
     initial_network_node_limit: 1,
     initial_node_keys: []
@@ -47,7 +47,7 @@ test("uses the complete network as the initial full-mode window", () => {
 });
 
 function createConstrainedView() {
-  return globalThis.GritNetworkView.create(graph, {
+  return globalThis.HyfaNetworkView.create(graph, {
     mode: "constrained",
     initial_network_node_limit: 2,
     initial_node_keys: ["#1"]

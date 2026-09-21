@@ -7,12 +7,12 @@
 
 The Issue number is useful for identifying new Issues, but it is not a change cursor. An old Issue can be closed, assigned, edited, or have its labels changed without receiving a new number.
 
-Grit can maintain the ordinary part of the replica incrementally using `updated_at`, but it cannot use that same signal as a guarantee for dependencies. The practical strategy requires two streams:
+Hyfa can maintain the ordinary part of the replica incrementally using `updated_at`, but it cannot use that same signal as a guarantee for dependencies. The practical strategy requires two streams:
 
 1. New or modified Issues since a temporal watermark.
 2. Relationship events since an independent checkpoint.
 
-Without a durable webhook, GitHub does not offer a local CLI a dependency change feed with a formally guaranteed cursor, ordering, and retention. Therefore, a full reconciliation remains necessary whenever Grit cannot demonstrate continuity.
+Without a durable webhook, GitHub does not offer a local CLI a dependency change feed with a formally guaranteed cursor, ordering, and retention. Therefore, a full reconciliation remains necessary whenever Hyfa cannot demonstrate continuity.
 
 ## New and modified Issues
 
@@ -23,7 +23,7 @@ The [`GET /repos/{owner}/{repo}/issues`](https://docs.github.com/en/rest/issues/
 - `since=<timestamp>`, which returns items updated after the specified instant;
 - up to 100 items per page.
 
-The REST endpoint also returns pull requests; Grit must exclude objects that contain `pull_request`. GraphQL avoids that mixture: [`Repository.issues`](https://docs.github.com/en/graphql/reference/repos#repository) supports `IssueFilters.since`, ordering by `UPDATED_AT`, and cursor-based pagination of up to 100 nodes.
+The REST endpoint also returns pull requests; Hyfa must exclude objects that contain `pull_request`. GraphQL avoids that mixture: [`Repository.issues`](https://docs.github.com/en/graphql/reference/repos#repository) supports `IssueFilters.since`, ordering by `UPDATED_AT`, and cursor-based pagination of up to 100 nodes.
 
 A delta must not begin at the highest known number, but at a temporal watermark maintained internally. To account for temporal precision, ties, and races during pagination, an overlapping window and idempotent upserts by stable identity must be used.
 
@@ -71,7 +71,7 @@ The incremental listing does not emit tombstones. A request for an individual Is
 
 GitHub exposes `deleted` and `transferred` actions in the Issues webhook, but a polling-only replica needs to reconcile the inventory to detect absences reliably.
 
-## Recommended algorithm for Grit
+## Recommended algorithm for Hyfa
 
 ### Initial run
 

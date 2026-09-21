@@ -27,7 +27,7 @@ TARGETS = (
     "aarch64-apple-darwin",
 )
 RUST_VERSION = "1.94.0"
-ARCHIVE_FILES = ("grit", "LICENSE", "README.md", "CHANGELOG.md", "docs/installation.md", "docs/usage.md", "release.json")
+ARCHIVE_FILES = ("hyfa", "LICENSE", "README.md", "CHANGELOG.md", "docs/installation.md", "docs/usage.md", "release.json")
 
 
 def command(*args):
@@ -51,7 +51,7 @@ def identity():
 
 
 def archive_name(version, target):
-    return f"grit-v{version}-{target}"
+    return f"hyfa-v{version}-{target}"
 
 
 def sha256(path):
@@ -95,7 +95,7 @@ def bundled_document(filename, commit, bundled=ARCHIVE_FILES):
         resolved = posixpath.normpath(str(PurePosixPath(filename).parent / path))
         if resolved in bundled:
             return match[0]
-        return f"{match[1]}https://github.com/syntropika/grit/blob/{commit}/{resolved}{separator}{fragment}{match[3]}"
+        return f"{match[1]}https://github.com/syntropika/hyfa/blob/{commit}/{resolved}{separator}{fragment}{match[3]}"
 
     return re.sub(r"(\[[^\]\n]+\]\()([^\s)]+)(\))", source_link, document).encode()
 
@@ -128,7 +128,7 @@ def package(binary, target, output):
         "required_platform": required_platform,
     }
     files = {
-        "grit": binary.read_bytes(),
+        "hyfa": binary.read_bytes(),
         "LICENSE": (ROOT / "LICENSE").read_bytes(),
         "README.md": bundled_document("README.md", commit),
         "CHANGELOG.md": bundled_document("CHANGELOG.md", commit),
@@ -147,13 +147,13 @@ def package(binary, target, output):
                 for filename, data in sorted(files.items()):
                     info = tarfile.TarInfo(f"{name}/{filename}")
                     info.size = len(data)
-                    info.mode = 0o755 if filename == "grit" else 0o644
+                    info.mode = 0o755 if filename == "hyfa" else 0o644
                     info.mtime = epoch
                     bundle.addfile(info, io.BytesIO(data))
-    with tempfile.TemporaryDirectory(prefix="grit-release-extract-") as directory:
+    with tempfile.TemporaryDirectory(prefix="hyfa-release-extract-") as directory:
         with tarfile.open(archive) as bundle:
             bundle.extractall(directory, filter="data")
-        smoke(Path(directory) / name / "grit", version)
+        smoke(Path(directory) / name / "hyfa", version)
     print(f"Packaged and verified {archive}")
 
 
@@ -171,7 +171,7 @@ def verify_archives(output, version, commit):
                 raise ValueError(f"Unexpected archive contents: {name}")
             if not all(m.isfile() for m in members):
                 raise ValueError(f"Archive contains a link or non-regular file: {name}")
-            if bundle.getmember(f"{name}/grit").mode != 0o755:
+            if bundle.getmember(f"{name}/hyfa").mode != 0o755:
                 raise ValueError(f"Binary is not executable: {name}")
             metadata = json.load(bundle.extractfile(f"{name}/release.json"))
             for key, value in {"version": version, "commit": commit, "target": target, "rust": RUST_VERSION,
@@ -222,7 +222,7 @@ def github_request(url, method="GET", data=None, content_type="application/json"
         "Accept": "application/octet-stream" if binary else "application/vnd.github+json",
         "Content-Type": content_type,
         "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": "grit-release",
+        "User-Agent": "hyfa-release",
     })
     try:
         with build_opener(ReleaseRedirectHandler()).open(request, timeout=60) as response:
@@ -300,7 +300,7 @@ def publish(output):
         f"· [Source commit](https://github.com/{repository}/commit/{commit})\n"
     )
     draft = github_api(f"/repos/{repository}/releases", "POST", {
-        "tag_name": tag, "target_commitish": commit, "name": f"Grit {tag}", "body": notes,
+        "tag_name": tag, "target_commitish": commit, "name": f"Hyfa {tag}", "body": notes,
         "draft": True, "prerelease": False,
     })
     release_id = draft.get("id")

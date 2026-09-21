@@ -285,7 +285,7 @@ mod tests {
     #[should_panic(expected = "partial rollouts must be undone in LIFO order")]
     fn rejects_out_of_order_partial_rollback() {
         let replica = LocalReplica {
-            schema_version: "grit.local-replica/v1".to_owned(),
+            schema_version: "hyfa.local-replica/v1".to_owned(),
             repository: "acme/rollback".to_owned(),
             synced_at: "2026-08-07T00:00:00Z".to_owned(),
             input_hash: "fixture".to_owned(),

@@ -58,5 +58,5 @@
     return selected;
   }
 
-  globalThis.GritNetworkView = Object.freeze({ create });
+  globalThis.HyfaNetworkView = Object.freeze({ create });
 })();

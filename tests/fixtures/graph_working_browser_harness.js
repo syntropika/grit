@@ -64,7 +64,7 @@ function exercise() {
 }
 
 function waitForApp() {
-  if (frame.contentDocument?.documentElement?.dataset.gritTimeToInteractiveMs !== undefined) exercise();
+  if (frame.contentDocument?.documentElement?.dataset.hyfaTimeToInteractiveMs !== undefined) exercise();
   else setTimeout(waitForApp, 10);
 }
 waitForApp();

@@ -197,7 +197,7 @@ fn ordered_concrete_then_none_updates_project_deterministically_across_restarts(
         .expect("durable outbox"),
     )
     .expect("outbox JSON");
-    assert_eq!(outbox["schema_version"], "grit.pending-mutations/v1");
+    assert_eq!(outbox["schema_version"], "hyfa.pending-mutations/v1");
     assert_eq!(outbox["repository"], "acme/offline");
     assert_eq!(
         outbox["operations"].as_array().expect("operations").len(),
@@ -650,13 +650,13 @@ fn update_command(state: &TempDir, api_url: &str, issue_number: u64, priority: &
 }
 
 fn command(state: &Path, api_url: &str, args: &[&str]) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_grit"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hyfa"));
     command
         .args(args)
         .env("GH_TOKEN", "automation-token")
-        .env("GRIT_GITHUB_API_URL", api_url)
-        .env("GRIT_NO_KEYRING", "1")
-        .env("GRIT_STATE_DIR", state)
+        .env("HYFA_GITHUB_API_URL", api_url)
+        .env("HYFA_NO_KEYRING", "1")
+        .env("HYFA_STATE_DIR", state)
         .env("PATH", "");
     command
 }

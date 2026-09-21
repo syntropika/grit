@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 
 def smoke(binary: Path, version: str) -> None:
     binary = binary.resolve()
-    assert subprocess.check_output([binary, "--version"], text=True).strip() == f"grit {version}"
+    assert subprocess.check_output([binary, "--version"], text=True).strip() == f"hyfa {version}"
     help_text = subprocess.check_output([binary, "--help"], text=True)
     for command in ("auth", "skill", "create", "comment", "next", "plan", "ready", "graph", "reconcile"):
         assert any(line.strip().startswith(f"{command} ") for line in help_text.splitlines()), command
@@ -37,11 +37,11 @@ def smoke(binary: Path, version: str) -> None:
             self.end_headers()
             self.wfile.write(b'{"data":{"repository":{"issues":{"totalCount":0}}}}')
 
-    with tempfile.TemporaryDirectory(prefix="grit-release-smoke-") as directory:
+    with tempfile.TemporaryDirectory(prefix="hyfa-release-smoke-") as directory:
         env = dict(os.environ)
         # Prevent discovery of the operator's keychain or any real API endpoint.
-        env.update(PATH="", GH_TOKEN="fixture-only", GRIT_STATE_DIR=directory,
-                   GRIT_NO_KEYRING="1",
+        env.update(PATH="", GH_TOKEN="fixture-only", HYFA_STATE_DIR=directory,
+                   HYFA_NO_KEYRING="1",
                    NO_PROXY="127.0.0.1", no_proxy="127.0.0.1")
         skill_project = Path(directory) / "skill-project"
         skill_project.mkdir()
@@ -50,16 +50,16 @@ def smoke(binary: Path, version: str) -> None:
                                    capture_output=True, text=True, timeout=30)
         if installed.returncode:
             raise RuntimeError(f"Embedded skill installation failed: {installed.stderr}")
-        skill = skill_project / ".agents/skills/grit/SKILL.md"
+        skill = skill_project / ".agents/skills/hyfa/SKILL.md"
         assert skill.is_file() and not skill.is_symlink()
         skill_payload = skill.read_bytes()
-        assert b"name: grit" in skill_payload
+        assert b"name: hyfa" in skill_payload
         repeated = subprocess.run(install_args, env=env, cwd=skill_project,
                                   capture_output=True, text=True, timeout=30)
         assert repeated.returncode != 0
         assert skill.read_bytes() == skill_payload
         server = ThreadingHTTPServer(("127.0.0.1", 0), Fixture)
-        env["GRIT_GITHUB_API_URL"] = f"http://127.0.0.1:{server.server_port}"
+        env["HYFA_GITHUB_API_URL"] = f"http://127.0.0.1:{server.server_port}"
         thread = Thread(target=server.serve_forever, daemon=True)
         thread.start()
 

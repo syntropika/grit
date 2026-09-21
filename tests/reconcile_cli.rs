@@ -50,7 +50,7 @@ fn reconciliation_contains_conflicts_and_advances_independent_branches() {
     );
     assert_success(&reconciled);
     let reconciled: Value = serde_json::from_slice(&reconciled.stdout).expect("reconcile JSON");
-    assert_eq!(reconciled["schema_version"], "grit.reconcile/v1");
+    assert_eq!(reconciled["schema_version"], "hyfa.reconcile/v1");
     assert_eq!(reconciled["command"], "reconcile");
     assert_eq!(reconciled["summary"]["conflicting"], 1);
     assert_eq!(reconciled["summary"]["transitively_blocked"], 1);
@@ -222,7 +222,7 @@ fn remote_resolution_retires_the_intent_without_a_github_write() {
     );
     assert_success(&resolved);
     let resolved: Value = serde_json::from_slice(&resolved.stdout).expect("resolve JSON");
-    assert_eq!(resolved["schema_version"], "grit.resolve/v1");
+    assert_eq!(resolved["schema_version"], "hyfa.resolve/v1");
     assert_eq!(resolved["resolution"]["choice"], "remote");
     assert_eq!(resolved["summary"]["remaining"], 0);
     assert!(
@@ -674,15 +674,15 @@ fn replica_path(state: &TempDir) -> std::path::PathBuf {
 }
 
 fn run(state: &TempDir, api_url: &str, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_grit"))
+    Command::new(env!("CARGO_BIN_EXE_hyfa"))
         .args(args)
         .env("GH_TOKEN", "automation-token")
-        .env("GRIT_GITHUB_API_URL", api_url)
-        .env("GRIT_NO_KEYRING", "1")
-        .env("GRIT_STATE_DIR", state.path())
+        .env("HYFA_GITHUB_API_URL", api_url)
+        .env("HYFA_NO_KEYRING", "1")
+        .env("HYFA_STATE_DIR", state.path())
         .env("PATH", "")
         .output()
-        .expect("run grit")
+        .expect("run hyfa")
 }
 
 fn assert_success(output: &Output) {

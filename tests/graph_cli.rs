@@ -190,7 +190,7 @@ fn graph_generates_a_deterministic_valid_offline_site_without_raw_records() {
         .expect("graph command");
     assert_success(&generated);
     let generated: Value = serde_json::from_slice(&generated.stdout).expect("graph output JSON");
-    assert_eq!(generated["schema_version"], "grit.graph/v1");
+    assert_eq!(generated["schema_version"], "hyfa.graph/v1");
     assert_eq!(generated["command"], "graph");
     assert_eq!(generated["repository"], "acme/widgets");
     assert_eq!(generated["source"], "live");
@@ -209,7 +209,7 @@ fn graph_generates_a_deterministic_valid_offline_site_without_raw_records() {
     let javascript_bytes = fs::read(output_directory.join("app.js")).expect("graph JavaScript");
     let schema_bytes = fs::read(output_directory.join("graph.schema.json")).expect("graph schema");
     let graph: Value = serde_json::from_slice(&graph_bytes).expect("artifact JSON");
-    assert_eq!(graph["schema_version"], "grit.graph-artifact/v2");
+    assert_eq!(graph["schema_version"], "hyfa.graph-artifact/v2");
     assert_eq!(graph["schema_url"], "./graph.schema.json");
     assert_eq!(graph["repository"], "acme/widgets");
     assert!(graph["synced_at"].as_str().is_some());
@@ -295,7 +295,7 @@ fn graph_generates_a_deterministic_valid_offline_site_without_raw_records() {
     assert!(html.contains("href=\"./graph.json\""));
     assert!(html.contains("connect-src 'none'"));
     assert!(html.contains("id=\"graph-presentation-data\""));
-    assert!(html.contains("grit.graph-presentation/v1"));
+    assert!(html.contains("hyfa.graph-presentation/v1"));
     assert!(html.contains("\"mode\":\"full\""));
     assert!(html.contains("src=\"./network-view.js\""));
     assert!(html.contains("src=\"./app.js\""));
@@ -618,7 +618,7 @@ fn run_browser_harness(workspace: &TempDir, script: &str) -> Value {
         .expect("browser harness JavaScript");
 
     let browser_profile = TempDir::new().expect("temporary browser profile");
-    let browser_binary = std::env::var_os("GRIT_BROWSER").unwrap_or_else(|| "google-chrome".into());
+    let browser_binary = std::env::var_os("HYFA_BROWSER").unwrap_or_else(|| "google-chrome".into());
     let browser = Command::new(browser_binary)
         .arg("--headless=new")
         .arg("--no-sandbox")
@@ -679,27 +679,27 @@ fn a_dangling_internal_dependency_fails_without_replacing_the_previous_site() {
 }
 
 fn graph_command(state: &TempDir, api_url: &str, output: &std::path::Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_grit"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hyfa"));
     command.args(["graph", "--repo", "acme/widgets", "--output"]);
     command.arg(output);
     command.arg("--json");
     command
         .env("GH_TOKEN", "automation-token")
-        .env("GRIT_GITHUB_API_URL", api_url)
-        .env("GRIT_NO_KEYRING", "1")
-        .env("GRIT_STATE_DIR", state.path())
+        .env("HYFA_GITHUB_API_URL", api_url)
+        .env("HYFA_NO_KEYRING", "1")
+        .env("HYFA_STATE_DIR", state.path())
         .env("PATH", "");
     command
 }
 
 fn offline_analysis_command(state: &TempDir, api_url: &str, command_name: &str) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_grit"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hyfa"));
     command.args([command_name, "--repo", "acme/widgets", "--json"]);
     command
         .env_remove("GH_TOKEN")
-        .env("GRIT_GITHUB_API_URL", api_url)
-        .env("GRIT_NO_KEYRING", "1")
-        .env("GRIT_STATE_DIR", state.path())
+        .env("HYFA_GITHUB_API_URL", api_url)
+        .env("HYFA_NO_KEYRING", "1")
+        .env("HYFA_STATE_DIR", state.path())
         .env("PATH", "");
     command
 }
@@ -808,7 +808,7 @@ fn issue_inventory() -> String {
     json!([
         issue(
             1,
-            "Root <script>alert(1)</script><!-- grit:operation operation-123 -->",
+            "Root <script>alert(1)</script><!-- hyfa:operation operation-123 -->",
             "open"
         ),
         issue(2, "Dependent", "open"),
@@ -820,7 +820,7 @@ fn issue_inventory() -> String {
 fn browser_issue_inventory() -> String {
     let mut root = issue(
         1,
-        "Root <script>alert(1)</script><!-- grit:operation operation-123 -->",
+        "Root <script>alert(1)</script><!-- hyfa:operation operation-123 -->",
         "open",
     );
     root["labels"] = json!([
@@ -932,7 +932,7 @@ fn prepare_constrained_browser_site(source: &std::path::Path, target: &std::path
             .find("</script>")
             .expect("embedded presentation data terminator");
     let constrained = json!({
-        "schema_version": "grit.graph-presentation/v1",
+        "schema_version": "hyfa.graph-presentation/v1",
         "mode": "constrained",
         "full_network_limits": {"nodes": 0, "edges": 0},
         "initial_network_node_limit": 2,
@@ -948,7 +948,7 @@ fn issue(number: u64, title: &str, state: &str) -> Value {
         "node_id": format!("I_{number}"),
         "number": number,
         "title": title,
-        "body": "private body <!-- grit:operation operation-123 -->",
+        "body": "private body <!-- hyfa:operation operation-123 -->",
         "state": state,
         "state_reason": if state == "closed" { Some("completed") } else { None },
         "html_url": format!("https://github.com/acme/widgets/issues/{number}"),
@@ -982,7 +982,7 @@ fn comment(id: u64, issue_number: u64) -> Value {
         "node_id": format!("IC_{id}"),
         "html_url": format!("https://github.com/acme/widgets/issues/{issue_number}#issuecomment-{id}"),
         "issue_url": format!("https://api.github.com/repos/acme/widgets/issues/{issue_number}"),
-        "body": "private comment <!-- grit:operation operation-123 -->",
+        "body": "private comment <!-- hyfa:operation operation-123 -->",
         "user": null,
         "author_association": "NONE",
         "created_at": "2026-08-01T00:00:00Z",

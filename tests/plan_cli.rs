@@ -13,16 +13,16 @@ use support::{
 
 #[test]
 fn plan_rejects_worker_capacity_in_v1_before_accessing_github() {
-    let output = Command::new(env!("CARGO_BIN_EXE_grit"))
+    let output = Command::new(env!("CARGO_BIN_EXE_hyfa"))
         .args(["plan", "--repo", "acme/widgets", "--workers", "2", "--json"])
-        .env("GRIT_GITHUB_API_URL", "http://127.0.0.1:1")
+        .env("HYFA_GITHUB_API_URL", "http://127.0.0.1:1")
         .env("GH_TOKEN", "test-token")
         .output()
-        .expect("run grit plan with worker capacity");
+        .expect("run hyfa plan with worker capacity");
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("grit plan does not accept --workers in v1"));
+    assert!(stderr.contains("hyfa plan does not accept --workers in v1"));
     assert!(!stderr.contains("GitHub refresh failed"));
 }
 
@@ -46,23 +46,23 @@ fn plan_reuses_next_decision_and_ready_execution_frontier() {
     let state = TempDir::new().expect("temporary state directory");
     let api_url = github.url();
 
-    let seed = grit_command(&state, &api_url, "ready")
+    let seed = hyfa_command(&state, &api_url, "ready")
         .output()
         .expect("seed Local replica");
     assert_success(&seed);
     mocks.assert();
     drop(github);
 
-    let plan = grit_command(&state, &api_url, "plan")
+    let plan = hyfa_command(&state, &api_url, "plan")
         .output()
-        .expect("offline grit plan");
-    let next = grit_command(&state, &api_url, "next")
+        .expect("offline hyfa plan");
+    let next = hyfa_command(&state, &api_url, "next")
         .arg("--profile")
         .output()
-        .expect("offline grit next");
-    let ready = grit_command(&state, &api_url, "ready")
+        .expect("offline hyfa next");
+    let ready = hyfa_command(&state, &api_url, "ready")
         .output()
-        .expect("offline grit ready");
+        .expect("offline hyfa ready");
     assert_success(&next);
     assert_success(&ready);
     assert_success(&plan);
@@ -70,7 +70,7 @@ fn plan_reuses_next_decision_and_ready_execution_frontier() {
     let next: Value = serde_json::from_slice(&next.stdout).expect("next JSON");
     let ready: Value = serde_json::from_slice(&ready.stdout).expect("ready JSON");
     let plan: Value = serde_json::from_slice(&plan.stdout).expect("plan JSON");
-    assert_eq!(plan["schema_version"], "grit.plan/v1");
+    assert_eq!(plan["schema_version"], "hyfa.plan/v1");
     assert_eq!(plan["policy_version"], "next/v1");
     assert_eq!(plan["command"], "plan");
     assert_eq!(next["performance"]["cache_hit"], true);
@@ -129,7 +129,7 @@ fn pending_plan_and_next_share_cached_decisions_and_projected_structural_priorit
         (3, vec![internal_blocker_for(repository, 1, "open")]),
     ];
     let (state, api_url) = seeded_replica(repository, issues, dependencies);
-    let baseline = grit_command_for(&state, &api_url, repository, "next", None)
+    let baseline = hyfa_command_for(&state, &api_url, repository, "next", None)
         .output()
         .expect("rank synchronized priorities");
     assert_success(&baseline);
@@ -139,7 +139,7 @@ fn pending_plan_and_next_share_cached_decisions_and_projected_structural_priorit
     let snapshot_before = fs::read(&snapshot_path).expect("synchronized snapshot");
     let mut operation_ids = Vec::new();
     for (number, priority) in [(3, "p0"), (2, "p2")] {
-        let output = Command::new(env!("CARGO_BIN_EXE_grit"))
+        let output = Command::new(env!("CARGO_BIN_EXE_hyfa"))
             .args([
                 "update",
                 &format!("{repository}#{number}"),
@@ -147,9 +147,9 @@ fn pending_plan_and_next_share_cached_decisions_and_projected_structural_priorit
                 priority,
                 "--json",
             ])
-            .env("GRIT_NO_KEYRING", "1")
-            .env("GRIT_STATE_DIR", state.path())
-            .env("GRIT_GITHUB_API_URL", &api_url)
+            .env("HYFA_NO_KEYRING", "1")
+            .env("HYFA_STATE_DIR", state.path())
+            .env("HYFA_GITHUB_API_URL", &api_url)
             .env("GH_TOKEN", "test-token")
             .output()
             .expect("queue pending Priority");
@@ -159,9 +159,9 @@ fn pending_plan_and_next_share_cached_decisions_and_projected_structural_priorit
     }
     let outbox_path = repository_directory.join("outbox.json");
     let outbox_before = fs::read(&outbox_path).expect("pending mutations");
-    let plan_command = || grit_command_for(&state, &api_url, repository, "plan", None);
+    let plan_command = || hyfa_command_for(&state, &api_url, repository, "plan", None);
     let plan = plan_command().output().expect("plan pending graph");
-    let next = grit_command_for(&state, &api_url, repository, "next", None)
+    let next = hyfa_command_for(&state, &api_url, repository, "next", None)
         .arg("--profile")
         .output()
         .expect("reuse pending plan cache in next");
@@ -232,7 +232,7 @@ fn pending_dependency_chain_and_removal_rebuild_the_cached_plan_and_next_graph()
         vec![(1, vec![]), (2, vec![]), (3, vec![])],
     );
     let ranked = |command| {
-        let mut invocation = grit_command_for(&state, &api_url, repository, command, None);
+        let mut invocation = hyfa_command_for(&state, &api_url, repository, command, None);
         if command == "next" {
             invocation.arg("--profile");
         }
@@ -259,7 +259,7 @@ fn pending_dependency_chain_and_removal_rebuild_the_cached_plan_and_next_graph()
         ),
         ("unblock", 2, 1, vec![2, 3, 1], vec![vec![1, 2], vec![3]]),
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_grit"))
+        let output = Command::new(env!("CARGO_BIN_EXE_hyfa"))
             .args([
                 command,
                 &format!("{repository}#{blocked}"),
@@ -267,9 +267,9 @@ fn pending_dependency_chain_and_removal_rebuild_the_cached_plan_and_next_graph()
                 &format!("{repository}#{blocker}"),
                 "--json",
             ])
-            .env("GRIT_NO_KEYRING", "1")
-            .env("GRIT_STATE_DIR", state.path())
-            .env("GRIT_GITHUB_API_URL", &api_url)
+            .env("HYFA_NO_KEYRING", "1")
+            .env("HYFA_STATE_DIR", state.path())
+            .env("HYFA_GITHUB_API_URL", &api_url)
             .env("GH_TOKEN", "test-token")
             .output()
             .expect("queue Dependency mutation");
@@ -356,13 +356,13 @@ fn dependency_layers_use_and_depth_and_annotate_the_full_graph_scope() {
     ];
     let (state, api_url) = seeded_replica(repository, issues, dependencies);
 
-    let default = grit_command_for(&state, &api_url, repository, "plan", None)
+    let default = hyfa_command_for(&state, &api_url, repository, "plan", None)
         .output()
         .expect("default plan");
-    let alice = grit_command_for(&state, &api_url, repository, "plan", Some("alice"))
+    let alice = hyfa_command_for(&state, &api_url, repository, "plan", Some("alice"))
         .output()
         .expect("alice plan");
-    let alice_ready = grit_command_for(&state, &api_url, repository, "ready", Some("alice"))
+    let alice_ready = hyfa_command_for(&state, &api_url, repository, "ready", Some("alice"))
         .output()
         .expect("alice ready");
     assert_success(&default);
@@ -436,7 +436,7 @@ fn dependency_layers_propagate_every_unresolved_boundary() {
     ];
     let (state, api_url) = seeded_replica(repository, issues, dependencies);
 
-    let output = grit_command_for(&state, &api_url, repository, "plan", None)
+    let output = hyfa_command_for(&state, &api_url, repository, "plan", None)
         .output()
         .expect("plan with unresolved boundaries");
     assert_success(&output);
@@ -562,7 +562,7 @@ fn seeded_replica(
     let mocks = mock_repository(&mut github, repository, issues, dependencies);
     let state = TempDir::new().expect("temporary state directory");
     let api_url = github.url();
-    let seed = grit_command_for(&state, &api_url, repository, "ready", None)
+    let seed = hyfa_command_for(&state, &api_url, repository, "ready", None)
         .output()
         .expect("seed Local replica");
     assert_success(&seed);
@@ -571,35 +571,35 @@ fn seeded_replica(
     (state, api_url)
 }
 
-fn grit_command(state: &TempDir, api_url: &str, command: &str) -> Command {
-    grit_command_for(state, api_url, "acme/plan", command, None)
+fn hyfa_command(state: &TempDir, api_url: &str, command: &str) -> Command {
+    hyfa_command_for(state, api_url, "acme/plan", command, None)
 }
 
-fn grit_command_for(
+fn hyfa_command_for(
     state: &TempDir,
     api_url: &str,
     repository: &str,
     command: &str,
     assignee: Option<&str>,
 ) -> Command {
-    let mut grit = Command::new(env!("CARGO_BIN_EXE_grit"));
-    grit.args([command, "--repo", repository, "--json"]);
+    let mut hyfa = Command::new(env!("CARGO_BIN_EXE_hyfa"));
+    hyfa.args([command, "--repo", repository, "--json"]);
     if let Some(assignee) = assignee {
-        grit.args(["--assignee", assignee]);
+        hyfa.args(["--assignee", assignee]);
     }
-    grit.env("GRIT_NO_KEYRING", "1");
-    grit.env("GRIT_STATE_DIR", state.path());
-    grit.env("GRIT_GITHUB_API_URL", api_url);
-    grit.env("GH_TOKEN", "test-token");
-    grit
+    hyfa.env("HYFA_NO_KEYRING", "1");
+    hyfa.env("HYFA_STATE_DIR", state.path());
+    hyfa.env("HYFA_GITHUB_API_URL", api_url);
+    hyfa.env("GH_TOKEN", "test-token");
+    hyfa
 }
 
 fn human_plan_command(state: &TempDir, api_url: &str, repository: &str) -> Command {
-    let mut grit = Command::new(env!("CARGO_BIN_EXE_grit"));
-    grit.args(["plan", "--repo", repository]);
-    grit.env("GRIT_NO_KEYRING", "1");
-    grit.env("GRIT_STATE_DIR", state.path());
-    grit.env("GRIT_GITHUB_API_URL", api_url);
-    grit.env("GH_TOKEN", "test-token");
-    grit
+    let mut hyfa = Command::new(env!("CARGO_BIN_EXE_hyfa"));
+    hyfa.args(["plan", "--repo", repository]);
+    hyfa.env("HYFA_NO_KEYRING", "1");
+    hyfa.env("HYFA_STATE_DIR", state.path());
+    hyfa.env("HYFA_GITHUB_API_URL", api_url);
+    hyfa.env("GH_TOKEN", "test-token");
+    hyfa
 }

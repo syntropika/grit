@@ -1,4 +1,4 @@
-name: Deploy sealed Grit graph to Pages
+name: Deploy sealed Hyfa graph to Pages
 
 on:
   push:
@@ -11,7 +11,7 @@ on:
 permissions: {}
 
 concurrency:
-  group: grit-pages
+  group: hyfa-pages
   cancel-in-progress: true
 
 jobs:
@@ -27,16 +27,16 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Build Grit
-        id: build-grit
+      - name: Build Hyfa
+        id: build-hyfa
         run: cargo build --release --locked
       - name: Generate sealed public graph
         id: generate
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GRIT_STATE_DIR: ${{ runner.temp }}/grit-state
+          HYFA_STATE_DIR: ${{ runner.temp }}/hyfa-state
         run: |
-          ./target/release/grit graph --repo "${{ github.repository }}" --output site-public/ --public
+          ./target/release/hyfa graph --repo "${{ github.repository }}" --output site-public/ --public
       - name: Archive sealed Pages artifact
         id: archive
         env:

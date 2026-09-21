@@ -17,7 +17,7 @@ use crate::{
     store::{StoreError, repository_state_directory},
 };
 
-const SCHEMA_VERSION: &str = "grit.draft-identities/v1";
+const SCHEMA_VERSION: &str = "hyfa.draft-identities/v1";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct DraftIdentity {

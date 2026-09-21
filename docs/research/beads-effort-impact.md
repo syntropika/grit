@@ -9,7 +9,7 @@ Checked on August 6, 2026 against:
 
 Beads core does have an effort estimate, although it is not called `effort`: it stores the optional `estimated_minutes` field. It also stores a human-assigned P0–P4 `priority`. It has no native `impact` field or graph-based impact ranking.
 
-Beads Viewer does not load a declared `impact` either. It calculates several different things that it calls “impact”: a composite score, chain depth, and hypothetical unblocking deltas. Therefore, copying the name without separating its meanings would introduce ambiguity into Grit.
+Beads Viewer does not load a declared `impact` either. It calculates several different things that it calls “impact”: a composite score, chain depth, and hypothetical unblocking deltas. Therefore, copying the name without separating its meanings would introduce ambiguity into Hyfa.
 
 ## What Beads core persists
 
@@ -46,7 +46,7 @@ There is also a documentation discrepancy: the README still publishes an earlier
 - **`high-impact` recipe**: simply means “highest PageRank,” not the composite score ([recipes](https://github.com/Dicklesworthstone/beads_viewer/blob/fba4591a4b1553a988a7cf71e631c1fd570b1b32/README.md#L1074-L1085)).
 - **Quick wins**: although the code describes them as balancing impact and effort, its simplicity heuristic uses the blocking ratio and depth, not `estimated_minutes` ([quick wins](https://github.com/Dicklesworthstone/beads_viewer/blob/fba4591a4b1553a988a7cf71e631c1fd570b1b32/pkg/analysis/triage.go#L864-L900)). Viewer does use `estimated_minutes` for ETA/capacity ([ETA](https://github.com/Dicklesworthstone/beads_viewer/blob/fba4591a4b1553a988a7cf71e631c1fd570b1b32/pkg/analysis/eta.go#L12-L31)), but its quick-win selection is not a rigorous effort analysis.
 
-## Predecisional vocabulary considered for Grit
+## Predecisional vocabulary considered for Hyfa
 
 This section predates ADR 0028 and is retained as research context. The normative v1 vocabulary is **Declared priority**, **Unlock set**, and **Unlock profile**. Estimated effort and declared or business value are outside the v1 ranking contract.
 

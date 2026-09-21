@@ -15,10 +15,10 @@ const exercise = () => {
     const checks = {
       full_network_within_validated_range: presentation.mode === "full"
         && doc.querySelector("#network-mode").hidden,
-      performance_markers: Number(doc.documentElement.dataset.gritLoadMs) >= 0
-        && Number(doc.documentElement.dataset.gritRenderMs) >= 0
-        && Number(doc.documentElement.dataset.gritTimeToInteractiveMs)
-          >= Number(doc.documentElement.dataset.gritLoadMs),
+      performance_markers: Number(doc.documentElement.dataset.hyfaLoadMs) >= 0
+        && Number(doc.documentElement.dataset.hyfaRenderMs) >= 0
+        && Number(doc.documentElement.dataset.hyfaTimeToInteractiveMs)
+          >= Number(doc.documentElement.dataset.hyfaLoadMs),
       ...exerciseConstrainedMode(constrainedFrame.contentDocument),
       ...exerciseOutcomes(harness),
       ...exerciseSearchAndSelection(harness),
@@ -384,11 +384,11 @@ function exerciseHostileText(harness) {
 }
 
 function exerciseWhenReady() {
-  const mainReady = frame.contentDocument?.documentElement?.dataset.gritTimeToInteractiveMs;
+  const mainReady = frame.contentDocument?.documentElement?.dataset.hyfaTimeToInteractiveMs;
   const constrainedReady = constrainedFrame.contentDocument
-    ?.documentElement?.dataset.gritTimeToInteractiveMs;
+    ?.documentElement?.dataset.hyfaTimeToInteractiveMs;
   const projectReady = projectFrame.contentDocument
-    ?.documentElement?.dataset.gritTimeToInteractiveMs;
+    ?.documentElement?.dataset.hyfaTimeToInteractiveMs;
   if (mainReady && constrainedReady && projectReady) {
     setTimeout(exercise, 0);
     return;
@@ -493,7 +493,7 @@ function exerciseOutcomes({ doc, data }) {
   constrainedDoc.querySelector('[data-work-view="completed"]').click();
   const constrainedCompleted = [...constrainedDoc.querySelectorAll('.graph-node:not([hidden])')]
     .some((node) => node.dataset.nodeKey === "acme/widgets#3")
-    && Number(constrainedDoc.documentElement.dataset.gritRenderedNodes) <= 500;
+    && Number(constrainedDoc.documentElement.dataset.hyfaRenderedNodes) <= 500;
   constrainedDoc.querySelector("#clear-view").click();
   doc.querySelector('[data-work-view="not_planned"]').click();
   const empty = visibleKeys().length === 0 && !doc.querySelector("#graph-empty").hidden;

@@ -362,11 +362,11 @@ impl Fixture {
 }
 
 fn command(state: &TempDir, api_url: &str) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_grit"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hyfa"));
     command
-        .env("GRIT_NO_KEYRING", "1")
-        .env("GRIT_STATE_DIR", state.path())
-        .env("GRIT_GITHUB_API_URL", api_url)
+        .env("HYFA_NO_KEYRING", "1")
+        .env("HYFA_STATE_DIR", state.path())
+        .env("HYFA_GITHUB_API_URL", api_url)
         .env_remove("GH_TOKEN")
         .env_remove("GITHUB_TOKEN")
         .env("PATH", "");
@@ -487,8 +487,8 @@ fn assert_private_text_excluded(graph: &Value) {
     for excluded in [
         PRIVATE_BODY,
         PRIVATE_COMMENT,
-        "<!-- grit:operation",
-        "<!-- grit-operation",
+        "<!-- hyfa:operation",
+        "<!-- hyfa-operation",
     ] {
         assert!(!serialized.contains(excluded));
     }

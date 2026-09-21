@@ -196,6 +196,6 @@
   }
 
   const api = Object.freeze({ create, fitTransform, zoomTransform });
-  globalThis.GritGraphCamera = api;
+  globalThis.HyfaGraphCamera = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })();

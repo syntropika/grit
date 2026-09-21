@@ -234,7 +234,7 @@ impl MetadataSetTarget {
 pub(crate) enum MetadataError {
     #[error("generic label names must contain 1 to 50 characters")]
     InvalidLabel,
-    #[error("canonical Priority labels must be changed with `grit update ISSUE --priority`")]
+    #[error("canonical Priority labels must be changed with `hyfa update ISSUE --priority`")]
     PriorityLabel,
     #[error("metadata mutation references an invalid Issue identity")]
     InvalidIssue,

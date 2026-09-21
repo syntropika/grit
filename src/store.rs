@@ -49,9 +49,9 @@ impl ReplicaStore {
 }
 
 pub(crate) fn repository_state_directory(repository: &Repository) -> Result<PathBuf, StoreError> {
-    let root = match std::env::var_os("GRIT_STATE_DIR") {
+    let root = match std::env::var_os("HYFA_STATE_DIR") {
         Some(path) if !path.is_empty() => PathBuf::from(path),
-        _ => ProjectDirs::from("", "", "grit")
+        _ => ProjectDirs::from("", "", "hyfa")
             .ok_or(StoreError::NoStateDirectory)?
             .data_local_dir()
             .to_owned(),

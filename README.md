@@ -1,8 +1,8 @@
-# Grit
+# Hyfa
 
 **Choose work you can start. See what it unlocks.**
 
-Grit is a command-line tool for developers and maintainers who plan work in
+Hyfa is a command-line tool for developers and maintainers who plan work in
 GitHub Issues. It follows native Issue dependencies to find ready work,
 recommend a next step, and explain which Issues that work could unblock.
 GitHub remains the source of truth.
@@ -16,43 +16,43 @@ flowchart LR
 ```
 
 In this example, with no other open blockers, completing #7 makes both #12 and
-#18 ready. Grit checks all dependencies before counting an Issue as unlocked,
+#18 ready. Hyfa checks all dependencies before counting an Issue as unlocked,
 so work with another unresolved blocker stays blocked.
 
 ## Get your first recommendation
 
 Download a Linux or macOS binary for x86_64 or ARM64 from
-[GitHub Releases](https://github.com/syntropika/grit/releases/latest). See the
+[GitHub Releases](https://github.com/syntropika/hyfa/releases/latest). See the
 [installation guide](docs/installation.md) for system requirements and checksum
-verification. With Rust 1.94.0 installed, you can also build v0.1.1 from source:
+verification. With Rust 1.94.0 installed, you can also build v0.2.0 from source:
 
 ```bash
-cargo +1.94.0 install --locked --git https://github.com/syntropika/grit --tag v0.1.1
+cargo +1.94.0 install --locked --git https://github.com/syntropika/hyfa --tag v0.2.0
 ```
 
 Sign in through your browser, then replace `OWNER/REPO` with the repository
 you want to analyze:
 
 ```bash
-grit auth login
-grit sync --repo OWNER/REPO
-grit next --repo OWNER/REPO
+hyfa auth login
+hyfa sync --repo OWNER/REPO
+hyfa next --repo OWNER/REPO
 ```
 
-Grit calls GitHub's API directly from Rust. It uses `GH_TOKEN` first, then its
+Hyfa calls GitHub's API directly from Rust. It uses `GH_TOKEN` first, then its
 own saved login.
 If you already provide `GH_TOKEN`, skip the login command. See
 [authentication](docs/installation.md#connect-to-github) for token login and
 GitHub Enterprise configuration.
 These commands read GitHub without changing remote Issues.
 
-To give a coding agent the Grit usage guide, run this from your project:
+To give a coding agent the Hyfa usage guide, run this from your project:
 
 ```bash
-grit skill install
+hyfa skill install
 ```
 
-This installs the bundled skill in `.agents/skills/grit`. It explains how to
+This installs the bundled skill in `.agents/skills/hyfa`. It explains how to
 choose ready work, create and update Issues, add comments, and reconcile
 pending changes. See [agent setup](docs/installation.md#install-the-agent-skill)
 for other providers. The skill is included in the binary and installs offline.
@@ -61,7 +61,7 @@ By default, `next` chooses from **unassigned, ready work**. To choose from ready
 Issues assigned to a specific person, pass their GitHub login:
 
 ```bash
-grit next --repo OWNER/REPO --assignee LOGIN
+hyfa next --repo OWNER/REPO --assignee LOGIN
 ```
 
 Use native GitHub Issue dependencies to describe blockers. Optional
@@ -81,15 +81,15 @@ bounded; dependency layers describe structure, not delivery dates. Use
 
 | What you need | Command |
 | --- | --- |
-| See everything you can start in your assignment scope | `grit ready --repo OWNER/REPO` |
-| Choose a next Issue and understand why | `grit next --repo OWNER/REPO` |
-| See parallel work and dependency layers | `grit plan --repo OWNER/REPO` |
-| Find cycles, blocked P0 Issues, and priority conflicts | `grit triage --repo OWNER/REPO` |
+| See everything you can start in your assignment scope | `hyfa ready --repo OWNER/REPO` |
+| Choose a next Issue and understand why | `hyfa next --repo OWNER/REPO` |
+| See parallel work and dependency layers | `hyfa plan --repo OWNER/REPO` |
+| Find cycles, blocked P0 Issues, and priority conflicts | `hyfa triage --repo OWNER/REPO` |
 
 ## Keep working offline
 
 After a first successful sync, analysis can fall back to the latest local
-snapshot when GitHub is unavailable. Grit reports when that snapshot was
+snapshot when GitHub is unavailable. Hyfa reports when that snapshot was
 synchronized.
 
 You can also create draft Issues and queue edits, comments, and dependency
@@ -98,7 +98,7 @@ until accepted by GitHub. Apply queued work explicitly when connectivity
 returns:
 
 ```bash
-grit reconcile --repo OWNER/REPO
+hyfa reconcile --repo OWNER/REPO
 ```
 
 Read commands never replay pending writes. Reconciliation checks current GitHub
@@ -111,7 +111,7 @@ search Issues, and trace blockers and dependents. Switch to dependency layers
 or the accessible Issue table when you need another view:
 
 ```bash
-grit graph --repo OWNER/REPO --output site/
+hyfa graph --repo OWNER/REPO --output site/
 ```
 
 Open `site/index.html` in your browser. The generated explorer works offline
@@ -123,13 +123,13 @@ after checking the repository's current public visibility. See
 [public export and GitHub Pages](docs/usage.md)
 for its included fields and publication workflow.
 
-## Use Grit in scripts and agents
+## Use Hyfa in scripts and agents
 
 Add `--json` for versioned machine-readable results, including synchronization
 time, recommendation evidence, search limits, and pending-change provenance:
 
 ```bash
-grit next --repo OWNER/REPO --json
+hyfa next --repo OWNER/REPO --json
 ```
 
 Use the command output as the integration contract. The

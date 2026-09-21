@@ -1,49 +1,49 @@
 ---
-name: grit
-description: Use the Grit CLI to choose executable GitHub Issue work, inspect dependencies, manage Issues and assignments, reconcile queued changes, and generate Issue graph explorers. Use when a task involves Grit or dependency-aware GitHub Issue planning.
+name: hyfa
+description: Use the Hyfa CLI to choose executable GitHub Issue work, inspect dependencies, manage Issues and assignments, reconcile queued changes, and generate Issue graph explorers. Use when a task involves Hyfa or dependency-aware GitHub Issue planning.
 ---
 
-# Grit
+# Hyfa
 
-Use `grit` directly; no GitHub CLI is required. Preserve the user's chosen
+Use `hyfa` directly; no GitHub CLI is required. Preserve the user's chosen
 repository, assignee scope, and existing authorization. Selecting work does
 not itself assign an Issue, post a comment, or authorize unrelated changes.
 
-Use `grit --version` and `grit COMMAND --help` to check the installed interface.
+Use `hyfa --version` and `hyfa COMMAND --help` to check the installed interface.
 Use `--json` where supported and parse its versioned output. Pass an explicit
 `--repo OWNER/REPO`; quote Issue references such as `'OWNER/REPO#42'`.
 For additional options, consult the
-[usage guide](https://github.com/syntropika/grit/blob/v0.1.1/docs/usage.md) and
-[installation guide](https://github.com/syntropika/grit/blob/v0.1.1/docs/installation.md).
+[usage guide](https://github.com/syntropika/hyfa/blob/v0.2.0/docs/usage.md) and
+[installation guide](https://github.com/syntropika/hyfa/blob/v0.2.0/docs/installation.md).
 
 ## Authentication and first use
 
-When authentication needs checking, run `grit auth status --json`. Browser
-login is `grit auth login`: GitHub.com uses Grit's built-in official OAuth App.
+When authentication needs checking, run `hyfa auth status --json`. Browser
+login is `hyfa auth login`: GitHub.com uses Hyfa's built-in official OAuth App.
 The user completes the displayed browser verification and authorization;
 the agent can run the command and relay the verification instructions.
 Users do not need to register an app for ordinary GitHub.com login.
 
-A non-empty `GH_TOKEN` takes precedence over Grit's host-specific saved login.
+A non-empty `GH_TOKEN` takes precedence over Hyfa's host-specific saved login.
 Headless environments can supply it through their secret configuration.
-`grit auth login --with-token` accepts a token piped from a trusted secret
+`hyfa auth login --with-token` accepts a token piped from a trusted secret
 source. Never request tokens in chat, print them, or put them in command
 arguments, source files, reports, or graph artifacts. Saved login requires
 the OS secure credential store. Enterprise hosts require their own app for
 browser login; see the installation guide for host and API configuration.
 
-Run `grit sync --repo OWNER/REPO --json` to establish the first valid Local
+Run `hyfa sync --repo OWNER/REPO --json` to establish the first valid Local
 replica. Offline analysis and Draft creation require an existing valid replica.
 GitHub is authoritative; do not edit replica or outbox files directly.
 
 ## Choose and inspect work
 
 ```bash
-grit ready --repo OWNER/REPO --json
-grit next --repo OWNER/REPO --json
-grit next --repo OWNER/REPO --assignee LOGIN --horizon 3 --json
-grit plan --repo OWNER/REPO --json
-grit triage --repo OWNER/REPO --json
+hyfa ready --repo OWNER/REPO --json
+hyfa next --repo OWNER/REPO --json
+hyfa next --repo OWNER/REPO --assignee LOGIN --horizon 3 --json
+hyfa plan --repo OWNER/REPO --json
+hyfa triage --repo OWNER/REPO --json
 ```
 
 - `ready` lists the complete executable frontier. `next` recommends one first
@@ -63,7 +63,7 @@ grit triage --repo OWNER/REPO --json
   the previous `synced_at`. Surface stale input and `pending` provenance
   when they affect the answer. Analysis never replays queued remote writes.
 
-Read the Issue's actual specification before implementation. Grit has no
+Read the Issue's actual specification before implementation. Hyfa has no
 individual Issue-view command; use its canonical GitHub URL or a suitable
 GitHub read tool for full bodies and comments. The generated explorer shows
 readiness and relationships but excludes body and comment text.
@@ -75,24 +75,24 @@ readiness and relationships but excludes body and comment text.
 Preserve existing assignees when the requested change requires it.
 
 ```bash
-grit update 'OWNER/REPO#42' --assignee LOGIN --json
-grit update 'OWNER/REPO#42' --clear-assignees --json
-grit update 'OWNER/REPO#42' --title 'A clearer title' --json
-grit update 'OWNER/REPO#42' --body 'Revised Markdown' --json
-grit update 'OWNER/REPO#42' --state closed --json
-grit update 'OWNER/REPO#42' --priority p1 --json
-grit label 'OWNER/REPO#42' --add 'area:backend' --json
-grit block 'OWNER/REPO#42' --by 'OWNER/REPO#7' --json
-grit unblock 'OWNER/REPO#42' --by 'OWNER/REPO#7' --json
-grit sub-issue 'OWNER/REPO#10' --add 'OWNER/REPO#42' --json
-grit comment 'OWNER/REPO#42' --body 'Verified implementation details' --json
+hyfa update 'OWNER/REPO#42' --assignee LOGIN --json
+hyfa update 'OWNER/REPO#42' --clear-assignees --json
+hyfa update 'OWNER/REPO#42' --title 'A clearer title' --json
+hyfa update 'OWNER/REPO#42' --body 'Revised Markdown' --json
+hyfa update 'OWNER/REPO#42' --state closed --json
+hyfa update 'OWNER/REPO#42' --priority p1 --json
+hyfa label 'OWNER/REPO#42' --add 'area:backend' --json
+hyfa block 'OWNER/REPO#42' --by 'OWNER/REPO#7' --json
+hyfa unblock 'OWNER/REPO#42' --by 'OWNER/REPO#7' --json
+hyfa sub-issue 'OWNER/REPO#10' --add 'OWNER/REPO#42' --json
+hyfa comment 'OWNER/REPO#42' --body 'Verified implementation details' --json
 ```
 
 `block` means #42 is blocked by #7. A parent/sub-Issue relationship is
 decomposition metadata and does not create a Dependency. `label` and
 `sub-issue` also accept `--remove`. State accepts `open` or `closed`.
 Priority accepts `p0` through `p4` or `none`; change canonical priority labels
-only through `update --priority`. Use `grit init --repo OWNER/REPO --json`
+only through `update --priority`. Use `hyfa init --repo OWNER/REPO --json`
 when repository setup is requested to create missing canonical priority labels.
 
 Most mutations attempt an online change and otherwise can queue a Pending
@@ -104,10 +104,10 @@ only when the result or a remote read confirms it.
 ## Drafts, reconciliation, and conflicts
 
 ```bash
-grit create --repo OWNER/REPO --title 'Prepare the migration' --body 'Acceptance notes' --json
-grit reconcile --repo OWNER/REPO --json
-grit resolve OPERATION --repo OWNER/REPO --remote --json
-grit resolve OPERATION --repo OWNER/REPO --local --json
+hyfa create --repo OWNER/REPO --title 'Prepare the migration' --body 'Acceptance notes' --json
+hyfa reconcile --repo OWNER/REPO --json
+hyfa resolve OPERATION --repo OWNER/REPO --remote --json
+hyfa resolve OPERATION --repo OWNER/REPO --local --json
 ```
 
 `create` always creates a local Draft, even online. Keep the returned
@@ -138,7 +138,7 @@ reports an unresolved outcome and explain the remaining operation.
 ## Generate a graph
 
 ```bash
-grit graph --repo OWNER/REPO --output /absolute/artifact/directory --json
+hyfa graph --repo OWNER/REPO --output /absolute/artifact/directory --json
 ```
 
 Open the generated `index.html`. Keep generated files outside the checkout
@@ -147,5 +147,5 @@ repository information and pending intent. For requested public output use
 `--public`, which requires a live confirmation that the repository is public
 and generates a separate allowlisted artifact. Labels and assignees require
 explicit `--public-label-prefix` and `--public-include-assignees` opt-ins.
-Generate the public artifact through Grit; do not publish the full explorer
+Generate the public artifact through Hyfa; do not publish the full explorer
 as its substitute. Generation itself does not deploy a site.

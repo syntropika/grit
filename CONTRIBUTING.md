@@ -1,6 +1,6 @@
-# Contributing to Grit
+# Contributing to Hyfa
 
-Grit is a Rust CLI with an embedded static graph explorer. Start with
+Hyfa is a Rust CLI with an embedded static graph explorer. Start with
 [CONTEXT.md](CONTEXT.md) for the domain model and the relevant
 [architecture decisions](docs/adr/). The [ranking contract](docs/design/ranking-next-v1.md)
 defines `next/v1`; change the implementation and its documented contract together.
@@ -15,8 +15,8 @@ platforms. Some filesystem operations and test fixtures are Unix-specific;
 Windows is not currently a supported build target.
 
 ```bash
-git clone https://github.com/syntropika/grit.git
-cd grit
+git clone https://github.com/syntropika/hyfa.git
+cd hyfa
 rustup toolchain install 1.94.0 --profile minimal --component rustfmt --component clippy
 cargo +1.94.0 build --locked
 cargo +1.94.0 run -- --help
@@ -24,7 +24,7 @@ cargo +1.94.0 run -- --help
 
 The normal test suite uses local GitHub fixtures and needs no GitHub credentials.
 For manual experiments, use a repository you control and a separate
-`GRIT_STATE_DIR`. Analysis commands may pull remote data; mutation commands
+`HYFA_STATE_DIR`. Analysis commands may pull remote data; mutation commands
 can change GitHub when credentials and connectivity are available.
 
 ## Checks
@@ -49,12 +49,12 @@ Browser acceptance tests are ignored by the normal Rust suite. Run them when
 changing graph rendering, filters, generated artifacts, or public export:
 
 ```bash
-GRIT_BROWSER=google-chrome cargo +1.94.0 test --locked --test graph_cli -- --ignored
-GRIT_BROWSER=google-chrome cargo +1.94.0 test --locked --test graph_working_browser_cli -- --ignored
-GRIT_BROWSER=google-chrome cargo +1.94.0 test --locked --test public_graph_cli -- --ignored
+HYFA_BROWSER=google-chrome cargo +1.94.0 test --locked --test graph_cli -- --ignored
+HYFA_BROWSER=google-chrome cargo +1.94.0 test --locked --test graph_working_browser_cli -- --ignored
+HYFA_BROWSER=google-chrome cargo +1.94.0 test --locked --test public_graph_cli -- --ignored
 ```
 
-Set `GRIT_BROWSER` to a Chrome-compatible executable. Tests launch disposable
+Set `HYFA_BROWSER` to a Chrome-compatible executable. Tests launch disposable
 profiles and check offline behavior, keyboard interactions, and public egress.
 
 ### Performance-sensitive changes
@@ -65,7 +65,7 @@ Use optimized builds for the existing ranking and graph browser gates:
 cargo +1.94.0 test --locked --release \
   ranking::performance_tests::repository_scale_profile_meets_the_next_v1_latency_budget \
   -- --ignored --exact --nocapture
-GRIT_BROWSER=google-chrome cargo +1.94.0 test --locked --release \
+HYFA_BROWSER=google-chrome cargo +1.94.0 test --locked --release \
   graph::benchmark::dense_graph_browser_benchmark -- --ignored --exact --nocapture
 ```
 

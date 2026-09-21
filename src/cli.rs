@@ -39,22 +39,22 @@ use crate::{
     working_graph::{PendingProvenance, WorkingGraph, WorkingGraphError},
 };
 
-const SYNC_SCHEMA_VERSION: &str = "grit.sync/v1";
-const READY_SCHEMA_VERSION: &str = "grit.ready/v1";
-const GRAPH_SCHEMA_VERSION: &str = "grit.graph/v1";
-const DEPENDENCY_MUTATION_SCHEMA_VERSION: &str = "grit.dependency-mutation/v1";
-const INIT_SCHEMA_VERSION: &str = "grit.init/v1";
-const TRIAGE_SCHEMA_VERSION: &str = "grit.triage/v1";
-const PLAN_SCHEMA_VERSION: &str = "grit.plan/v1";
-const PRIORITY_UPDATE_SCHEMA_VERSION: &str = "grit.priority-update/v1";
-const RESOLVE_SCHEMA_VERSION: &str = "grit.resolve/v1";
-const ISSUE_CREATE_SCHEMA_VERSION: &str = "grit.issue-create/v1";
-const COMMENT_CREATE_SCHEMA_VERSION: &str = "grit.comment-create/v1";
-const ISSUE_FIELD_UPDATE_SCHEMA_VERSION: &str = "grit.issue-field-update/v1";
-const METADATA_MUTATION_SCHEMA_VERSION: &str = "grit.metadata-set/v1";
+const SYNC_SCHEMA_VERSION: &str = "hyfa.sync/v1";
+const READY_SCHEMA_VERSION: &str = "hyfa.ready/v1";
+const GRAPH_SCHEMA_VERSION: &str = "hyfa.graph/v1";
+const DEPENDENCY_MUTATION_SCHEMA_VERSION: &str = "hyfa.dependency-mutation/v1";
+const INIT_SCHEMA_VERSION: &str = "hyfa.init/v1";
+const TRIAGE_SCHEMA_VERSION: &str = "hyfa.triage/v1";
+const PLAN_SCHEMA_VERSION: &str = "hyfa.plan/v1";
+const PRIORITY_UPDATE_SCHEMA_VERSION: &str = "hyfa.priority-update/v1";
+const RESOLVE_SCHEMA_VERSION: &str = "hyfa.resolve/v1";
+const ISSUE_CREATE_SCHEMA_VERSION: &str = "hyfa.issue-create/v1";
+const COMMENT_CREATE_SCHEMA_VERSION: &str = "hyfa.comment-create/v1";
+const ISSUE_FIELD_UPDATE_SCHEMA_VERSION: &str = "hyfa.issue-field-update/v1";
+const METADATA_MUTATION_SCHEMA_VERSION: &str = "hyfa.metadata-set/v1";
 
 #[derive(Parser)]
-#[command(name = "grit", version, about)]
+#[command(name = "hyfa", version, about)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -62,7 +62,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Install the bundled Grit usage skill for coding agents.
+    /// Install the bundled Hyfa usage skill for coding agents.
     Skill {
         #[command(subcommand)]
         command: crate::skill::SkillCommand,
@@ -1416,7 +1416,7 @@ fn synchronize_with_client(
 
 fn github_client() -> Result<GitHubClient, CliError> {
     let base_url = api_base_url()?;
-    let hostname = env::var("GRIT_GITHUB_HOST")
+    let hostname = env::var("HYFA_GITHUB_HOST")
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| authentication_hostname(&base_url));
@@ -1770,7 +1770,7 @@ fn execution_scope_name(assignee: Option<&str>) -> String {
 
 fn api_base_url() -> Result<Url, CliError> {
     let raw =
-        env::var("GRIT_GITHUB_API_URL").unwrap_or_else(|_| "https://api.github.com/".to_owned());
+        env::var("HYFA_GITHUB_API_URL").unwrap_or_else(|_| "https://api.github.com/".to_owned());
     let mut parsed = Url::parse(&raw).map_err(CliError::ParseApiBase)?;
     if parsed.cannot_be_a_base()
         || parsed.host_str().is_none()
@@ -2356,9 +2356,9 @@ pub(crate) enum CliError {
     PendingIssueCreate(#[from] PendingIssueCreateError),
     #[error(transparent)]
     PendingCommentCreate(#[from] PendingCommentCreateError),
-    #[error("GRIT_GITHUB_API_URL is invalid: {0}")]
+    #[error("HYFA_GITHUB_API_URL is invalid: {0}")]
     ParseApiBase(url::ParseError),
-    #[error("GRIT_GITHUB_API_URL must be a safe absolute HTTP(S) base URL")]
+    #[error("HYFA_GITHUB_API_URL must be a safe absolute HTTP(S) base URL")]
     InvalidApiBase,
     #[error(transparent)]
     Auth(#[from] AuthError),
@@ -2404,7 +2404,7 @@ pub(crate) enum CliError {
     EncodeOutput(serde_json::Error),
     #[error("next/v1 horizon must be between 1 and 3, not {0}")]
     UnsupportedNextHorizon(u8),
-    #[error("grit plan does not accept --workers in v1")]
+    #[error("hyfa plan does not accept --workers in v1")]
     UnsupportedPlanWorkers,
     #[error("GitHub refresh failed ({refresh}); no valid Local replica is available ({replica})")]
     RefreshAndReplicaUnavailable { refresh: String, replica: String },

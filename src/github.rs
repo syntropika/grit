@@ -121,7 +121,7 @@ impl GitHubClient {
             ACCEPT,
             HeaderValue::from_static("application/vnd.github+json"),
         );
-        headers.insert(USER_AGENT, HeaderValue::from_static("grit/0.1"));
+        headers.insert(USER_AGENT, HeaderValue::from_static("hyfa/0.1"));
         headers.insert(
             "x-github-api-version",
             HeaderValue::from_static(API_VERSION),

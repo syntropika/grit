@@ -18,20 +18,20 @@ fn offline_comment_survives_restart_and_never_exposes_its_operation_marker() {
     seed_replica(&mut github, &state, vec![issue(1)]);
     let unavailable = Server::new();
 
-    let queued = grit(&state, &unavailable.url())
+    let queued = hyfa(&state, &unavailable.url())
         .env_remove("GH_TOKEN")
         .args([
             "comment",
             "acme/widgets#1",
             "--body",
-            "Visible offline note\n\n<!-- grit-operation:6ba7b810-9dad-11d1-80b4-00c04fd430c8 -->",
+            "Visible offline note\n\n<!-- hyfa-operation:6ba7b810-9dad-11d1-80b4-00c04fd430c8 -->",
             "--json",
         ])
         .output()
         .expect("queue comment");
     assert_success(&queued);
     let queued: Value = serde_json::from_slice(&queued.stdout).expect("comment JSON");
-    assert_eq!(queued["schema_version"], "grit.comment-create/v1");
+    assert_eq!(queued["schema_version"], "hyfa.comment-create/v1");
     assert_eq!(queued["pending"], true);
     assert_eq!(queued["body"], "Visible offline note");
 
@@ -46,7 +46,7 @@ fn offline_comment_survives_restart_and_never_exposes_its_operation_marker() {
             .contains("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
     );
 
-    let restarted = grit(&state, &unavailable.url())
+    let restarted = hyfa(&state, &unavailable.url())
         .env_remove("GH_TOKEN")
         .args(["ready", "--repo", "acme/widgets", "--json"])
         .output()
@@ -67,7 +67,7 @@ fn draft_comment_waits_for_identity_then_replays_to_the_mapped_issue() {
     let state = TempDir::new().expect("state directory");
     let mut seed = Server::new();
     seed_replica(&mut seed, &state, Vec::new());
-    let draft = grit(&state, &seed.url())
+    let draft = hyfa(&state, &seed.url())
         .args([
             "create",
             "--repo",
@@ -82,7 +82,7 @@ fn draft_comment_waits_for_identity_then_replays_to_the_mapped_issue() {
     let draft: Value = serde_json::from_slice(&draft.stdout).expect("Draft JSON");
     let key = draft["draft"]["key"].as_str().expect("Draft key");
     let unavailable = Server::new();
-    let queued = grit(&state, &unavailable.url())
+    let queued = hyfa(&state, &unavailable.url())
         .env_remove("GH_TOKEN")
         .args([
             "comment",
@@ -114,7 +114,7 @@ fn draft_comment_waits_for_identity_then_replays_to_the_mapped_issue() {
     let inventory = mock_dynamic_inventory(&mut github, Arc::clone(&remote), 2, 2, 1);
     let issue_create = mock_issue_create(&mut github, Arc::clone(&remote), 1);
     let comment_create = mock_comment_create(&mut github, &state, Arc::clone(&remote), 201, 1, 1);
-    let reconciled = grit(&state, &github.url())
+    let reconciled = hyfa(&state, &github.url())
         .args(["reconcile", "--repo", "acme/widgets", "--json"])
         .output()
         .expect("reconcile Draft comment");
@@ -155,7 +155,7 @@ fn accepted_comment_with_dropped_response_is_recovered_without_duplicate_create(
     }));
     let (dropped_url, dropped_server) = dropped_comment_server(&state, Arc::clone(&remote));
 
-    let first = grit(&state, &dropped_url)
+    let first = hyfa(&state, &dropped_url)
         .args([
             "comment",
             "acme/widgets#1",
@@ -182,7 +182,7 @@ fn accepted_comment_with_dropped_response_is_recovered_without_duplicate_create(
         .expect(0)
         .create();
 
-    let recovered = grit(&state, &github.url())
+    let recovered = hyfa(&state, &github.url())
         .args(["reconcile", "--repo", "acme/widgets", "--json"])
         .output()
         .expect("recover ambiguous comment");
@@ -219,7 +219,7 @@ fn zero_or_multiple_comment_marker_matches_stay_unresolved_without_blind_retry()
             accepted_copies,
             1,
         );
-        let first = grit(&state, &github.url())
+        let first = hyfa(&state, &github.url())
             .args([
                 "comment",
                 "acme/widgets#1",
@@ -231,7 +231,7 @@ fn zero_or_multiple_comment_marker_matches_stay_unresolved_without_blind_retry()
             .expect("submit ambiguous comment");
         assert_success(&first);
 
-        let unresolved = grit(&state, &github.url())
+        let unresolved = hyfa(&state, &github.url())
             .args(["reconcile", "--repo", "acme/widgets", "--json"])
             .output()
             .expect("inspect comment marker matches");
@@ -268,7 +268,7 @@ fn online_comment_is_persisted_before_write_then_published_from_verified_readbac
     let mut github = Server::new();
     let inventory = mock_dynamic_inventory(&mut github, Arc::clone(&remote), 2, 2, 2);
     let create = mock_comment_create(&mut github, &state, Arc::clone(&remote), 201, 1, 1);
-    let output = grit(&state, &github.url())
+    let output = hyfa(&state, &github.url())
         .args([
             "comment",
             "acme/widgets#1",
@@ -639,7 +639,7 @@ fn seed_replica(github: &mut Server, state: &TempDir, issues: Vec<Value>) {
         .with_body("[]")
         .expect(issue_count)
         .create();
-    let output = grit(state, &github.url())
+    let output = hyfa(state, &github.url())
         .args(["sync", "--repo", "acme/widgets", "--json"])
         .output()
         .expect("seed replica");
@@ -678,12 +678,12 @@ fn issue(number: u64) -> Value {
     })
 }
 
-fn grit(state: &TempDir, api_url: &str) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_grit"));
+fn hyfa(state: &TempDir, api_url: &str) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hyfa"));
     command
-        .env("GRIT_NO_KEYRING", "1")
-        .env("GRIT_STATE_DIR", state.path())
-        .env("GRIT_GITHUB_API_URL", api_url)
+        .env("HYFA_NO_KEYRING", "1")
+        .env("HYFA_STATE_DIR", state.path())
+        .env("HYFA_GITHUB_API_URL", api_url)
         .env("GH_TOKEN", "test-token");
     command
 }

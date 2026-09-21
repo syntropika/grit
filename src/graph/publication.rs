@@ -58,7 +58,7 @@ fn usable_parent(output: &Path) -> &Path {
 fn create_staging_directory(parent: &Path, name: &OsStr) -> Result<PathBuf, GraphError> {
     for attempt in 0..1000_u32 {
         let path = parent.join(format!(
-            ".grit-{}-{}-{attempt}.stage",
+            ".hyfa-{}-{}-{attempt}.stage",
             name.to_string_lossy(),
             std::process::id()
         ));

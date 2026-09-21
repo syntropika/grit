@@ -10,7 +10,7 @@
 
 ## Decision
 
-Grit renders the complete network when an artifact has at most 5,000 nodes and
+Hyfa renders the complete network when an artifact has at most 5,000 nodes and
 20,000 edges. Crossing either limit opens a constrained view of at most 500
 nodes. The binary seeds that view from Ready Issues and their undirected
 Dependency neighborhoods in Stable node key order. The visitor can restore the
@@ -51,7 +51,7 @@ cannot be hidden inside one end-to-end number.
 Run from the repository root with a Chrome-compatible browser:
 
 ```bash
-GRIT_BROWSER=google-chrome cargo test --release \
+HYFA_BROWSER=google-chrome cargo test --release \
   graph::benchmark::dense_graph_browser_benchmark \
   -- --ignored --exact --nocapture
 ```
@@ -60,7 +60,7 @@ Repeat the command five times and take the median for each reported field to
 match the table above.
 
 The ignored benchmark builds normalized synthetic Issues and Dependencies,
-runs Grit's real artifact builder and layered layout, renders the production
+runs Hyfa's real artifact builder and layered layout, renders the production
 HTML/CSS/JavaScript, and opens it with browser network egress disabled. It emits
 one JSON record per size with artifact bytes, complete-site bytes, artifact
 construction, dependency-layer layout, presentation construction (including the

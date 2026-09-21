@@ -28,7 +28,7 @@ impl GitHubAuth {
 
     fn with_bases(oauth_base: Url, api_base: Url) -> Result<Self, AuthError> {
         let client = Client::builder()
-            .user_agent(concat!("grit/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("hyfa/", env!("CARGO_PKG_VERSION")))
             .redirect(Policy::none())
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(30))

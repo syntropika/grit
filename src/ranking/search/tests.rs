@@ -1,6 +1,6 @@
 pub(super) fn empty_outbox(repository: &str) -> crate::outbox::PendingMutationOutbox {
     serde_json::from_value(serde_json::json!({
-        "schema_version": "grit.pending-mutations/v1",
+        "schema_version": "hyfa.pending-mutations/v1",
         "repository": repository,
         "operations": []
     }))
@@ -25,7 +25,7 @@ fn wide_p0_routes_complete_the_bounded_end_to_end_evaluation() {
         dependencies.push(dependency(target, root));
     }
     let replica = LocalReplica {
-        schema_version: "grit.local-replica/v1".to_owned(),
+        schema_version: "hyfa.local-replica/v1".to_owned(),
         repository: "acme/dense-p0".to_owned(),
         synced_at: "2026-08-07T00:00:00Z".to_owned(),
         input_hash: "fixture".to_owned(),
@@ -368,7 +368,7 @@ fn candidate_signature(candidate: &EvaluatedCandidate<'_>) -> (u64, Vec<u64>, Ve
 
 fn replica(issues: Vec<crate::model::Issue>, dependencies: Vec<Dependency>) -> LocalReplica {
     LocalReplica {
-        schema_version: "grit.local-replica/v1".to_owned(),
+        schema_version: "hyfa.local-replica/v1".to_owned(),
         repository: "acme/dense-p0".to_owned(),
         synced_at: "2026-08-07T00:00:00Z".to_owned(),
         input_hash: "fixture".to_owned(),

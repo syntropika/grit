@@ -34,7 +34,7 @@ fn offline_text_edits_project_immediately_without_changing_the_replica() {
         json!({"type": "title", "value": "Locally edited title"})
     );
 
-    let ranked = grit(&state, &unavailable.url())
+    let ranked = hyfa(&state, &unavailable.url())
         .env_remove("GH_TOKEN")
         .args(["next", "--repo", "acme/widgets", "--json"])
         .output()
@@ -72,7 +72,7 @@ fn offline_assignment_edit_changes_the_execution_scope_immediately() {
 
     let assignment = update_offline(&state, &unavailable.url(), &["--assignee", "alice"]);
     assert_eq!(assignment["field"], "assignees");
-    let assigned = grit(&state, &unavailable.url())
+    let assigned = hyfa(&state, &unavailable.url())
         .env_remove("GH_TOKEN")
         .args([
             "ready",
@@ -98,7 +98,7 @@ fn offline_state_edit_changes_the_operational_scope_immediately() {
 
     let state_update = update_offline(&state, &unavailable.url(), &["--state", "closed"]);
     assert_eq!(state_update["field"], "state");
-    let after_close = grit(&state, &unavailable.url())
+    let after_close = hyfa(&state, &unavailable.url())
         .env_remove("GH_TOKEN")
         .args(["ready", "--repo", "acme/widgets", "--json"])
         .output()
@@ -130,7 +130,7 @@ fn reconciliation_contains_text_conflicts_and_applies_independent_fields() {
     let mut github = Server::new();
     let inventory = mock_inventory(&mut github, Arc::clone(&remote), 2, 2);
     let patches = mock_field_patches(&mut github, Arc::clone(&remote), 2);
-    let reconciled = grit(&state, &github.url())
+    let reconciled = hyfa(&state, &github.url())
         .args(["reconcile", "--repo", "acme/widgets", "--json"])
         .output()
         .expect("reconcile independent field mutations");
@@ -189,7 +189,7 @@ fn conflict_resolution_revalidates_the_remote_before_local_or_remote_choice() {
     }));
     let mut github = Server::new();
     let inventory = mock_inventory(&mut github, Arc::clone(&remote), 1, 1);
-    let conflict = grit(&state, &github.url())
+    let conflict = hyfa(&state, &github.url())
         .args(["reconcile", "--repo", "acme/widgets", "--json"])
         .output()
         .expect("record initial conflict");
@@ -198,7 +198,7 @@ fn conflict_resolution_revalidates_the_remote_before_local_or_remote_choice() {
 
     remote.lock().expect("remote lock").issues[0]["title"] = json!("Remote title v2");
     let inventory = mock_inventory(&mut github, Arc::clone(&remote), 1, 1);
-    let retried = grit(&state, &github.url())
+    let retried = hyfa(&state, &github.url())
         .args([
             "resolve",
             operation,
@@ -226,7 +226,7 @@ fn conflict_resolution_revalidates_the_remote_before_local_or_remote_choice() {
     inventory.assert();
 
     let inventory = mock_inventory(&mut github, Arc::clone(&remote), 1, 1);
-    let accepted = grit(&state, &github.url())
+    let accepted = hyfa(&state, &github.url())
         .args([
             "resolve",
             operation,
@@ -257,7 +257,7 @@ fn online_field_update_publishes_only_verified_readback() {
     let fetch = mock_fetch_issue(&mut github, Arc::clone(&remote), 1);
     let patches = mock_field_patches(&mut github, Arc::clone(&remote), 1);
     let inventory = mock_inventory(&mut github, Arc::clone(&remote), 1, 1);
-    let updated = grit(&state, &github.url())
+    let updated = hyfa(&state, &github.url())
         .args([
             "update",
             "acme/widgets#1",
@@ -311,7 +311,7 @@ fn native_online_update_does_not_depend_on_the_draft_identity_store() {
     let fetch = mock_fetch_issue(&mut github, Arc::clone(&remote), 1);
     let patches = mock_field_patches(&mut github, Arc::clone(&remote), 1);
     let inventory = mock_inventory(&mut github, remote, 1, 1);
-    let updated = grit(&state, &github.url())
+    let updated = hyfa(&state, &github.url())
         .args([
             "update",
             "acme/widgets#1",
@@ -351,7 +351,7 @@ fn online_field_update_preserves_the_replica_when_readback_does_not_verify_the_w
         .expect(1)
         .create();
     let inventory = mock_inventory(&mut github, remote, 1, 1);
-    let updated = grit(&state, &github.url())
+    let updated = hyfa(&state, &github.url())
         .args([
             "update",
             "acme/widgets#1",
@@ -381,7 +381,7 @@ fn draft_field_edit_waits_for_creation_then_rewrites_its_identity() {
     let state = TempDir::new().expect("state directory");
     let mut seed = Server::new();
     seed_empty_replica(&mut seed, &state);
-    let draft = grit(&state, &seed.url())
+    let draft = hyfa(&state, &seed.url())
         .args([
             "create",
             "--repo",
@@ -398,7 +398,7 @@ fn draft_field_edit_waits_for_creation_then_rewrites_its_identity() {
     let draft: Value = serde_json::from_slice(&draft.stdout).expect("Draft JSON");
     let draft_key = draft["draft"]["key"].as_str().expect("Draft key");
     let temporary_id = draft["draft"]["temporary_id"].clone();
-    let edited = grit(&state, &seed.url())
+    let edited = hyfa(&state, &seed.url())
         .args(["update", draft_key, "--title", "Final title", "--json"])
         .output()
         .expect("queue Draft title edit");
@@ -416,7 +416,7 @@ fn draft_field_edit_waits_for_creation_then_rewrites_its_identity() {
     let inventory = mock_inventory(&mut github, Arc::clone(&remote), 2, 1);
     let create = mock_issue_create(&mut github, Arc::clone(&remote), 1);
     let patches = mock_field_patches(&mut github, Arc::clone(&remote), 1);
-    let reconciled = grit(&state, &github.url())
+    let reconciled = hyfa(&state, &github.url())
         .args(["reconcile", "--repo", "acme/widgets", "--json"])
         .output()
         .expect("reconcile Draft and title");
@@ -451,7 +451,7 @@ fn reconciliation_treats_the_desired_remote_value_as_already_satisfied() {
     }));
     let mut github = Server::new();
     let inventory = mock_inventory(&mut github, Arc::clone(&remote), 1, 1);
-    let reconciled = grit(&state, &github.url())
+    let reconciled = hyfa(&state, &github.url())
         .args(["reconcile", "--repo", "acme/widgets", "--json"])
         .output()
         .expect("reconcile already-satisfied title");
@@ -474,7 +474,7 @@ fn mapped_temporary_id_uses_the_online_update_path_and_keeps_its_alias() {
     let state = TempDir::new().expect("state directory");
     let mut seed = Server::new();
     seed_empty_replica(&mut seed, &state);
-    let draft = grit(&state, &seed.url())
+    let draft = hyfa(&state, &seed.url())
         .args([
             "create",
             "--repo",
@@ -494,7 +494,7 @@ fn mapped_temporary_id_uses_the_online_update_path_and_keeps_its_alias() {
     let mut github = Server::new();
     let inventory = mock_inventory(&mut github, Arc::clone(&remote), 2, 1);
     let create = mock_issue_create(&mut github, Arc::clone(&remote), 1);
-    let reconciled = grit(&state, &github.url())
+    let reconciled = hyfa(&state, &github.url())
         .args(["reconcile", "--repo", "acme/widgets", "--json"])
         .output()
         .expect("map Draft Issue");
@@ -505,7 +505,7 @@ fn mapped_temporary_id_uses_the_online_update_path_and_keeps_its_alias() {
     let fetch = mock_fetch_issue(&mut github, Arc::clone(&remote), 1);
     let patches = mock_field_patches(&mut github, Arc::clone(&remote), 1);
     let inventory = mock_inventory(&mut github, Arc::clone(&remote), 1, 1);
-    let updated = grit(&state, &github.url())
+    let updated = hyfa(&state, &github.url())
         .args([
             "update",
             draft_key,
@@ -546,7 +546,7 @@ fn uncertain_online_patch_queues_against_the_observed_remote_base() {
         .with_body("server failed after receiving the write")
         .expect(1)
         .create();
-    let updated = grit(&state, &github.url())
+    let updated = hyfa(&state, &github.url())
         .args([
             "update",
             "acme/widgets#1",
@@ -575,7 +575,7 @@ fn an_existing_same_field_intent_serializes_a_later_online_request_without_bypas
     let unavailable = Server::new();
     let first = update_offline(&state, &unavailable.url(), &["--title", "Pending A"]);
 
-    let second = grit(&state, &unavailable.url())
+    let second = hyfa(&state, &unavailable.url())
         .args(["update", "acme/widgets#1", "--title", "Pending B", "--json"])
         .output()
         .expect("serialize later field request");
@@ -607,7 +607,7 @@ fn invalid_noncanonical_persisted_field_values_fail_closed() {
     )
     .expect("write corrupt outbox");
 
-    let output = grit(&state, &unavailable.url())
+    let output = hyfa(&state, &unavailable.url())
         .args(["ready", "--repo", "acme/widgets", "--json"])
         .output()
         .expect("reject invalid persisted scalar");
@@ -633,10 +633,10 @@ fn concurrent_offline_field_updates_all_survive_restart() {
             let state_path = state_path.clone();
             let api_url = api_url.clone();
             thread::spawn(move || {
-                Command::new(env!("CARGO_BIN_EXE_grit"))
-                    .env("GRIT_NO_KEYRING", "1")
-                    .env("GRIT_STATE_DIR", state_path)
-                    .env("GRIT_GITHUB_API_URL", api_url)
+                Command::new(env!("CARGO_BIN_EXE_hyfa"))
+                    .env("HYFA_NO_KEYRING", "1")
+                    .env("HYFA_STATE_DIR", state_path)
+                    .env("HYFA_GITHUB_API_URL", api_url)
                     .env_remove("GH_TOKEN")
                     .args([
                         "update",
@@ -667,7 +667,7 @@ fn concurrent_offline_field_updates_all_survive_restart() {
 }
 
 fn update_offline(state: &TempDir, api_url: &str, field_args: &[&str]) -> Value {
-    let mut command = grit(state, api_url);
+    let mut command = hyfa(state, api_url);
     command
         .env_remove("GH_TOKEN")
         .args(["update", "acme/widgets#1"])
@@ -913,7 +913,7 @@ fn seed_replica(github: &mut Server, state: &TempDir) {
         .with_header("content-type", "application/json")
         .with_body("[]")
         .create();
-    let output = grit(state, &github.url())
+    let output = hyfa(state, &github.url())
         .args(["sync", "--repo", "acme/widgets", "--json"])
         .output()
         .expect("seed Local replica");
@@ -928,7 +928,7 @@ fn seed_replica(github: &mut Server, state: &TempDir) {
 fn seed_empty_replica(github: &mut Server, state: &TempDir) {
     let remote = Arc::new(Mutex::new(RemoteRepository::default()));
     let mocks = mock_inventory(github, remote, 1, 0);
-    let output = grit(state, &github.url())
+    let output = hyfa(state, &github.url())
         .args(["sync", "--repo", "acme/widgets", "--json"])
         .output()
         .expect("seed empty Local replica");
@@ -960,12 +960,12 @@ fn issue_with(number: u64, title: &Value, body: &Value) -> Value {
     })
 }
 
-fn grit(state: &TempDir, api_url: &str) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_grit"));
+fn hyfa(state: &TempDir, api_url: &str) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hyfa"));
     command
-        .env("GRIT_NO_KEYRING", "1")
-        .env("GRIT_STATE_DIR", state.path())
-        .env("GRIT_GITHUB_API_URL", api_url)
+        .env("HYFA_NO_KEYRING", "1")
+        .env("HYFA_STATE_DIR", state.path())
+        .env("HYFA_GITHUB_API_URL", api_url)
         .env("GH_TOKEN", "test-token");
     command
 }

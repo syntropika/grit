@@ -14,7 +14,7 @@ fn offline_create_returns_a_stable_draft_identity_and_participates_in_next() {
     let mut github = Server::new();
     seed_empty_replica(&mut github, &state);
 
-    let created = grit(&state, &github.url())
+    let created = hyfa(&state, &github.url())
         .args([
             "create",
             "--repo",
@@ -29,7 +29,7 @@ fn offline_create_returns_a_stable_draft_identity_and_participates_in_next() {
         .expect("queue Draft Issue");
     assert_success(&created);
     let created: Value = serde_json::from_slice(&created.stdout).expect("create JSON");
-    assert_eq!(created["schema_version"], "grit.issue-create/v1");
+    assert_eq!(created["schema_version"], "hyfa.issue-create/v1");
     assert_eq!(created["pending"], true);
     let temporary_id = created["draft"]["temporary_id"]
         .as_str()
@@ -53,7 +53,7 @@ fn offline_create_returns_a_stable_draft_identity_and_participates_in_next() {
     assert!(!created.to_string().contains(marker));
 
     let unavailable = Server::new();
-    let ready = grit(&state, &unavailable.url())
+    let ready = hyfa(&state, &unavailable.url())
         .env_remove("GH_TOKEN")
         .args(["ready", "--repo", "acme/widgets", "--json"])
         .output()
@@ -63,7 +63,7 @@ fn offline_create_returns_a_stable_draft_identity_and_participates_in_next() {
     assert_eq!(ready["issues"][0]["key"], stable_key);
     assert_eq!(ready["issues"][0]["temporary_id"], temporary_id);
 
-    let ranked = grit(&state, &unavailable.url())
+    let ranked = hyfa(&state, &unavailable.url())
         .env_remove("GH_TOKEN")
         .args(["next", "--repo", "acme/widgets", "--json"])
         .output()
@@ -120,7 +120,7 @@ fn multistep_draft_rollouts_follow_stable_ids_instead_of_synthetic_numbers() {
         operation["synthetic_number"] = json!(synthetic_number);
     }
     fs::write(path, serde_json::to_vec(&outbox).expect("outbox JSON")).expect("save identities");
-    let output = grit(&state, &github.url())
+    let output = hyfa(&state, &github.url())
         .env_remove("GH_TOKEN")
         .args(["next", "--repo", "acme/widgets", "--horizon", "3", "--json"])
         .output()
@@ -142,7 +142,7 @@ fn multistep_draft_rollouts_follow_stable_ids_instead_of_synthetic_numbers() {
         ranked["comparison_to_runner_up"]["component"],
         "stable_node_key"
     );
-    let warm = grit(&state, &github.url())
+    let warm = hyfa(&state, &github.url())
         .env_remove("GH_TOKEN")
         .args(["next", "--repo", "acme/widgets", "--horizon", "3", "--json"])
         .arg("--profile")
@@ -152,7 +152,7 @@ fn multistep_draft_rollouts_follow_stable_ids_instead_of_synthetic_numbers() {
     let warm: Value = serde_json::from_slice(&warm.stdout).expect("warm JSON");
     assert_eq!(warm["performance"]["cache_hit"], true);
     assert_eq!(warm["recommendation"], ranked["recommendation"]);
-    let plan = grit(&state, &github.url())
+    let plan = hyfa(&state, &github.url())
         .env_remove("GH_TOKEN")
         .args(["plan", "--repo", "acme/widgets", "--horizon", "3", "--json"])
         .output()
@@ -192,7 +192,7 @@ fn two_related_drafts_map_to_two_github_issues_and_one_native_dependency() {
     let first_temporary_id = first["draft"]["temporary_id"].clone();
     let second_temporary_id = second["draft"]["temporary_id"].clone();
 
-    let queued_edge = grit(&state, &seed.url())
+    let queued_edge = hyfa(&state, &seed.url())
         .args(["block", first_key, "--by", second_key, "--json"])
         .output()
         .expect("queue Draft Dependency");
@@ -207,7 +207,7 @@ fn two_related_drafts_map_to_two_github_issues_and_one_native_dependency() {
         2
     );
     let unavailable = Server::new();
-    let ranked = grit(&state, &unavailable.url())
+    let ranked = hyfa(&state, &unavailable.url())
         .env_remove("GH_TOKEN")
         .args(["next", "--repo", "acme/widgets", "--json"])
         .output()
@@ -234,7 +234,7 @@ fn two_related_drafts_map_to_two_github_issues_and_one_native_dependency() {
     let mut github = Server::new();
     let remote = Arc::new(Mutex::new(DraftRemote::default()));
     let mocks = mock_draft_repository(&mut github, Arc::clone(&remote));
-    let reconciled = grit(&state, &github.url())
+    let reconciled = hyfa(&state, &github.url())
         .args(["reconcile", "--repo", "acme/widgets", "--json"])
         .output()
         .expect("reconcile Drafts");
@@ -299,7 +299,7 @@ fn two_related_drafts_map_to_two_github_issues_and_one_native_dependency() {
             !issue["body"]
                 .as_str()
                 .expect("visible body")
-                .contains("grit-operation")
+                .contains("hyfa-operation")
         );
     }
     mocks.assert();
@@ -323,7 +323,7 @@ fn accepted_create_with_a_failed_response_is_found_by_marker_without_replay() {
         Arc::clone(&remote),
         AmbiguousCreateScenario::new(1, 1),
     );
-    let first = grit(&state, &github.url())
+    let first = hyfa(&state, &github.url())
         .args(["reconcile", "--repo", "acme/widgets", "--json"])
         .output()
         .expect("ambiguous create pass");
@@ -333,7 +333,7 @@ fn accepted_create_with_a_failed_response_is_found_by_marker_without_replay() {
     assert_eq!(first["summary"]["remaining"], 1);
     assert_eq!(remote.lock().expect("remote lock").issues.len(), 1);
 
-    let recovered = grit(&state, &github.url())
+    let recovered = hyfa(&state, &github.url())
         .args(["reconcile", "--repo", "acme/widgets", "--json"])
         .output()
         .expect("marker recovery pass");
@@ -375,12 +375,12 @@ fn zero_or_multiple_marker_matches_leave_the_create_unresolved_without_replay() 
             Arc::clone(&remote),
             AmbiguousCreateScenario::new(accepted_copies, 1),
         );
-        let first = grit(&state, &github.url())
+        let first = hyfa(&state, &github.url())
             .args(["reconcile", "--repo", "acme/widgets", "--json"])
             .output()
             .expect("ambiguous create pass");
         assert_success(&first);
-        let second = grit(&state, &github.url())
+        let second = hyfa(&state, &github.url())
             .args(["reconcile", "--repo", "acme/widgets", "--json"])
             .output()
             .expect("marker recovery pass");
@@ -414,7 +414,7 @@ fn marker_recovery_indexes_the_repository_once_for_multiple_uncertain_drafts() {
         Arc::clone(&remote),
         AmbiguousCreateScenario::new(1, 2),
     );
-    let first = grit(&state, &github.url())
+    let first = hyfa(&state, &github.url())
         .args(["reconcile", "--repo", "acme/widgets", "--json"])
         .output()
         .expect("ambiguous create pass");
@@ -422,7 +422,7 @@ fn marker_recovery_indexes_the_repository_once_for_multiple_uncertain_drafts() {
     let first: Value = serde_json::from_slice(&first.stdout).expect("first reconcile JSON");
     assert_eq!(first["summary"]["failed"], 2);
 
-    let recovered = grit(&state, &github.url())
+    let recovered = hyfa(&state, &github.url())
         .args(["reconcile", "--repo", "acme/widgets", "--json"])
         .output()
         .expect("batched marker recovery pass");
@@ -467,14 +467,14 @@ fn one_remote_issue_cannot_be_mapped_to_two_draft_identities() {
             dependency_inventories: 2,
         },
     );
-    let first = grit(&state, &github.url())
+    let first = hyfa(&state, &github.url())
         .args(["reconcile", "--repo", "acme/widgets", "--json"])
         .output()
         .expect("ambiguous create pass");
     assert_success(&first);
 
     let shared_body = json!(format!(
-        "<!-- grit-operation:{} -->\n<!-- grit-operation:{} -->",
+        "<!-- hyfa-operation:{} -->\n<!-- hyfa-operation:{} -->",
         markers[0], markers[1]
     ));
     remote
@@ -482,7 +482,7 @@ fn one_remote_issue_cannot_be_mapped_to_two_draft_identities() {
         .expect("remote lock")
         .issues
         .push(remote_issue(1, &json!("Shared Issue"), &shared_body));
-    let recovered = grit(&state, &github.url())
+    let recovered = hyfa(&state, &github.url())
         .args(["reconcile", "--repo", "acme/widgets", "--json"])
         .output()
         .expect("colliding marker recovery pass");
@@ -519,7 +519,7 @@ fn one_remote_issue_cannot_be_mapped_to_two_draft_identities() {
 }
 
 fn queue_draft(state: &TempDir, api_url: &str, title: &str) -> Value {
-    let output = grit(state, api_url)
+    let output = hyfa(state, api_url)
         .args([
             "create",
             "--repo",
@@ -847,7 +847,7 @@ fn seed_empty_replica(github: &mut Server, state: &TempDir) {
             dependency_inventories: 0,
         },
     );
-    let output = grit(state, &github.url())
+    let output = hyfa(state, &github.url())
         .args(["sync", "--repo", "acme/widgets", "--json"])
         .output()
         .expect("seed empty replica");
@@ -855,12 +855,12 @@ fn seed_empty_replica(github: &mut Server, state: &TempDir) {
     mocks.assert();
 }
 
-fn grit(state: &TempDir, api_url: &str) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_grit"));
+fn hyfa(state: &TempDir, api_url: &str) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hyfa"));
     command
-        .env("GRIT_NO_KEYRING", "1")
-        .env("GRIT_STATE_DIR", state.path())
-        .env("GRIT_GITHUB_API_URL", api_url)
+        .env("HYFA_NO_KEYRING", "1")
+        .env("HYFA_STATE_DIR", state.path())
+        .env("HYFA_GITHUB_API_URL", api_url)
         .env("GH_TOKEN", "test-token");
     command
 }

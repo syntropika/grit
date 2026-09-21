@@ -195,9 +195,9 @@ fn explicit_environment_token_wins_without_opening_the_store() {
 }
 
 #[test]
-fn saved_grit_token_is_used_when_no_environment_token_is_set() {
+fn saved_hyfa_token_is_used_when_no_environment_token_is_set() {
     let result = discover_with(None, || Ok(Some(token("saved-token")))).unwrap();
-    assert_eq!(result.source, CredentialSource::Grit);
+    assert_eq!(result.source, CredentialSource::Hyfa);
     assert!(matches!(
         discover_with(None, || Err(AuthError::SecureStore)),
         Err(AuthError::SecureStore)
@@ -380,16 +380,16 @@ fn stdin_token_input_refuses_visible_terminal_entry_and_rejects_truncation() {
 #[test]
 fn auth_status_json_exposes_account_and_source_only() {
     let status = AuthStatus {
-        schema_version: "grit.auth/v1",
+        schema_version: "hyfa.auth/v1",
         hostname: "github.com",
         account: "octocat",
-        source: CredentialSource::Grit,
+        source: CredentialSource::Hyfa,
         authenticated: true,
         expires_at: None,
     };
     assert_eq!(
         serde_json::to_value(status).unwrap(),
-        json!({"schema_version":"grit.auth/v1", "hostname":"github.com", "account":"octocat", "source":"grit", "authenticated":true})
+        json!({"schema_version":"hyfa.auth/v1", "hostname":"github.com", "account":"octocat", "source":"hyfa", "authenticated":true})
     );
 }
 
