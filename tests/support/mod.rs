@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+pub(crate) mod browser;
+
 use std::{fs, process::Command};
 
 use chrono::{DateTime, Duration, SecondsFormat};

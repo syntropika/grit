@@ -109,6 +109,20 @@ pub(crate) enum GraphError {
     InvalidPublicRepositoryUrl,
     #[error("public label prefixes must not be empty")]
     EmptyPublicLabelPrefix,
+    #[error("public bundle contains an unexpected or unsafe file {0}")]
+    UnsafePublicBundleFile(String),
+    #[error("public bundle JSON document {0} is invalid: {1}")]
+    InvalidPublicBundleJson(String, serde_json::Error),
+    #[error("public bundle schema does not match the closed PublicGraphV1 schema")]
+    InvalidPublicBundleSchema,
+    #[error("public bundle contains a prohibited private value in {0}")]
+    ProhibitedPublicValue(String),
+    #[error("could not compile the public bundle's prohibited-value scanner: {0}")]
+    CompilePublicScanner(aho_corasick::BuildError),
+    #[error("public bundle contains a secret pattern in {0}")]
+    PublicSecretPattern(String),
+    #[error("public bundle contains a forbidden runtime capability or external asset in {0}")]
+    UnsafePublicRuntime(String),
     #[error("Issue #{0} has an unknown state and cannot enter PublicGraphV1")]
     InvalidPublicIssueState(u64),
     #[error("Issue #{0} has a URL outside the confirmed public Repository")]
@@ -131,6 +145,8 @@ pub(crate) enum GraphError {
     StagingNameExhausted,
     #[error("could not write a graph artifact: {0}")]
     WriteArtifact(io::Error),
+    #[error("could not inspect the staged public bundle: {0}")]
+    InspectPublicBundle(io::Error),
     #[error("could not atomically publish the complete graph site: {0}")]
     Publish(io::Error),
     #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]

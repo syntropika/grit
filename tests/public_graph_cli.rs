@@ -4,6 +4,10 @@ use mockito::{Matcher, Mock, Server};
 use serde_json::{Map, Value, json};
 use tempfile::TempDir;
 
+mod support;
+
+use support::browser::audit_local_page;
+
 const PUBLIC_ARTIFACT_SCHEMA: &str = "grit.public-graph/v1";
 
 #[test]
@@ -162,6 +166,7 @@ struct GeneratedPublicSite {
     serialized: String,
     schema: Value,
     html: String,
+    files: Vec<String>,
 }
 
 fn generate_adversarial_public_site() -> GeneratedPublicSite {
@@ -173,7 +178,7 @@ fn generate_adversarial_public_site() -> GeneratedPublicSite {
     let issues = json!([
         issue(
             1,
-            "Root <!-- grit:operation operation-secret -->",
+            "Root fetch() ServiceWorker <script>alert('title')</script><!-- grit:operation operation-secret -->",
             "open",
             101,
             "root body secret",
@@ -235,6 +240,17 @@ fn generate_adversarial_public_site() -> GeneratedPublicSite {
     )
     .expect("schema JSON");
     let html = fs::read_to_string(output_directory.join("index.html")).expect("public HTML");
+    let mut files = fs::read_dir(&output_directory)
+        .expect("public bundle")
+        .map(|entry| {
+            entry
+                .expect("public bundle entry")
+                .file_name()
+                .into_string()
+                .expect("UTF-8 bundle name")
+        })
+        .collect::<Vec<_>>();
+    files.sort();
     metadata.assert();
     mocks.assert();
     GeneratedPublicSite {
@@ -243,7 +259,233 @@ fn generate_adversarial_public_site() -> GeneratedPublicSite {
         serialized: String::from_utf8(bytes).expect("UTF-8 public graph"),
         schema,
         html,
+        files,
     }
+}
+
+#[test]
+fn public_export_ignores_pending_drafts_fields_and_comments_after_live_visibility_check() {
+    let mut github = Server::new();
+    let state = TempDir::new().expect("state directory");
+    let workspace = TempDir::new().expect("public workspace");
+    let directory = workspace.path().join("site");
+    let metadata = mock_public_metadata(&mut github, 2);
+    let inventory = mock_repository(
+        &mut github,
+        json!([issue(
+            1,
+            "Synchronized title",
+            "open",
+            1,
+            "private body",
+            "alice"
+        )])
+        .to_string(),
+        vec![(1, "[]".to_owned())],
+        "private comment",
+    );
+    let seed = public_graph_command(&state, &github.url(), &directory)
+        .output()
+        .expect("seed public site");
+    assert_success(&seed);
+    inventory.assert();
+    let original = fs::read(directory.join("graph.json")).expect("synchronized graph");
+    for arguments in [
+        vec![
+            "create",
+            "--repo",
+            "acme/widgets",
+            "--title",
+            "Pending Draft secret",
+            "--json",
+        ],
+        vec![
+            "update",
+            "acme/widgets#1",
+            "--title",
+            "Pending field secret",
+            "--json",
+        ],
+        vec![
+            "comment",
+            "acme/widgets#1",
+            "--body",
+            "Pending comment secret",
+            "--json",
+        ],
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_grit"));
+        command.args(arguments);
+        configure(&mut command, &state, &github.url());
+        command.env_remove("GH_TOKEN");
+        let queued = command.output().expect("queue local mutation");
+        assert_success(&queued);
+    }
+    let unavailable = github
+        .mock("GET", "/repos/acme/widgets/labels")
+        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+        .with_status(503)
+        .create();
+    let exported = public_graph_command(&state, &github.url(), &directory)
+        .output()
+        .expect("export synchronized fallback");
+    assert_success(&exported);
+    assert_eq!(
+        fs::read(directory.join("graph.json")).expect("public graph"),
+        original
+    );
+    for entry in fs::read_dir(&directory).expect("sealed bundle") {
+        let contents =
+            fs::read_to_string(entry.expect("bundle entry").path()).expect("bundle text");
+        for secret in [
+            "Pending Draft secret",
+            "Pending field secret",
+            "Pending comment secret",
+        ] {
+            assert!(!contents.contains(secret), "public export leaked {secret}");
+        }
+    }
+    metadata.assert();
+    unavailable.assert();
+}
+
+#[test]
+fn public_bundle_has_a_closed_manifest_and_renders_hostile_text_literally() {
+    let site = generate_adversarial_public_site();
+
+    assert_eq!(
+        site.files,
+        ["graph.json", "graph.schema.json", "index.html"]
+    );
+    assert!(site.html.contains(
+        "Root fetch() ServiceWorker &lt;script&gt;alert(&#39;title&#39;)&lt;/script&gt;"
+    ));
+    assert!(
+        site.html
+            .contains("area:backend&lt;img src=x onerror=alert(2)&gt;")
+    );
+    assert!(!site.html.contains("<script>alert('title')</script>"));
+    assert!(!site.html.contains("<img src=x onerror=alert(2)>"));
+}
+
+#[test]
+fn public_seal_rejects_a_secret_pattern_and_preserves_the_previous_bundle() {
+    let mut github = Server::new();
+    let state = TempDir::new().expect("temporary state directory");
+    let workspace = TempDir::new().expect("temporary graph workspace");
+    let output_directory = workspace.path().join("site-public");
+    fs::create_dir(&output_directory).expect("existing output directory");
+    fs::write(
+        output_directory.join("sentinel.txt"),
+        "previous sealed bundle",
+    )
+    .expect("previous bundle");
+    let metadata = mock_public_metadata(&mut github, 1);
+    let token = format!("github_pat_{}", "A".repeat(82));
+    let mocks = mock_repository(
+        &mut github,
+        json!([issue(1, &token, "open", 1, "private", "alice")]).to_string(),
+        vec![(1, "[]".to_owned())],
+        "private comment",
+    );
+
+    let output = public_graph_command(&state, &github.url(), &output_directory)
+        .output()
+        .expect("public graph command");
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("secret pattern"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(output_directory.join("sentinel.txt")).expect("previous bundle"),
+        "previous sealed bundle"
+    );
+    assert!(!output_directory.join("graph.json").exists());
+    metadata.assert();
+    mocks.assert();
+}
+
+#[test]
+#[ignore = "requires a Chrome-compatible browser; run explicitly as documented in README.md"]
+fn sealed_public_bundle_executes_no_user_markup_or_external_request() {
+    let mut github = Server::new();
+    let state = TempDir::new().expect("temporary state directory");
+    let workspace = TempDir::new().expect("temporary public bundle workspace");
+    let output_directory = workspace.path().join("site-public");
+    let metadata = mock_public_metadata(&mut github, 1);
+    let mocks = mock_repository(
+        &mut github,
+        json!([issue(
+            1,
+            "Root <script>alert('title')</script>",
+            "open",
+            1,
+            "private body",
+            "alice"
+        )])
+        .to_string(),
+        vec![(1, "[]".to_owned())],
+        "private comment",
+    );
+    let mut command = public_graph_command(&state, &github.url(), &output_directory);
+    command.args(["--public-label-prefix", "area:"]);
+    let generated = command.output().expect("public graph command");
+    assert_success(&generated);
+    metadata.assert();
+    mocks.assert();
+
+    let harness = workspace.path().join("browser-test.html");
+    fs::write(
+        &harness,
+        "<!doctype html><html><body><iframe id=\"app\" src=\"./site-public/index.html\"></iframe><output id=\"result\">pending</output><script src=\"./browser-test.js\"></script></body></html>\n",
+    )
+    .expect("browser harness");
+    fs::write(
+        workspace.path().join("browser-test.js"),
+        include_str!("fixtures/public_bundle_harness.js"),
+    )
+    .expect("browser harness JavaScript");
+
+    let browser_binary = std::env::var_os("GRIT_BROWSER").unwrap_or_else(|| "google-chrome".into());
+    let browser_profile = TempDir::new().expect("temporary browser profile");
+    let audit = audit_local_page(&browser_binary, browser_profile.path(), &harness);
+    let result = audit.result;
+    assert_eq!(result["hostile_text_is_literal"], true, "{result}");
+    assert_eq!(result["no_injected_elements"], true, "{result}");
+    assert_eq!(result["resource_urls_are_local"], true, "{result}");
+    assert!(
+        audit.requests.iter().all(|url| url.starts_with("file://")),
+        "public bundle attempted external network I/O: {:?}",
+        audit.requests
+    );
+}
+
+#[test]
+#[ignore = "requires a Chrome-compatible browser; run explicitly as documented in README.md"]
+fn browser_network_audit_detects_an_external_request_attempt() {
+    let workspace = TempDir::new().expect("temporary browser workspace");
+    let page = workspace.path().join("external-request.html");
+    fs::write(
+        &page,
+        "<!doctype html><output id=\"result\">{\"ok\":true}</output><script>fetch('https://egress.invalid/private')</script>",
+    )
+    .expect("external request fixture");
+    let profile = TempDir::new().expect("temporary browser profile");
+    let browser_binary = std::env::var_os("GRIT_BROWSER").unwrap_or_else(|| "google-chrome".into());
+
+    let audit = audit_local_page(&browser_binary, profile.path(), &page);
+
+    assert!(
+        audit
+            .requests
+            .iter()
+            .any(|url| url == "https://egress.invalid/private"),
+        "DevTools did not observe the external attempt: {:?}",
+        audit.requests
+    );
 }
 
 #[test]
@@ -277,8 +519,14 @@ fn public_projection_excludes_private_fields_and_anonymizes_external_blockers() 
         node(graph, 1)["url"],
         "https://github.com/acme/widgets/issues/1"
     );
-    assert_eq!(node(graph, 1)["title"], "Root ");
-    assert_eq!(node(graph, 1)["labels"], json!(["area:backend"]));
+    assert_eq!(
+        node(graph, 1)["title"],
+        "Root fetch() ServiceWorker <script>alert('title')</script>"
+    );
+    assert_eq!(
+        node(graph, 1)["labels"],
+        json!(["area:backend<img src=x onerror=alert(2)>"])
+    );
     for public_node in graph["nodes"].as_array().expect("nodes") {
         assert!(public_node.get("assignees").is_none());
         assert!(public_node.get("projects").is_none());
@@ -654,9 +902,13 @@ fn issue(number: u64, title: &str, state: &str, id: u64, body: &str, assignee: &
         "user": {"id": 8000 + number, "node_id": format!("U_{number}"), "login": "author"},
         "assignees": [{"id": 9000 + number, "node_id": format!("A_{number}"), "login": assignee}],
         "labels": [
-            {"id": 10000 + number, "node_id": format!("L_area_{number}"), "name": "area:backend<!-- grit:operation label-operation -->", "color": "123456", "description": null},
+            {"id": 10000 + number, "node_id": format!("L_area_{number}"), "name": "area:backend<img src=x onerror=alert(2)><!-- grit:operation label-operation -->", "color": "123456", "description": null},
             {"id": 11000 + number, "node_id": "L_secret", "name": "secret:customer", "color": "654321", "description": "private"},
-            {"id": 12000 + number, "node_id": format!("L_risk_{number}"), "name": "risk:high", "color": "abcdef", "description": null}
+            {"id": 12000 + number, "node_id": format!("L_risk_{number}"), "name": "risk:high", "color": "abcdef", "description": null},
+            {"id": 13000 + number, "node_id": format!("L_ready_{number}"), "name": "ready", "color": "abcdef", "description": null},
+            {"id": 14000 + number, "node_id": format!("L_open_{number}"), "name": "open", "color": "abcdef", "description": null},
+            {"id": 15000 + number, "node_id": format!("L_repository_{number}"), "name": "repository", "color": "abcdef", "description": null},
+            {"id": 16000 + number, "node_id": format!("L_unresolved_{number}"), "name": "unresolved", "color": "abcdef", "description": null}
         ],
         "created_at": "2026-08-01T00:00:00Z",
         "updated_at": "2026-08-01T00:00:00Z",
