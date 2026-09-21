@@ -7,7 +7,7 @@ replica so later analysis can be fast and work offline.
 Grit supports full and incremental synchronization, Dependency-event continuity,
 Executable frontier enumeration, canonical Declared priority initialization,
 native Dependency mutations, Declared priority updates, and deterministic
-static graph artifacts.
+static graph artifacts, with actionable triage diagnostics.
 
 ## Build and test
 
@@ -114,6 +114,26 @@ If GitHub cannot be reached, `ready` uses the latest valid Local replica and
 reports its unchanged `synced_at`. A replica is accepted only when its schema,
 Repository scope, timestamp, and deterministic content hash validate. If no
 valid replica exists, the command fails instead of inventing an empty graph.
+
+## Triage graph problems
+
+`grit triage` explains actionable graph problems without treating blocked work
+as executable:
+
+```bash
+grit triage --repo OWNER/REPO
+grit triage --repo OWNER/REPO --assignee LOGIN --json
+```
+
+Diagnostics cover blocked P0 Issues, open or unknown External blockers, cyclic
+SCCs, assigned Ready work, and Priority conflicts. Each subject reports
+Dependency readiness, availability, and membership in the active Execution
+scope separately. Closed historical topology produces no diagnostic. Output is
+deterministic and uses stable reason codes and Issue references.
+
+Like other analysis commands, `triage` attempts only pull Synchronization. If
+GitHub is unavailable, it uses the latest valid Local replica and reports the
+unchanged `synced_at`.
 
 ## Change native Dependencies
 

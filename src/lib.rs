@@ -11,6 +11,7 @@ mod replica_sync;
 mod repository;
 mod store;
 mod synchronization;
+mod triage;
 
 use std::process::ExitCode;
 
