@@ -9,25 +9,60 @@ use crate::model::{
     BlockerIdentity, BlockerScope, Dependency, Issue, IssueIdentity, Label, LocalReplica,
 };
 
+fn fixture_outbox(
+    repository: &str,
+    operations: serde_json::Value,
+) -> crate::outbox::PendingMutationOutbox {
+    serde_json::from_value(json!({
+        "schema_version": "grit.pending-mutations/v1",
+        "repository": repository,
+        "operations": operations,
+    }))
+    .expect("fixture outbox")
+}
+
+fn priority_operation(id: &str, issue_number: u64, desired: &str) -> serde_json::Value {
+    json!({
+        "kind": "priority_update", "id": id, "issue_number": issue_number,
+        "base": {"state": "unspecified"},
+        "desired": {"state": "declared", "value": desired},
+    })
+}
+
 #[test]
 fn cache_identity_covers_scope_parameters_and_ordered_pending_overlay() {
     let replica = repository_scale_fixture(20, 40);
-    let available = effective_input_hash(&replica, ExecutionScope::Available, &[]);
-    let assigned = effective_input_hash(&replica, ExecutionScope::Assignee("ALICE"), &[]);
-    let ordered = effective_input_hash(
-        &replica,
-        ExecutionScope::Available,
-        &["operation-a", "operation-b"],
+    let empty = fixture_outbox(&replica.repository, json!([]));
+    let working = WorkingGraph::project(&replica, &empty).expect("Working graph");
+    let first_operation = priority_operation("operation-a", 1, "p1");
+    let second_operation = priority_operation("operation-b", 2, "p4");
+    let ordered_outbox = fixture_outbox(
+        &replica.repository,
+        json!([first_operation, second_operation]),
     );
-    let reversed = effective_input_hash(
-        &replica,
-        ExecutionScope::Available,
-        &["operation-b", "operation-a"],
+    let reversed_outbox = fixture_outbox(
+        &replica.repository,
+        json!([second_operation, first_operation]),
     );
-
+    let changed_outbox = fixture_outbox(
+        &replica.repository,
+        json!([priority_operation("operation-a", 1, "p0"), second_operation]),
+    );
+    let ordered_working =
+        WorkingGraph::project(&replica, &ordered_outbox).expect("ordered Working graph");
+    let reversed_working =
+        WorkingGraph::project(&replica, &reversed_outbox).expect("reversed Working graph");
+    let changed_working =
+        WorkingGraph::project(&replica, &changed_outbox).expect("changed Working graph");
+    let available = effective_input_hash(&working, ExecutionScope::Available);
+    let assigned = effective_input_hash(&working, ExecutionScope::Assignee("ALICE"));
+    let ordered = effective_input_hash(&ordered_working, ExecutionScope::Available);
+    let reversed = effective_input_hash(&reversed_working, ExecutionScope::Available);
+    let changed = effective_input_hash(&changed_working, ExecutionScope::Available);
     assert_ne!(available, assigned);
     assert_ne!(available, ordered);
     assert_ne!(ordered, reversed);
+    assert_ne!(ordered, changed);
     assert_ne!(
         ranking_cache_key(&available, 1),
         ranking_cache_key(&available, 3)
@@ -36,44 +71,53 @@ fn cache_identity_covers_scope_parameters_and_ordered_pending_overlay() {
     let directory = TempDir::new().expect("temporary ranking cache");
     let mut first_cache = RankingCache::at(directory.path());
     let first = analyze_profiled(
-        &replica,
+        &ordered_working,
         ExecutionScope::Available,
         DEFAULT_HORIZON,
-        &["operation-a", "operation-b"],
         &mut first_cache,
     );
     let mut reordered_cache = RankingCache::at(directory.path());
     let reordered = analyze_profiled(
-        &replica,
+        &reversed_working,
         ExecutionScope::Available,
         DEFAULT_HORIZON,
-        &["operation-b", "operation-a"],
         &mut reordered_cache,
+    );
+    let mut changed_cache = RankingCache::at(directory.path());
+    let changed = analyze_profiled(
+        &changed_working,
+        ExecutionScope::Available,
+        DEFAULT_HORIZON,
+        &mut changed_cache,
     );
     assert!(!first.profile.cache_hit);
     assert!(!reordered.profile.cache_hit);
+    assert!(!changed.profile.cache_hit);
 }
 
 #[test]
 fn warm_cache_preserves_the_complete_deterministic_analysis() {
     let replica = repository_scale_fixture(80, 240);
+    let outbox = fixture_outbox(
+        &replica.repository,
+        json!([priority_operation("pending-p0", 1, "p0")]),
+    );
+    let working = WorkingGraph::project(&replica, &outbox).expect("Working graph");
     let directory = TempDir::new().expect("temporary ranking cache");
     let mut cold_cache = RankingCache::at(directory.path());
     let cold = analyze_profiled(
-        &replica,
+        &working,
         ExecutionScope::Available,
         DEFAULT_HORIZON,
-        &[],
         &mut cold_cache,
     );
     let cold_json = serde_json::to_vec(&cold.analysis).expect("serialize cold analysis");
 
     let mut warm_cache = RankingCache::at(directory.path());
     let warm = analyze_profiled(
-        &replica,
+        &working,
         ExecutionScope::Available,
         DEFAULT_HORIZON,
-        &[],
         &mut warm_cache,
     );
     let warm_json = serde_json::to_vec(&warm.analysis).expect("serialize warm analysis");
@@ -84,18 +128,31 @@ fn warm_cache_preserves_the_complete_deterministic_analysis() {
     assert_eq!(warm.profile.pagerank, Duration::ZERO);
     assert_eq!(warm.profile.search, Duration::ZERO);
     assert_eq!(cold_json, warm_json);
+    let document: serde_json::Value =
+        serde_json::from_slice(&warm_json).expect("pending cached output");
+    assert_eq!(document["pending"], true);
+    assert_eq!(document["recommendation"]["first_issue"]["number"], 1);
+    assert_eq!(
+        document["recommendation"]["first_issue"]["priority"]["value"],
+        "p0"
+    );
+    assert_eq!(
+        document["recommendation"]["operation_ids"],
+        json!(["pending-p0"])
+    );
 }
 
 #[test]
 fn semantically_incompatible_cache_is_rebuilt_even_with_a_valid_payload_hash() {
     let replica = repository_scale_fixture(80, 240);
+    let outbox = fixture_outbox(&replica.repository, json!([]));
+    let working = WorkingGraph::project(&replica, &outbox).expect("Working graph");
     let directory = TempDir::new().expect("temporary ranking cache");
     let mut cold_cache = RankingCache::at(directory.path());
     let cold = analyze_profiled(
-        &replica,
+        &working,
         ExecutionScope::Available,
         DEFAULT_HORIZON,
-        &[],
         &mut cold_cache,
     );
     assert!(cold.profile.cache_published);
@@ -119,10 +176,9 @@ fn semantically_incompatible_cache_is_rebuilt_even_with_a_valid_payload_hash() {
 
     let mut incompatible_cache = RankingCache::at(directory.path());
     let rebuilt = analyze_profiled(
-        &replica,
+        &working,
         ExecutionScope::Available,
         DEFAULT_HORIZON,
-        &[],
         &mut incompatible_cache,
     );
     assert!(!rebuilt.profile.cache_hit);
@@ -135,16 +191,17 @@ fn repository_scale_profile_meets_the_next_v1_latency_budget() {
     const ISSUE_COUNT: usize = 5_000;
     const DEPENDENCY_COUNT: usize = 20_000;
     let replica = repository_scale_fixture(ISSUE_COUNT, DEPENDENCY_COUNT);
+    let outbox = fixture_outbox(&replica.repository, json!([]));
+    let working = WorkingGraph::project(&replica, &outbox).expect("Working graph");
     assert_eq!(replica.issues.len(), ISSUE_COUNT);
     assert_eq!(replica.dependencies.len(), DEPENDENCY_COUNT);
     let directory = TempDir::new().expect("temporary ranking cache");
 
     let mut cold_cache = RankingCache::at(directory.path());
     let cold = analyze_profiled(
-        &replica,
+        &working,
         ExecutionScope::Available,
         DEFAULT_HORIZON,
-        &[],
         &mut cold_cache,
     );
     let cold_serialization_started = Instant::now();
@@ -154,10 +211,9 @@ fn repository_scale_profile_meets_the_next_v1_latency_budget() {
 
     let mut warm_cache = RankingCache::at(directory.path());
     let warm = analyze_profiled(
-        &replica,
+        &working,
         ExecutionScope::Available,
         DEFAULT_HORIZON,
-        &[],
         &mut warm_cache,
     );
     let warm_serialization_started = Instant::now();

@@ -5,6 +5,7 @@ pub(super) fn snapshot<'a>(
     graph: &crate::operational::OperationalGraph<'a>,
     pagerank: Option<&PageRank>,
     horizon: u8,
+    working: &WorkingGraph<'_>,
 ) -> EvaluatedCandidate<'a> {
     let issue = partial
         .steps
@@ -18,7 +19,7 @@ pub(super) fn snapshot<'a>(
         .collect();
     let mut priority_profile = PriorityProfile::default();
     for unlocked in &unlocks {
-        let unlocked_priority = priority(unlocked);
+        let unlocked_priority = priority(working, unlocked);
         if unlocked_priority != PriorityComparison::P0 {
             priority_profile.record(unlocked_priority);
         }
@@ -30,7 +31,7 @@ pub(super) fn snapshot<'a>(
     let mut step_priorities: Vec<_> = partial
         .steps
         .iter()
-        .map(|step| StepPriority::from(priority(step.issue)))
+        .map(|step| StepPriority::from(priority(working, step.issue)))
         .collect();
     step_priorities.resize(horizon as usize, StepPriority::NoStep);
     let candidate = CandidateData {

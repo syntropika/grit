@@ -5,6 +5,83 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 #[test]
+fn offline_priority_activates_a_bounded_p0_route_and_marks_its_rollout() {
+    let repository = "acme/pending-p0-route";
+    let mut github = Server::new();
+    let state = TempDir::new().expect("temporary state directory");
+    let mocks = mock_repository(
+        &mut github,
+        repository,
+        vec![
+            issue(1, "open", &["priority:p4"], &[]),
+            issue(2, "open", &["priority:p4"], &[]),
+            issue(3, "open", &["priority:p4"], &[]),
+            issue(10, "open", &["priority:p1"], &[]),
+        ],
+        vec![
+            (1, vec![]),
+            (2, vec![internal_blocker(1, "open")]),
+            (3, vec![internal_blocker(2, "open")]),
+            (10, vec![]),
+        ],
+    );
+    let api_url = github.url();
+    let baseline = next_default_command(&state, &api_url, repository, true)
+        .output()
+        .expect("synchronize the normal graph");
+    assert_success(&baseline);
+    let baseline: Value = serde_json::from_slice(&baseline.stdout).expect("normal next JSON");
+    assert_eq!(baseline["mode"], "normal");
+    mocks.assert();
+    drop(github);
+
+    let queued = Command::new(env!("CARGO_BIN_EXE_grit"))
+        .args([
+            "update",
+            "acme/pending-p0-route#3",
+            "--priority",
+            "p0",
+            "--json",
+        ])
+        .env("GRIT_STATE_DIR", state.path())
+        .env("GRIT_GITHUB_API_URL", &api_url)
+        .env("GH_TOKEN", "test-token")
+        .env("PATH", "")
+        .output()
+        .expect("queue a blocked P0 while offline");
+    assert_success(&queued);
+    let queued: Value = serde_json::from_slice(&queued.stdout).expect("pending update JSON");
+    let operation_ids = json!([queued["operation"]["id"]]);
+    let output = next_default_command(&state, &api_url, repository, false)
+        .output()
+        .expect("rank the pending bounded P0 route");
+    assert_success(&output);
+    let output: Value = serde_json::from_slice(&output.stdout).expect("pending next JSON");
+    assert_eq!(output["mode"], "p0_route");
+    assert_eq!(output["parameters"]["horizon"], 3);
+    assert_eq!(output["search_complete"], true);
+    assert_eq!(output["global_optimum_claimed"], true);
+    assert_eq!(output["recommendation"]["critical_distance"], 2);
+    assert_eq!(rollout_numbers(&output["recommendation"]), vec![1, 2, 3]);
+    assert_eq!(output["recommendation"]["operation_ids"], operation_ids);
+    let steps = &output["recommendation"]["rollout"]["steps"];
+    assert_eq!(steps[0]["mode"], "p0_route");
+    assert_eq!(steps[1]["mode"], "p0_route");
+    assert_eq!(steps[2]["mode"], "p0_ready");
+    assert_eq!(steps[2]["issue"]["priority"]["value"], "p0");
+    assert_eq!(steps[2]["issue"]["operation_ids"], operation_ids);
+    assert_eq!(
+        output["recommendation"]["outcome"]["unlock_profile"]["p0_curve"],
+        json!([0, 1, 1])
+    );
+    assert_ne!(output["input_hash"], baseline["input_hash"]);
+    assert_eq!(
+        output["replica_snapshot_hash"],
+        baseline["replica_snapshot_hash"]
+    );
+}
+
+#[test]
 fn next_evaluates_the_complete_frontier_with_and_unlocks_and_deduplication() {
     let mut github = Server::new();
     let state = TempDir::new().expect("temporary state directory");
@@ -497,7 +574,57 @@ fn delayed_cascade_survives_one_hundred_twenty_nine_better_immediate_results() {
         ])
     );
     assert_eq!(output["summary"]["candidate_count"], 96);
+    let api_url = github.url();
     mocks.assert();
+    drop(github);
+
+    let queued = Command::new(env!("CARGO_BIN_EXE_grit"))
+        .args([
+            "update",
+            "acme/delayed-cascade#1000",
+            "--priority",
+            "p1",
+            "--json",
+        ])
+        .env("GRIT_STATE_DIR", state.path())
+        .env("GRIT_GITHUB_API_URL", &api_url)
+        .env("GH_TOKEN", "test-token")
+        .env("PATH", "")
+        .output()
+        .expect("queue the delayed cascade priority");
+    assert_success(&queued);
+    let queued: Value = serde_json::from_slice(&queued.stdout).expect("pending update JSON");
+    let pending =
+        next_command_with_horizon(&state, &api_url, "acme/delayed-cascade", false, Some(2))
+            .output()
+            .expect("rank the pending delayed cascade");
+    assert_success(&pending);
+    let pending: Value = serde_json::from_slice(&pending.stdout).expect("pending next JSON");
+    assert_eq!(rollout_numbers(&pending["recommendation"]), vec![1, 1_000]);
+    assert_eq!(
+        pending["recommendation"]["outcome"]["unlock_profile"]["count"],
+        101
+    );
+    assert_eq!(
+        pending["recommendation"]["outcome"]["unlock_profile"]["priority_profile"]["p1"],
+        1
+    );
+    assert_eq!(
+        pending["recommendation"]["rollout"]["steps"][1]["issue"]["priority"]["value"],
+        "p1"
+    );
+    assert_eq!(
+        pending["recommendation"]["operation_ids"],
+        json!([queued["operation"]["id"]])
+    );
+    assert_eq!(pending["comparison_to_runner_up"]["pending"], true);
+    assert_eq!(pending["search_complete"], false);
+    assert_eq!(pending["global_optimum_claimed"], false);
+    assert_ne!(pending["input_hash"], output["input_hash"]);
+    assert_eq!(
+        pending["replica_snapshot_hash"],
+        output["replica_snapshot_hash"]
+    );
 }
 
 #[test]
