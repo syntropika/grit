@@ -526,6 +526,7 @@ fn mock_unavailable(
 }
 
 struct RepositoryMocks {
+    events: Mock,
     labels: Mock,
     issues: Mock,
     comments: Mock,
@@ -534,6 +535,7 @@ struct RepositoryMocks {
 
 impl RepositoryMocks {
     fn assert(self) {
+        self.events.assert();
         self.labels.assert();
         self.issues.assert();
         self.comments.assert();
@@ -544,6 +546,13 @@ impl RepositoryMocks {
 }
 
 fn mock_repository(github: &mut Server, priorities: &[(u64, &str)]) -> RepositoryMocks {
+    let events = github
+        .mock("GET", "/repos/acme/offline/issues/events")
+        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("[]")
+        .create();
     let labels = github
         .mock("GET", "/repos/acme/offline/labels")
         .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
@@ -594,6 +603,7 @@ fn mock_repository(github: &mut Server, priorities: &[(u64, &str)]) -> Repositor
         })
         .collect();
     RepositoryMocks {
+        events,
         labels,
         issues,
         comments,

@@ -30,6 +30,7 @@ fn wide_p0_routes_complete_the_bounded_end_to_end_evaluation() {
         synced_at: "2026-08-07T00:00:00Z".to_owned(),
         input_hash: "fixture".to_owned(),
         repository_labels: Some(Vec::new()),
+        sync: Default::default(),
         issues,
         dependencies,
     };
@@ -248,6 +249,7 @@ fn replica(issues: Vec<crate::model::Issue>, dependencies: Vec<Dependency>) -> L
         synced_at: "2026-08-07T00:00:00Z".to_owned(),
         input_hash: "fixture".to_owned(),
         repository_labels: Some(Vec::new()),
+        sync: Default::default(),
         issues,
         dependencies,
     }

@@ -3,6 +3,8 @@ mod scc;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde::Serialize;
+
 use crate::model::{BlockerScope, Dependency, Issue, LocalReplica};
 pub(crate) use rollout::{OneStepAnalysis, RolloutState};
 use scc::{cyclic_issue_numbers, strongly_connected_components};
@@ -37,10 +39,12 @@ pub(crate) struct ReadyAnalysis<'a> {
     pub(crate) ready_count: usize,
     pub(crate) assigned_ready_count: usize,
     pub(crate) blocked_count: usize,
+    pub(crate) ready: Vec<&'a Issue>,
     pub(crate) executable: Vec<&'a Issue>,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum IssueState {
     Open,
     Closed,
@@ -227,6 +231,7 @@ impl<'a> OperationalGraph<'a> {
             ready_count,
             assigned_ready_count,
             blocked_count: operational_issue_count - ready_count,
+            ready,
             executable,
         }
     }
