@@ -8,6 +8,7 @@ mod graph;
 mod model;
 mod operational;
 mod outbox;
+mod plan;
 mod priority;
 mod priority_update;
 mod ranking;

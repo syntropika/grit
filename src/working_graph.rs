@@ -104,6 +104,10 @@ impl<'a> WorkingGraph<'a> {
         self.operation_ids.clone()
     }
 
+    pub(crate) fn priority_is_pending(&self, issue_number: u64) -> bool {
+        self.operation_ids_by_issue.contains_key(&issue_number)
+    }
+
     pub(crate) fn priority(&self, issue: &Issue) -> PriorityState {
         self.priority_overrides
             .get(&issue.number)

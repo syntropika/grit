@@ -9,9 +9,11 @@ Executable frontier enumeration, canonical Declared priority initialization,
 native Dependency mutations, Declared priority updates, and deterministic
 static graph artifacts, with actionable triage diagnostics and bounded multistep
 next-work recommendations with an exact horizon-one option. Its offline browser explorer presents the precomputed
-Issue graph with synchronized network and accessible table selection.
+Issue graph with synchronized network and accessible table selection,
+composable filters, Dependency relationship isolation, and a bounded view for dense graphs.
 Public exports use a separate allowlisted model after a live Repository visibility check.
 Unavailable Priority and Dependency updates are queued durably and projected into analysis with explicit Pending provenance.
+Structural plans share the same Working graph and cached decision as next.
 
 ## Build and test
 
@@ -21,6 +23,7 @@ Grit requires a stable Rust toolchain with Edition 2024 support.
 cargo build
 cargo test
 cargo clippy --all-targets --all-features -- -D warnings
+node --test tests/network_view.test.js
 ```
 
 The browser acceptance test is intentionally gated because the ordinary Rust
@@ -30,6 +33,9 @@ binary (Google Chrome by default):
 ```bash
 GRIT_BROWSER=google-chrome cargo test --test graph_cli \
   generated_site_is_a_keyboard_accessible_offline_graph_explorer -- --ignored --exact
+
+GRIT_BROWSER=google-chrome cargo test --release \
+  graph::benchmark::dense_graph_browser_benchmark -- --ignored --exact --nocapture
 ```
 
 The test launches an ephemeral headless profile with background networking
@@ -150,6 +156,7 @@ the default Planning horizon; horizons one and two remain available:
 grit next --repo OWNER/REPO
 grit next --repo OWNER/REPO --horizon 1
 grit next --repo OWNER/REPO --assignee LOGIN --horizon 3 --json
+grit next --repo OWNER/REPO --profile --json
 ```
 
 The `next/v1` policy first enforces Executable P0 and one-step P0-route gates.
@@ -162,21 +169,57 @@ though only work inside the active Execution scope can be simulated as a step.
 It never recommends blocked or out-of-scope work.
 
 Horizon one remains an exact comparison of the complete first-step frontier.
-For longer horizons, Grit exhaustively explores successors until the
-deterministic 8,192-state budget is reached. Exhausted searches report
-`truncated_by: ["state_budget"]`, set `search_complete` and
-`global_optimum_claimed` to false, and scope the runner-up to `explored`.
-Multi-step critical-route discovery lands separately; until then, a blocked P0
-at horizons two or three similarly reports `p0_frontier` instead of making an
-unsupported optimum claim.
+For longer horizons, deterministic shortlist, probe, branch, beam, and state
+budgets bound the search while preserving separate lanes for realized results,
+feasible joint rollouts, and delayed cascades. Every activated restriction is
+reported in `truncated_by`; a restricted result sets `search_complete` and
+`global_optimum_claimed` to false and scopes the runner-up to `explored`.
 
 Robot output reports both snapshot and effective-input hashes, metric states,
-the global runner-up comparison, structured reasons, and whether the result is
-a close structural tie. Pending recommendations, Issue references, comparison
-evidence, and reasons carry operation provenance. If no Issue is Executable,
-the command succeeds with a null recommendation and categorized blocker
-counts. Like `ready`, it attempts a pull Synchronization and falls back to the
-latest valid Local replica without mutating GitHub.
+deterministic main-search and probe work counts, the runner-up comparison,
+structured reasons, and whether the result is a close structural tie. Pending
+recommendations, Issue references, comparison evidence, and reasons carry
+operation provenance. If no
+Issue is Executable, the command succeeds with a null recommendation and
+categorized blocker counts. Like `ready`, it attempts a pull Synchronization
+and falls back to the latest valid Local replica without mutating GitHub.
+
+The ranking result is cached locally by effective input, policy version, and
+all result-affecting parameters. The cache is disposable and never replaces
+the Local replica or GitHub as the source of truth. `--profile` reports graph
+preparation, SCC, readiness, cache, PageRank, bounded search, output assembly,
+and analysis-serialization timings in microseconds; Synchronization is
+explicitly excluded. Human profiling does not perform an unused JSON
+serialization. See [`docs/performance/next-v1.md`](docs/performance/next-v1.md) for
+the 5,000-Issue reference benchmark.
+
+## Inspect a structural plan
+
+`grit plan` exposes the exact `next/v1` decision together with immediate
+parallel capacity and counterfactual Dependency layers:
+
+```bash
+grit plan --repo OWNER/REPO
+grit plan --repo OWNER/REPO --assignee LOGIN --horizon 3 --json
+```
+
+`plan` and `next` share the same Working graph, ordered Pending mutations,
+Execution scope, search, and cache. Pending priorities affect both the selected
+rollout and structural Issue annotations. The plan decision preserves the same
+input hash, completeness fields, and operation provenance as `next`; dependency
+layers describe topology and do not predict scheduling or duration.
+
+`parallel_now` is the complete Executable frontier for the active Execution
+scope. `dependency_layers` covers every open Issue in the Repository: layer 0
+contains all current Ready Issues, and each later finite layer follows the
+latest layer of all its open blockers. Every Issue records assignment,
+Execution-scope eligibility, and whether it is Executable now.
+
+Cycles, opaque External blockers, unknown internal blockers, and their
+affected descendants remain in `unresolved`; Grit does not assign them a
+misleading finite layer. These layers describe dependency topology under
+unlimited structural capacity. They are not dates, worker rounds, an ETA, or
+a Critical Path. `plan/v1` therefore rejects `--workers` explicitly.
 
 ## Triage graph problems
 
@@ -242,8 +285,9 @@ grit graph --repo OWNER/REPO --output site/
 grit graph --repo OWNER/REPO --output site/ --json
 ```
 
-The target contains `index.html`, `app.css`, `app.js`, `graph.json`, and
-`graph.schema.json`. The versioned JSON uses explicit `blocked` and `blocker`
+The target contains `index.html`, `app.css`, `graph-query.js`, `network-view.js`, `app.js`,
+`graph.json`, and `graph.schema.json`. The versioned JSON uses explicit
+`blocked` and `blocker`
 edge roles, normalized Issue fields, precomputed layered positions,
 operational counts, hashes, and provenance. Bodies, comments, raw API records,
 and Operation markers are not part of the artifact.
@@ -254,6 +298,27 @@ Issue table. Its detail panel shows readiness, blockers, dependents, and the
 canonical GitHub link. Labels appear only on hover, focus, or selection, and
 the zoom controls never recalculate layout or ranking. All assets are local;
 the browser does not contact GitHub or any other network service.
+
+Readiness, state, Declared priority, area-label, assignee, and disconnected
+component filters compose over the static data. Area, multi-component, and
+optional Project controls are omitted when their source data is absent; the
+current Issues-only artifact has no Project membership and therefore renders
+no Project filter. Root-and-depth isolation follows Dependencies in both
+directions to bound the visible
+neighborhood while preserving every precomputed position and metric. Separate
+actions highlight transitive upstream blockers, transitive downstream
+dependents, or the shortest directed path between two selected nodes. The
+table mirrors the filtered nodes and relationship annotations, including all
+matching results outside a constrained network window. `Clear view` restores
+the initial graph view.
+
+The measured full-network range is 5,000 nodes and 20,000 edges. Larger
+artifacts open with an at-most-500-node overview seeded from Ready Issues.
+Search and the complete accessible table remain available; selecting a result
+opens its bounded neighborhood, while rendering the full network requires an
+explicit action. Every view reuses positions produced by the binary. The
+browser does not run layout or ranking. See the reproducible measurements and
+environment in [`docs/benchmarks/graph-browser.md`](docs/benchmarks/graph-browser.md).
 
 Generation validates the closed artifact model in a staging directory before
 replacing the target. Regenerating from the same effective Local replica is

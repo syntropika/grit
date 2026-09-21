@@ -196,6 +196,17 @@ fn a_persisted_conflict_is_reclassified_when_github_now_satisfies_the_intent() {
 #[test]
 fn remote_resolution_retires_the_intent_without_a_github_write() {
     let fixture = conflict_fixture();
+    fixture.remote.lock().expect("remote lock").online = false;
+    let pending = ranked_output(&fixture, "next");
+    let cached_pending = ranked_output(&fixture, "next");
+    assert_eq!(pending["pending"], true);
+    assert_eq!(
+        pending["recommendation"]["first_issue"]["priority"]["value"],
+        "p0"
+    );
+    assert_eq!(cached_pending["performance"]["cache_hit"], true);
+    assert_eq!(pending["recommendation"], cached_pending["recommendation"]);
+    fixture.remote.lock().expect("remote lock").online = true;
 
     let resolved = run(
         &fixture.state,
@@ -229,6 +240,31 @@ fn remote_resolution_retires_the_intent_without_a_github_write() {
             .expect("operations")
             .is_empty()
     );
+    fixture.remote.lock().expect("remote lock").online = false;
+    let reconciled = ranked_output(&fixture, "next");
+    let plan = ranked_output(&fixture, "plan");
+    let cached_reconciled = ranked_output(&fixture, "next");
+    assert_eq!(reconciled["performance"]["cache_hit"], false);
+    assert_eq!(cached_reconciled["performance"]["cache_hit"], true);
+    assert_ne!(pending["input_hash"], reconciled["input_hash"]);
+    assert_eq!(reconciled["pending"], false);
+    assert!(reconciled.get("pending_operation_ids").is_none());
+    assert_eq!(
+        reconciled["recommendation"]["first_issue"]["priority"]["value"],
+        "p3"
+    );
+    assert_eq!(plan["parallel_now"][0]["priority"]["value"], "p3");
+    assert_eq!(plan["parallel_now"][0]["pending"], false);
+    for (field, value) in plan["decision"].as_object().expect("plan decision") {
+        if field == "parameters" {
+            for (parameter, expected) in value.as_object().expect("plan parameters") {
+                assert_eq!(expected, &reconciled[field][parameter]);
+            }
+        } else {
+            assert_eq!(value, &reconciled[field], "shared {field}");
+            assert_eq!(value, &cached_reconciled[field], "cached shared {field}");
+        }
+    }
     fixture.mocks.assert();
 }
 
@@ -574,6 +610,16 @@ fn conflict_fixture() -> ConflictFixture {
         mocks,
         operation_id,
     }
+}
+
+fn ranked_output(fixture: &ConflictFixture, command: &str) -> Value {
+    let mut args = vec![command, "--repo", "acme/reconcile", "--json"];
+    if command == "next" {
+        args.push("--profile");
+    }
+    let output = run(&fixture.state, &fixture.github.url(), &args);
+    assert_success(&output);
+    serde_json::from_slice(&output.stdout).expect("ranking JSON")
 }
 
 fn queue(state: &TempDir, api_url: &str, number: u64, priority: &str) -> Value {
