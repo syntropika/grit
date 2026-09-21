@@ -83,12 +83,48 @@ pub(super) fn assign_artifact_dependency_layers(
             }
         }
     }
-    let positions = dependency_positions(&layout_nodes, &dependencies)?;
+    let mut positions = dependency_positions(&layout_nodes, &dependencies)?;
+    assign_history_positions(nodes, edges, &mut positions)?;
     for node in nodes {
         *node.position_mut() = positions
             .get(node.key())
             .cloned()
             .ok_or_else(|| GraphError::DanglingEndpoint(node.key().to_string()))?;
+    }
+    Ok(())
+}
+
+fn assign_history_positions(
+    nodes: &[ArtifactNode],
+    edges: &[ArtifactEdge],
+    positions: &mut BTreeMap<NodeKey, Position>,
+) -> Result<(), GraphError> {
+    let history: Vec<_> = nodes
+        .iter()
+        .filter(|node| matches!(node.layer_role(), LayerRole::Satisfied))
+        .map(|node| LayoutNode::eligible(node.key().clone(), false))
+        .collect();
+    if history.is_empty() {
+        return Ok(());
+    }
+    let history_keys: std::collections::BTreeSet<_> =
+        history.iter().map(|node| &node.key).collect();
+    let historical_dependencies: Vec<_> = edges
+        .iter()
+        .filter(|edge| history_keys.contains(&edge.blocked) && history_keys.contains(&edge.blocker))
+        .map(|edge| LayoutDependency::new(edge.blocked.clone(), edge.blocker.clone()))
+        .collect();
+    let offset_y = positions
+        .iter()
+        .filter(|(key, _)| !history_keys.contains(key))
+        .map(|(_, position)| position.y)
+        .max()
+        .map_or(0, |maximum| maximum + 144);
+    for (key, mut position) in dependency_positions(&history, &historical_dependencies)? {
+        // Historical topology is display-only and has no operational Dependency layer.
+        position.layer = None;
+        position.y += offset_y;
+        positions.insert(key, position);
     }
     Ok(())
 }

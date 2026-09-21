@@ -135,6 +135,8 @@ pub(super) enum ArtifactNode {
     Issue {
         common: NodeCommon,
         status: IssueNodeStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolution: Option<IssueResolution>,
         url: String,
         title: String,
         assignees: Vec<String>,
@@ -174,6 +176,24 @@ pub(super) enum IssueNodeStatus {
     Blocked,
     Closed,
     Unknown,
+}
+
+#[derive(Clone, Copy, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum IssueResolution {
+    Completed,
+    NotPlanned,
+    Other,
+}
+
+impl IssueResolution {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Completed => "Completed",
+            Self::NotPlanned => "Not planned",
+            Self::Other => "Closed · unspecified",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -444,6 +464,13 @@ pub(super) fn build_working(
                 provenance: ElementProvenance::pending(working.provenance_for_issue(issue.number)),
             },
             status,
+            resolution: (status == IssueNodeStatus::Closed).then_some({
+                match issue.state_reason.as_deref() {
+                    Some("completed") => IssueResolution::Completed,
+                    Some("not_planned") => IssueResolution::NotPlanned,
+                    _ => IssueResolution::Other,
+                }
+            }),
             url: issue.url.clone(),
             title: strip_operation_markers(&issue.title),
             assignees,
@@ -678,6 +705,13 @@ fn validate(artifact: &GraphArtifact) -> Result<(), GraphError> {
             return Err(GraphError::InvalidStableKey(node.key().to_string()));
         }
         match node {
+            ArtifactNode::Issue {
+                status,
+                resolution: Some(_),
+                ..
+            } if *status != IssueNodeStatus::Closed => {
+                return Err(GraphError::InvalidField("nodes.resolution"));
+            }
             ArtifactNode::Issue { common, url, .. }
                 if common
                     .key
@@ -803,8 +837,7 @@ fn normalized_state(value: &str) -> &'static str {
 mod tests {
     use super::*;
 
-    #[test]
-    fn optional_project_membership_is_valid_and_rendered_only_when_present() {
+    fn fixture_artifact() -> GraphArtifact {
         let issue = crate::model::Issue {
             id: 1,
             node_id: "I_1".to_owned(),
@@ -832,12 +865,30 @@ mod tests {
             Vec::new(),
         )
         .expect("Project fixture");
-        let mut artifact = build(
+        build(
             &replica,
             ExecutionScope::Available,
             ranking::DEFAULT_HORIZON,
         )
-        .expect("Project artifact");
+        .expect("Project artifact")
+    }
+
+    #[test]
+    fn resolution_is_rejected_on_open_issues() {
+        let mut artifact = fixture_artifact();
+        if let ArtifactNode::Issue { resolution, .. } = &mut artifact.nodes[0] {
+            *resolution = Some(IssueResolution::Completed);
+        }
+        artifact.artifact_hash = calculate_hash(&artifact).expect("artifact hash");
+        assert!(matches!(
+            validate(&artifact),
+            Err(GraphError::InvalidField("nodes.resolution"))
+        ));
+    }
+
+    #[test]
+    fn optional_project_membership_is_valid_and_rendered_only_when_present() {
+        let mut artifact = fixture_artifact();
         if let ArtifactNode::Issue { projects, .. } = &mut artifact.nodes[0] {
             *projects = Some(vec!["Platform".to_owned(), "Roadmap".to_owned()]);
         }

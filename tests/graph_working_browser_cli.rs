@@ -148,6 +148,7 @@ fn execute(state: &TempDir, api: &str, args: &[&str]) -> Value {
         .args(args)
         .env("GH_TOKEN", "local-fixture-token")
         .env("GRIT_GITHUB_API_URL", api)
+        .env("GRIT_NO_KEYRING", "1")
         .env("GRIT_STATE_DIR", state.path())
         .env("PATH", "")
         .output()

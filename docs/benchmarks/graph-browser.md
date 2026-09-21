@@ -63,7 +63,8 @@ The ignored benchmark builds normalized synthetic Issues and Dependencies,
 runs Grit's real artifact builder and layered layout, renders the production
 HTML/CSS/JavaScript, and opens it with browser network egress disabled. It emits
 one JSON record per size with artifact bytes, complete-site bytes, artifact
-construction, layout, serialization, HTML generation, load, SVG render, TTI,
+construction, dependency-layer layout, presentation construction (including the
+spatial network layout), serialization, HTML generation, load, SVG render, TTI,
 selected network mode, and initially rendered node and edge counts.
 
 ## Interpretation limits

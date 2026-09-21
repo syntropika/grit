@@ -7,6 +7,8 @@ use super::{
     model::NodeKey,
 };
 
+mod network_layout;
+
 pub(super) const FULL_NETWORK_MAX_NODES: usize = 5_000;
 pub(super) const FULL_NETWORK_MAX_EDGES: usize = 20_000;
 pub(super) const INITIAL_NETWORK_MAX_NODES: usize = 500;
@@ -18,6 +20,7 @@ pub(super) struct GraphPresentation {
     full_network_limits: FullNetworkLimits,
     initial_network_node_limit: usize,
     initial_node_keys: Vec<NodeKey>,
+    network_positions: BTreeMap<NodeKey, network_layout::NetworkPosition>,
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -72,6 +75,7 @@ fn build_with_limits(
         },
         initial_network_node_limit: initial_node_limit,
         initial_node_keys,
+        network_positions: network_layout::build(artifact),
     }
 }
 
@@ -231,6 +235,71 @@ mod tests {
         assert_eq!(
             keys(initial_nodes(&first, 2)),
             keys(initial_nodes(&second, 2))
+        );
+    }
+
+    #[test]
+    fn network_layout_covers_history_without_mutating_analysis_or_operational_positions() {
+        let artifact = artifact(
+            vec![issue(1, "open"), issue(2, "closed"), issue(3, "closed")],
+            vec![dependency(2, 1)],
+        );
+        let before = serde_json::to_value(&artifact).expect("artifact JSON");
+        let presentation = serde_json::to_value(build(&artifact)).expect("presentation JSON");
+        let positions = presentation["network_positions"].as_object().unwrap();
+        let expected: BTreeSet<_> = artifact
+            .nodes
+            .iter()
+            .map(|node| node.key().to_string())
+            .collect();
+        assert_eq!(positions.keys().cloned().collect::<BTreeSet<_>>(), expected);
+        for point in positions.values() {
+            assert!(point["x"].as_f64().unwrap().is_finite());
+            assert!(point["y"].as_f64().unwrap().is_finite());
+        }
+        assert_eq!(serde_json::to_value(&artifact).unwrap(), before);
+
+        let point = |key: &str| {
+            let value = &positions[key];
+            (value["x"].as_f64().unwrap(), value["y"].as_f64().unwrap())
+        };
+        let isolated = point("acme/widgets#3");
+        for key in ["acme/widgets#1", "acme/widgets#2"] {
+            let connected = point(key);
+            assert!((isolated.0 - connected.0).hypot(isolated.1 - connected.1) >= 100.0);
+        }
+    }
+
+    #[test]
+    fn network_layout_is_independent_of_input_order_and_duplicate_edges() {
+        // Exercise both pairwise and bounded spatial-cell repulsion.
+        for count in [30, 200] {
+            let first = artifact(
+                (1..=count).map(|number| issue(number, "closed")).collect(),
+                (1..count)
+                    .map(|number| dependency(number + 1, number))
+                    .collect(),
+            );
+            let mut second = first.clone();
+            second.nodes.reverse();
+            second.edges.reverse();
+            second.edges.push(second.edges[0].clone());
+            assert_eq!(
+                serde_json::to_value(build(&first)).unwrap()["network_positions"],
+                serde_json::to_value(build(&second)).unwrap()["network_positions"]
+            );
+        }
+    }
+
+    #[test]
+    fn network_layout_handles_empty_and_single_node_graphs() {
+        let empty = artifact(Vec::new(), Vec::new());
+        assert!(build(&empty).network_positions.is_empty());
+        let singleton = artifact(vec![issue(1, "closed")], Vec::new());
+        let presentation = serde_json::to_value(build(&singleton)).unwrap();
+        assert_eq!(
+            presentation["network_positions"],
+            serde_json::json!({"acme/widgets#1": {"x": 50.0, "y": 50.0}})
         );
     }
 

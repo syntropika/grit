@@ -341,6 +341,7 @@ fn update_command_at(state: &Path, api_url: &str, priority: &str, json: bool) ->
     command
         .env("GH_TOKEN", "automation-token")
         .env("GRIT_GITHUB_API_URL", api_url)
+        .env("GRIT_NO_KEYRING", "1")
         .env("GRIT_STATE_DIR", state)
         .env("PATH", "");
     command

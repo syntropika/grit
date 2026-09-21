@@ -62,6 +62,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Sign in to GitHub, inspect authentication, or sign out.
+    Auth {
+        #[command(subcommand)]
+        command: crate::auth::AuthCommand,
+    },
     /// Create a provisional Draft Issue for later reconciliation.
     Create {
         /// Repository in OWNER/REPO form.
@@ -342,6 +347,7 @@ impl From<IssueStateArgument> for IssueStateValue {
 pub(crate) fn execute() -> Result<(), CliError> {
     let cli = Cli::parse();
     match cli.command {
+        Command::Auth { command } => crate::auth::execute(command).map_err(Into::into),
         Command::Create {
             repo,
             title,
@@ -1408,7 +1414,7 @@ fn github_client() -> Result<GitHubClient, CliError> {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| authentication_hostname(&base_url));
-    let token = AuthToken::discover(&hostname)?;
+    let token = AuthToken::discover(&hostname, &base_url)?;
     GitHubClient::new(base_url, &token).map_err(Into::into)
 }
 

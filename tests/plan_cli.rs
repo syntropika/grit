@@ -147,6 +147,7 @@ fn pending_plan_and_next_share_cached_decisions_and_projected_structural_priorit
                 priority,
                 "--json",
             ])
+            .env("GRIT_NO_KEYRING", "1")
             .env("GRIT_STATE_DIR", state.path())
             .env("GRIT_GITHUB_API_URL", &api_url)
             .env("GH_TOKEN", "test-token")
@@ -266,6 +267,7 @@ fn pending_dependency_chain_and_removal_rebuild_the_cached_plan_and_next_graph()
                 &format!("{repository}#{blocker}"),
                 "--json",
             ])
+            .env("GRIT_NO_KEYRING", "1")
             .env("GRIT_STATE_DIR", state.path())
             .env("GRIT_GITHUB_API_URL", &api_url)
             .env("GH_TOKEN", "test-token")
@@ -585,6 +587,7 @@ fn grit_command_for(
     if let Some(assignee) = assignee {
         grit.args(["--assignee", assignee]);
     }
+    grit.env("GRIT_NO_KEYRING", "1");
     grit.env("GRIT_STATE_DIR", state.path());
     grit.env("GRIT_GITHUB_API_URL", api_url);
     grit.env("GH_TOKEN", "test-token");
@@ -594,6 +597,7 @@ fn grit_command_for(
 fn human_plan_command(state: &TempDir, api_url: &str, repository: &str) -> Command {
     let mut grit = Command::new(env!("CARGO_BIN_EXE_grit"));
     grit.args(["plan", "--repo", repository]);
+    grit.env("GRIT_NO_KEYRING", "1");
     grit.env("GRIT_STATE_DIR", state.path());
     grit.env("GRIT_GITHUB_API_URL", api_url);
     grit.env("GH_TOKEN", "test-token");

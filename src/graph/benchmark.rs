@@ -41,7 +41,9 @@ fn dense_graph_browser_benchmark() {
         let graph_json = render::graph_json(&artifact).expect("synthetic artifact JSON");
         let serialization = serialization_started.elapsed();
         let schema_json = render::schema_json().expect("synthetic artifact schema");
+        let presentation_started = Instant::now();
         let presentation = presentation::build(&artifact);
+        let presentation_build = presentation_started.elapsed();
         let html_started = Instant::now();
         let html = render::html(&artifact, &presentation).expect("synthetic graph HTML");
         let html_render = html_started.elapsed();
@@ -60,6 +62,11 @@ fn dense_graph_browser_benchmark() {
         )
         .expect("benchmark graph-query JavaScript");
         fs::write(site.path().join("app.js"), render::javascript()).expect("benchmark JavaScript");
+        fs::write(
+            site.path().join("graph-camera.js"),
+            render::graph_camera_javascript(),
+        )
+        .expect("benchmark camera JavaScript");
         fs::write(site.path().join("graph.json"), &graph_json).expect("benchmark graph JSON");
         fs::write(site.path().join("graph.schema.json"), &schema_json)
             .expect("benchmark graph schema");
@@ -114,6 +121,7 @@ fn dense_graph_browser_benchmark() {
             + render::stylesheet().len()
             + render::network_view_javascript().len()
             + render::graph_query_javascript().len()
+            + render::graph_camera_javascript().len()
             + render::javascript().len();
 
         println!(
@@ -125,6 +133,7 @@ fn dense_graph_browser_benchmark() {
                 "site_bytes": site_size,
                 "artifact_build_ms": milliseconds(artifact_build),
                 "layout_ms": milliseconds(layout),
+                "presentation_build_ms": milliseconds(presentation_build),
                 "serialization_ms": milliseconds(serialization),
                 "html_render_ms": milliseconds(html_render),
                 "browser_load_ms": load_ms,

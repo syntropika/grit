@@ -3,11 +3,13 @@
 Grit tracks product work in GitHub Issues in
 [`syntropika/grit`](https://github.com/syntropika/grit/issues).
 
-Use the `gh` CLI with the explicit repository selector so commands do not
-depend on the current checkout:
+Use Grit with the explicit repository selector so commands do not depend on
+the current checkout. Inspect individual Issues in the generated explorer
+or directly on GitHub:
 
 ```bash
-gh issue view ISSUE --repo syntropika/grit
+grit sync --repo syntropika/grit
+grit graph --repo syntropika/grit --output site/
 ```
 
 Implementation commits reference their originating Issue number. The

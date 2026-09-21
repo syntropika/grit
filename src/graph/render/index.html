@@ -11,51 +11,50 @@
     <script id="graph-presentation-data" type="application/json">{{presentation_data}}</script>
     <script src="./network-view.js" defer></script>
     <script src="./graph-query.js" defer></script>
+    <script src="./graph-camera.js" defer></script>
     <script src="./app.js" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#graph-table">Skip to accessible Issue table</a>
     <header class="site-header">
-      <div>
-        <p class="eyebrow">Grit graph explorer</p>
-        <h1>Issue graph for {{repository}}</h1>
-        <p class="snapshot">Snapshot <code>{{synced_at}}</code> · artifact <code>{{artifact_hash}}</code></p>
-      </div>
+      <a class="wordmark" href="#">grit<span class="wordmark-dot" aria-hidden="true"></span></a>
+      <span class="repository-name">{{repository}}</span>
+      <nav aria-label="Page sections"><a id="view-graph" href="#graph-heading">Graph</a><a id="view-table" href="#graph-table">Issue table</a><a href="./graph.json" download>Export JSON</a></nav>
     </header>
     <main>
-      <section class="recommendation-summary" aria-labelledby="recommendation-heading">
-        <div>
-          <p class="eyebrow">Precomputed next/v1 analysis</p>
-          <h2 id="recommendation-heading">Operational recommendation</h2>
-          <p id="recommendation-status" aria-live="polite"></p>
-        </div>
-        <dl id="recommendation-evidence"></dl>
-        <button id="recommendation-select" type="button">Show causal path</button>
+      <section class="overview" aria-labelledby="overview-heading">
+        <div class="overview-heading"><h1 id="overview-heading">Your work, connected.</h1><p>Follow the dependencies. Find the next step. See what is done.</p></div>
+        <div class="snapshot-label"><span class="snapshot-indicator" aria-hidden="true"></span><span>Repository snapshot<time datetime="{{synced_at}}">{{snapshot_date}}</time></span></div>
       </section>
+      <div class="work-views" role="group" aria-label="Show work by outcome">
+        <button type="button" data-work-view="all" aria-pressed="true"><span>All Issues</span><strong id="count-all">{{issue_count}}</strong></button>
+        <button type="button" data-work-view="open" aria-pressed="false"><span>Open</span><strong id="count-open">{{open_count}}</strong></button>
+        <button type="button" data-work-view="completed" aria-pressed="false"><span>Completed</span><strong id="count-completed">{{completed_count}}</strong></button>
+        <button type="button" data-work-view="not_planned" aria-pressed="false"><span>Not planned</span><strong id="count-not-planned">{{not_planned_count}}</strong></button>
+        <button type="button" data-work-view="other" aria-pressed="false"><span>Other closed</span><strong id="count-other">{{other_closed_count}}</strong></button>
+      </div>
+      <div class="work-overview">
+        <section class="recommendation-summary" aria-labelledby="recommendation-heading">
+          <div class="section-title"><h2 id="recommendation-heading">Start here</h2><span class="quiet-label">Suggested next step</span></div>
+          <p id="recommendation-status" aria-live="polite"></p>
+          <button id="recommendation-select" type="button">Explore the causal path <span aria-hidden="true">→</span></button>
+          <details class="recommendation-details"><summary>Why this Issue?</summary><dl id="recommendation-evidence"></dl></details>
+          <p class="recommendation-footnote">Based on open work and precomputed dependency analysis.</p>
+        </section>
+        <section class="completed-summary" aria-labelledby="completed-heading">
+          <div class="section-title"><h2 id="completed-heading">Completed work</h2><button id="show-completed" class="text-button" type="button">View all <span aria-hidden="true">→</span></button></div>
+          <ul id="completion-list">{{completion_rows}}</ul>
+          <p id="completion-empty" {{completion_empty_hidden}}>No Issues are marked completed in this snapshot. Other closures are listed separately.</p>
+          <p class="completed-footnote">Completed Issues stay visible without affecting current recommendations.</p>
+        </section>
+      </div>
       <section class="control-panel" aria-label="Graph exploration controls">
         <div class="toolbar">
-          <label for="graph-search">Search Issues</label>
-          <input id="graph-search" type="search" autocomplete="off" placeholder="Issue number or title" aria-describedby="search-help search-status">
-          <span id="search-help" class="visually-hidden">Type a number or title. Press Enter to select the first result.</span>
+          <div class="search-field"><label for="graph-search">Explore Issues</label><input id="graph-search" type="search" autocomplete="off" placeholder="Search by title or Issue number…" aria-describedby="search-help search-status"><span id="search-help" class="visually-hidden">Type a number or title. Press Enter to select the first result.</span></div>
           <output id="search-status" role="status" aria-live="polite"></output>
-        <label for="node-size-metric">Size</label>
-        <select id="node-size-metric">
-          <option value="uniform">Uniform</option>
-          <option value="unlock_count">Unlock behavior</option>
-          <option value="pagerank_bucket">PageRank</option>
-        </select>
-        <label for="node-color-metric">Color</label>
-        <select id="node-color-metric">
-          <option value="readiness">Readiness</option>
-          <option value="state">Issue state</option>
-          <option value="priority">Declared priority</option>
-        </select>
-          <div class="zoom-controls" role="group" aria-label="Zoom controls">
-            <button id="zoom-out" type="button" aria-label="Zoom out">−</button>
-            <button id="zoom-reset" type="button">100%</button>
-            <button id="zoom-in" type="button" aria-label="Zoom in">+</button>
-          </div>
+          <button id="reset-filters" class="text-button" type="button">Reset view</button>
         </div>
+        <details class="advanced-controls"><summary>Filters &amp; graph tools <span>Readiness, priority, people, and dependency paths</span></summary>
         <fieldset class="filter-controls">
           <legend>Filter visible graph</legend>
           <label for="readiness-filter">Readiness
@@ -97,6 +96,8 @@
           <output id="view-status" role="status" aria-live="polite"></output>
           <p class="control-help">Root isolation follows both directions without moving nodes or changing metrics. Highlights follow Dependency arrows from blocker to dependent.</p>
         </fieldset>
+        <fieldset class="metric-controls"><legend>Visual encoding</legend><label for="node-size-metric">Node size<select id="node-size-metric"><option value="uniform">Uniform</option><option value="unlock_count">Unlock behavior</option><option value="pagerank_bucket">PageRank</option></select></label><label for="node-color-metric">Node color<select id="node-color-metric"><option value="readiness">Readiness</option><option value="state">Issue state</option><option value="priority">Declared priority</option></select></label></fieldset>
+        </details>
       </section>
       <section id="network-mode" class="network-mode" aria-labelledby="network-mode-heading" hidden>
         <div>
@@ -107,17 +108,19 @@
         <button id="show-full-network" type="button">Render full network</button>
       </section>
       <div class="explorer">
-        <section class="graph-region" aria-labelledby="graph-heading">
+        <section id="graph-region" class="graph-region" aria-labelledby="graph-heading">
           <div class="section-heading">
             <div>
-              <h2 id="graph-heading">Layered dependency graph</h2>
-              <p id="graph-help">Arrows run from blocker to dependent. Labels appear on hover, focus, or selection. Dashed nodes are unresolved or within an SCC boundary.</p>
+              <h2 id="graph-heading">Dependency map</h2>
+              <p id="graph-help">Drag to pan, scroll or pinch to zoom. Select an Issue to follow its connections. Arrows point from blocker to dependent.</p>
             </div>
+            <div class="map-actions"><label for="graph-layout" class="visually-hidden">Graph layout</label><select id="graph-layout"><option value="network">Network</option><option value="layers">Dependency layers</option></select><div class="zoom-controls" role="group" aria-label="Zoom controls"><button id="zoom-out" type="button" aria-label="Zoom out">−</button><button id="zoom-reset" type="button" aria-label="Reset to actual size">100%</button><button id="zoom-in" type="button" aria-label="Zoom in">+</button><button id="zoom-fit" type="button">Fit</button></div><button id="expand-map" type="button" aria-expanded="false" aria-controls="graph-region">Expand map</button></div>
           </div>
-          <div class="graph-frame">
-            <svg id="graph-canvas" data-zoom="1" role="group" aria-labelledby="graph-heading graph-help">
+          <div class="graph-legend" role="group" aria-label="Graph legend"><span class="legend-ready">Ready</span><span class="legend-blocked">Blocked</span><span class="legend-completed">Completed</span><span class="legend-closed">Other closed</span><span class="legend-unknown">Unresolved / cycle</span></div>
+          <div class="map-status"><span id="map-node-count">{{issue_count}} Issues</span><span>Precomputed layout · <kbd>↑</kbd><kbd>↓</kbd><kbd>←</kbd><kbd>→</kbd> pan · <kbd>0</kbd> fit</span></div><div class="graph-frame">
+            <svg id="graph-canvas" data-zoom="1" role="group" aria-labelledby="graph-heading graph-help" tabindex="0">
               <defs>
-                <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <marker id="arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
                   <path d="M 0 0 L 10 5 L 0 10 z"></path>
                 </marker>
               </defs>
@@ -128,15 +131,16 @@
               </g>
             </svg>
           </div>
+          <p id="graph-empty" class="empty-state" hidden>No Issues match this view. Try another status or reset the filters.</p>
         </section>
         <aside id="issue-details" class="detail-panel" aria-live="polite" aria-labelledby="detail-heading">
           <h2 id="detail-heading">Issue details</h2>
-          <p>Select a node from the graph or table.</p>
+          <p class="detail-prompt">Select an Issue to see its status, blockers, and the work it unlocks.</p><div class="detail-placeholder" aria-hidden="true"><span></span><span></span><span></span></div>
         </aside>
       </div>
       <section id="graph-table" class="table-region" aria-labelledby="table-heading">
-        <h2 id="table-heading">Accessible Issue table</h2>
-        <p>Use Up and Down Arrow, Home, End, Enter, or Space on an Issue button.</p>
+        <h2 id="table-heading">All Issue details</h2>
+        <p>The complete snapshot, including closed work. Use arrow keys to move between Issues, then Enter to inspect.</p>
         <div class="table-scroll">
           <table>
             <caption>Issue graph for {{repository}}</caption>
@@ -163,5 +167,6 @@
         </div>
       </section>
     </main>
+    <footer class="site-footer"><p>Generated by <strong>Grit</strong> · Works offline · GitHub remains the source of truth</p><details><summary>Snapshot details</summary><p>Synced <time datetime="{{synced_at}}">{{synced_at}}</time></p><p>Artifact <code>{{artifact_hash}}</code></p></details></footer>
   </body>
 </html>

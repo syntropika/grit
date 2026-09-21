@@ -678,6 +678,7 @@ fn run(state: &TempDir, api_url: &str, args: &[&str]) -> Output {
         .args(args)
         .env("GH_TOKEN", "automation-token")
         .env("GRIT_GITHUB_API_URL", api_url)
+        .env("GRIT_NO_KEYRING", "1")
         .env("GRIT_STATE_DIR", state.path())
         .env("PATH", "")
         .output()

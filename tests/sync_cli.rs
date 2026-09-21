@@ -88,9 +88,9 @@ fn sync_uses_gh_token_and_reports_a_versioned_snapshot() {
 }
 
 #[test]
-fn sync_falls_back_to_gh_token_when_gh_session_output_is_invalid() {
+fn sync_uses_environment_token_without_external_executables() {
     let mut github = mockito::Server::new();
-    let labels = mock_labels(&mut github, "acme/empty", Some("Bearer fallback-token"));
+    let labels = mock_labels(&mut github, "acme/empty", Some("Bearer environment-token"));
     let issues = github
         .mock("GET", "/repos/acme/empty/issues")
         .match_query(Matcher::AllOf(vec![
@@ -99,7 +99,7 @@ fn sync_falls_back_to_gh_token_when_gh_session_output_is_invalid() {
             Matcher::UrlEncoded("direction".into(), "asc".into()),
             Matcher::UrlEncoded("per_page".into(), "100".into()),
         ]))
-        .match_header("authorization", "Bearer fallback-token")
+        .match_header("authorization", "Bearer environment-token")
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body("[]")
@@ -107,23 +107,16 @@ fn sync_falls_back_to_gh_token_when_gh_session_output_is_invalid() {
     let comments = github
         .mock("GET", "/repos/acme/empty/issues/comments")
         .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
-        .match_header("authorization", "Bearer fallback-token")
+        .match_header("authorization", "Bearer environment-token")
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body("[]")
         .create();
-    let events = mock_events(&mut github, "acme/empty", Some("Bearer fallback-token"));
+    let events = mock_events(&mut github, "acme/empty", Some("Bearer environment-token"));
 
     let state = TempDir::new().expect("temporary state directory");
-    let bin = TempDir::new().expect("temporary binary directory");
-    let gh = bin.path().join("gh");
-    fs::write(&gh, "#!/bin/sh\nprintf 'broken\\nmultiline\\ntoken\\n'\n")
-        .expect("fake gh executable");
-    fs::set_permissions(&gh, fs::Permissions::from_mode(0o700)).expect("executable fake gh");
-
     let output = sync_command(&state, &github.url(), "acme/empty", true)
-        .env("GH_TOKEN", "fallback-token")
-        .env("PATH", bin.path())
+        .env("GH_TOKEN", "environment-token")
         .output()
         .expect("run grit");
 
@@ -392,9 +385,9 @@ fn pagination_failure_preserves_the_previous_complete_replica() {
 }
 
 #[test]
-fn sync_reuses_an_available_gh_session_for_human_output() {
+fn sync_reports_human_output_using_environment_authentication() {
     let mut github = mockito::Server::new();
-    let labels = mock_labels(&mut github, "acme/empty", Some("Bearer gh-session-token"));
+    let labels = mock_labels(&mut github, "acme/empty", Some("Bearer human-token"));
     let issues = github
         .mock("GET", "/repos/acme/empty/issues")
         .match_query(Matcher::AllOf(vec![
@@ -403,7 +396,7 @@ fn sync_reuses_an_available_gh_session_for_human_output() {
             Matcher::UrlEncoded("direction".into(), "asc".into()),
             Matcher::UrlEncoded("per_page".into(), "100".into()),
         ]))
-        .match_header("authorization", "Bearer gh-session-token")
+        .match_header("authorization", "Bearer human-token")
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body("[]")
@@ -411,27 +404,17 @@ fn sync_reuses_an_available_gh_session_for_human_output() {
     let comments = github
         .mock("GET", "/repos/acme/empty/issues/comments")
         .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
-        .match_header("authorization", "Bearer gh-session-token")
+        .match_header("authorization", "Bearer human-token")
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body("[]")
         .create();
-    let events = mock_events(&mut github, "acme/empty", Some("Bearer gh-session-token"));
+    let events = mock_events(&mut github, "acme/empty", Some("Bearer human-token"));
 
     let state = TempDir::new().expect("temporary state directory");
-    let bin = TempDir::new().expect("temporary binary directory");
-    let gh = bin.path().join("gh");
-    fs::write(
-        &gh,
-        "#!/bin/sh\n[ \"$1\" = auth ] && [ \"$2\" = token ] && [ \"$3\" = --hostname ] && [ \"$4\" = github.com ] || exit 2\nprintf 'gh-session-token\\n'\n",
-    )
-    .expect("fake gh executable");
-    fs::set_permissions(&gh, fs::Permissions::from_mode(0o700)).expect("executable fake gh");
-
     let output = sync_command(&state, &github.url(), "acme/empty", false)
-        .env_remove("GH_TOKEN")
+        .env("GH_TOKEN", "human-token")
         .env("GRIT_GITHUB_HOST", "github.com")
-        .env("PATH", bin.path())
         .output()
         .expect("run grit");
 
@@ -444,7 +427,7 @@ fn sync_reuses_an_available_gh_session_for_human_output() {
     assert!(stdout.contains("Synchronized acme/empty"));
     assert!(stdout.contains("0 Issues, 0 comments, 0 Dependencies"));
     assert!(stdout.contains("synced_at"));
-    assert!(!stdout.contains("gh-session-token"));
+    assert!(!stdout.contains("human-token"));
     issues.assert();
     comments.assert();
     labels.assert();
@@ -460,7 +443,7 @@ fn authentication_failure_does_not_publish_a_replica() {
         .expect("run grit");
 
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("no authenticated gh session"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("no saved Grit credential"));
     assert!(!state.path().join("repositories").exists());
 }
 
@@ -657,6 +640,7 @@ fn sync_command(state: &TempDir, api_url: &str, repository: &str, json: bool) ->
     command
         .env("GH_TOKEN", "automation-token")
         .env("GRIT_GITHUB_API_URL", api_url)
+        .env("GRIT_NO_KEYRING", "1")
         .env("GRIT_STATE_DIR", state.path())
         .env("PATH", "");
     command
