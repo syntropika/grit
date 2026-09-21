@@ -280,7 +280,7 @@ fn plan_issue<'a>(
     let ready_now = graph.is_ready(issue.number);
     let execution_scope_eligible = scope.contains(issue);
     PlanIssue {
-        provenance: working.provenance_for_issue(issue.number),
+        provenance: working.ranking_provenance_for_issues([issue.number]),
         key: issue.display_key(&working.replica().repository),
         number: (!issue.is_draft()).then_some(issue.number),
         temporary_id: issue.temporary_id(),
