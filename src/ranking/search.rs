@@ -10,7 +10,8 @@ use super::{
 };
 use crate::{
     operational::{ExecutionScope, RolloutState},
-    priority::PriorityComparison,
+    priority::{PriorityComparison, PriorityState},
+    working_graph::WorkingGraph,
 };
 
 pub(super) struct SearchResult<'a> {
@@ -18,6 +19,7 @@ pub(super) struct SearchResult<'a> {
     pub(super) candidate_count: usize,
     pub(super) candidates: Vec<EvaluatedCandidate<'a>>,
     pub(super) truncated_by: Vec<SearchRestriction>,
+    pub(super) provenance_numbers: BTreeSet<u64>,
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -52,6 +54,7 @@ impl<'a> PartialRollout<'a> {
         step: EvaluatedStep<'a>,
         newly_ready: &[u64],
         graph: &crate::operational::OperationalGraph<'a>,
+        working: &WorkingGraph<'_>,
     ) -> PartialCheckpoint {
         self.steps.push(step);
         let mut added_unlocks = Vec::new();
@@ -65,7 +68,7 @@ impl<'a> PartialRollout<'a> {
             .unlocks
             .iter()
             .filter_map(|number| graph.issue(*number))
-            .filter(|issue| priority(issue) == PriorityComparison::P0)
+            .filter(|issue| priority(working, issue) == PriorityComparison::P0)
             .count();
         self.p0_curve.push(unlocked_p0);
         PartialCheckpoint {
@@ -89,7 +92,9 @@ impl<'a> PartialRollout<'a> {
     }
 }
 
-struct Search<'graph, 'issues, 'scope, 'pagerank> {
+struct Search<'graph, 'issues, 'scope, 'pagerank, 'working> {
+    working: &'working WorkingGraph<'issues>,
+    provenance_numbers: BTreeSet<u64>,
     state: RolloutState<'graph, 'issues, 'scope>,
     pagerank: Option<&'pagerank PageRank>,
     horizon: u8,
@@ -101,6 +106,7 @@ struct Search<'graph, 'issues, 'scope, 'pagerank> {
 }
 
 pub(super) fn evaluate<'graph, 'issues, 'scope, 'pagerank>(
+    working: &WorkingGraph<'issues>,
     graph: &'graph crate::operational::OperationalGraph<'issues>,
     scope: ExecutionScope<'scope>,
     pagerank: Option<&'pagerank PageRank>,
@@ -115,14 +121,29 @@ pub(super) fn evaluate<'graph, 'issues, 'scope, 'pagerank>(
         .filter(|number| {
             graph
                 .issue(*number)
-                .is_some_and(|issue| priority(issue) == PriorityComparison::P0)
+                .is_some_and(|issue| priority(working, issue) == PriorityComparison::P0)
         })
         .collect::<Vec<_>>();
-    let first_frontier = frontier(&state, horizon as usize, &p0_targets);
+    let first_frontier = frontier(&state, horizon as usize, &p0_targets, working);
+    let mut provenance_numbers: BTreeSet<_> = graph
+        .open_numbers()
+        .iter()
+        .copied()
+        .filter(|number| {
+            graph.issue(*number).is_some_and(|issue| {
+                let base = PriorityState::from_issue_labels(&issue.labels).comparison();
+                (base == PriorityComparison::P0)
+                    != (priority(working, issue) == PriorityComparison::P0)
+            })
+        })
+        .collect();
+    track_frontier(&first_frontier, &mut provenance_numbers);
     let initial_mode = first_frontier.mode;
     let candidate_count = first_frontier.steps.len();
     let first_steps_count_against_budget = horizon > 1;
     let mut search = Search {
+        working,
+        provenance_numbers,
         state,
         pagerank,
         horizon,
@@ -149,6 +170,7 @@ pub(super) fn evaluate<'graph, 'issues, 'scope, 'pagerank>(
         mode: initial_mode,
         candidate_count,
         candidates: search.best_by_first.into_values().collect(),
+        provenance_numbers: search.provenance_numbers,
         truncated_by: search
             .state_budget_exhausted
             .then_some(SearchRestriction::StateBudget)
@@ -157,7 +179,9 @@ pub(super) fn evaluate<'graph, 'issues, 'scope, 'pagerank>(
     }
 }
 
-impl<'graph, 'issues, 'scope, 'pagerank> Search<'graph, 'issues, 'scope, 'pagerank> {
+impl<'graph, 'issues, 'scope, 'pagerank, 'working>
+    Search<'graph, 'issues, 'scope, 'pagerank, 'working>
+{
     fn explore(
         &mut self,
         step: EvaluatedStep<'issues>,
@@ -175,12 +199,21 @@ impl<'graph, 'issues, 'scope, 'pagerank> Search<'graph, 'issues, 'scope, 'pagera
             .state
             .complete(step.issue.number)
             .expect("search frontiers contain only Executable Issues");
-        let checkpoint = partial.apply(step, completion.newly_ready(), self.state.graph());
+        self.provenance_numbers
+            .extend(completion.newly_ready().iter().copied());
+        let checkpoint = partial.apply(
+            step,
+            completion.newly_ready(),
+            self.state.graph(),
+            self.working,
+        );
         self.record(partial);
 
         if partial.steps.len() < self.horizon as usize && !self.state_budget_exhausted {
             let remaining_steps = self.horizon as usize - partial.steps.len();
-            let next_frontier = frontier(&self.state, remaining_steps, &self.p0_targets);
+            let next_frontier =
+                frontier(&self.state, remaining_steps, &self.p0_targets, self.working);
+            track_frontier(&next_frontier, &mut self.provenance_numbers);
             for next_step in next_frontier.steps {
                 self.explore(next_step, partial, true);
                 if self.state_budget_exhausted && self.expanded_states >= self.state_budget {
@@ -194,7 +227,13 @@ impl<'graph, 'issues, 'scope, 'pagerank> Search<'graph, 'issues, 'scope, 'pagera
     }
 
     fn record(&mut self, partial: &PartialRollout<'issues>) {
-        let candidate = snapshot(partial, self.state.graph(), self.pagerank, self.horizon);
+        let candidate = snapshot(
+            partial,
+            self.state.graph(),
+            self.pagerank,
+            self.horizon,
+            self.working,
+        );
         let first_number = candidate.data().issue.number;
         let replace = self
             .best_by_first
@@ -215,6 +254,7 @@ fn frontier<'issues>(
     state: &RolloutState<'_, 'issues, '_>,
     remaining_steps: usize,
     p0_targets: &[u64],
+    working: &WorkingGraph<'_>,
 ) -> Frontier<'issues> {
     let executable: BTreeMap<_, _> = state
         .executable()
@@ -224,7 +264,7 @@ fn frontier<'issues>(
     let executable_p0: Vec<_> = executable
         .values()
         .copied()
-        .filter(|issue| priority(issue) == PriorityComparison::P0)
+        .filter(|issue| priority(working, issue) == PriorityComparison::P0)
         .collect();
     if !executable_p0.is_empty() {
         return Frontier {
@@ -294,6 +334,10 @@ fn frontier<'issues>(
     }
 }
 
+fn track_frontier(frontier: &Frontier<'_>, provenance_numbers: &mut BTreeSet<u64>) {
+    provenance_numbers.extend(frontier.steps.iter().map(|step| step.issue.number));
+}
+
 struct RouteMembership {
     minimum_distance: NonZeroUsize,
     qualifying_p0_count: NonZeroUsize,
@@ -321,6 +365,7 @@ fn snapshot<'a>(
     graph: &crate::operational::OperationalGraph<'a>,
     pagerank: Option<&PageRank>,
     horizon: u8,
+    working: &WorkingGraph<'_>,
 ) -> EvaluatedCandidate<'a> {
     let issue = partial
         .steps
@@ -334,7 +379,7 @@ fn snapshot<'a>(
         .collect();
     let mut priority_profile = PriorityProfile::default();
     for unlocked in &unlocks {
-        let unlocked_priority = priority(unlocked);
+        let unlocked_priority = priority(working, unlocked);
         if unlocked_priority != PriorityComparison::P0 {
             priority_profile.record(unlocked_priority);
         }
@@ -346,7 +391,7 @@ fn snapshot<'a>(
     let mut step_priorities: Vec<_> = partial
         .steps
         .iter()
-        .map(|step| StepPriority::from(priority(step.issue)))
+        .map(|step| StepPriority::from(priority(working, step.issue)))
         .collect();
     step_priorities.resize(horizon as usize, StepPriority::NoStep);
     let candidate = CandidateData {
@@ -430,7 +475,14 @@ mod tests {
             dependencies,
         };
         let graph = OperationalGraph::prepare(&replica);
-        let result = evaluate(&graph, ExecutionScope::Available, None, 3, 8_192);
+        let outbox = serde_json::from_value(serde_json::json!({
+            "schema_version": "grit.pending-mutations/v1",
+            "repository": replica.repository,
+            "operations": []
+        }))
+        .expect("empty outbox");
+        let working = WorkingGraph::project(&replica, &outbox).expect("synchronized Working graph");
+        let result = evaluate(&working, &graph, ExecutionScope::Available, None, 3, 8_192);
 
         assert_eq!(result.mode, RankingMode::P0Route);
         assert_eq!(result.candidate_count, ROUTE_COUNT as usize);

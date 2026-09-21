@@ -1,4 +1,6 @@
-use serde::{Serialize, Serializer};
+use std::{fmt, str::FromStr};
+
+use serde::{Deserialize, Serialize, Serializer};
 
 use crate::model::Label;
 
@@ -8,7 +10,7 @@ pub(crate) struct PriorityLabelSpec {
     pub(crate) description: &'static str,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum DeclaredPriority {
     P0,
@@ -17,6 +19,89 @@ pub(crate) enum DeclaredPriority {
     P3,
     P4,
 }
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub(crate) enum LogicalPriority {
+    Declared { value: DeclaredPriority },
+    Unspecified,
+    Conflict { labels: Vec<String> },
+}
+
+impl LogicalPriority {
+    pub(crate) fn from_state(state: &PriorityState) -> Self {
+        match state {
+            PriorityState::Declared { value } => Self::Declared { value: *value },
+            PriorityState::Unspecified => Self::Unspecified,
+            PriorityState::Conflict { labels } => Self::Conflict {
+                labels: labels.clone(),
+            },
+        }
+    }
+
+    pub(crate) fn from_selection(selection: PrioritySelection) -> Self {
+        match selection {
+            PrioritySelection::Declared(value) => Self::Declared { value },
+            PrioritySelection::None => Self::Unspecified,
+        }
+    }
+
+    pub(crate) fn to_state(&self) -> PriorityState {
+        match self {
+            Self::Declared { value } => PriorityState::Declared { value: *value },
+            Self::Unspecified => PriorityState::Unspecified,
+            Self::Conflict { labels } => PriorityState::Conflict {
+                labels: labels.clone(),
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PrioritySelection {
+    Declared(DeclaredPriority),
+    None,
+}
+
+impl PrioritySelection {
+    pub(crate) fn desired(self) -> Option<DeclaredPriority> {
+        match self {
+            Self::Declared(priority) => Some(priority),
+            Self::None => None,
+        }
+    }
+
+    pub(crate) fn logical_name(self) -> &'static str {
+        self.desired()
+            .map(DeclaredPriority::canonical_label)
+            .and_then(|label| label.strip_prefix("priority:"))
+            .unwrap_or("unspecified")
+    }
+}
+
+impl FromStr for PrioritySelection {
+    type Err = PrioritySelectionError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.eq_ignore_ascii_case("none") {
+            return Ok(Self::None);
+        }
+        DeclaredPriority::parse(&format!("priority:{value}"))
+            .map(Self::Declared)
+            .ok_or(PrioritySelectionError)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct PrioritySelectionError;
+
+impl fmt::Display for PrioritySelectionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("expected p0, p1, p2, p3, p4, or none")
+    }
+}
+
+impl std::error::Error for PrioritySelectionError {}
 
 impl DeclaredPriority {
     pub(crate) const ALL: [Self; 5] = [Self::P0, Self::P1, Self::P2, Self::P3, Self::P4];
@@ -51,13 +136,13 @@ impl DeclaredPriority {
         }
     }
 
-    fn parse(label: &str) -> Option<Self> {
+    pub(crate) fn parse(label: &str) -> Option<Self> {
         Self::ALL
             .into_iter()
             .find(|priority| label.eq_ignore_ascii_case(priority.spec().name))
     }
 
-    fn canonical_label(self) -> &'static str {
+    pub(crate) fn canonical_label(self) -> &'static str {
         self.spec().name
     }
 }
@@ -137,6 +222,15 @@ impl PriorityState {
                 .expect("canonical Priority labels use the priority: prefix"),
             Self::Unspecified => "unspecified",
             Self::Conflict { .. } => "conflict",
+        }
+    }
+
+    pub(crate) fn matches(&self, desired: Option<DeclaredPriority>) -> bool {
+        match (self, desired) {
+            (Self::Declared { value }, Some(desired)) => *value == desired,
+            (Self::Unspecified, None) => true,
+            (Self::Declared { .. } | Self::Conflict { .. }, None)
+            | (Self::Unspecified | Self::Conflict { .. }, Some(_)) => false,
         }
     }
 }

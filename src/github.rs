@@ -42,6 +42,11 @@ pub(crate) struct CreateLabelRequest<'a> {
     description: &'a str,
 }
 
+#[derive(Serialize)]
+struct AddIssueLabelsRequest<'a> {
+    labels: &'a [String],
+}
+
 impl<'a> CreateLabelRequest<'a> {
     pub(crate) fn new(name: &'a str, color: &'a str, description: &'a str) -> Self {
         Self {
@@ -184,6 +189,99 @@ impl GitHubClient {
         }
         let _: GitHubLabel = response.json().map_err(GitHubError::Decode)?;
         Ok(LabelCreation::Created)
+    }
+
+    pub(crate) fn fetch_issue(
+        &self,
+        repository: &Repository,
+        number: u64,
+    ) -> Result<Issue, GitHubError> {
+        let url = self.endpoint(&format!(
+            "repos/{}/{}/issues/{number}",
+            repository.owner(),
+            repository.name()
+        ))?;
+        let response = self.client.get(url).send().map_err(GitHubError::Request)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(api_status_error(status, response.headers()));
+        }
+        let issue: GitHubIssue = response.json().map_err(GitHubError::Decode)?;
+        if issue.number != number {
+            return Err(GitHubError::IssueIdentityMismatch);
+        }
+        if issue.pull_request.is_some() {
+            return Err(GitHubError::PullRequestPriority(format!(
+                "{}#{number}",
+                repository.full_name()
+            )));
+        }
+        Ok(issue.normalize())
+    }
+
+    pub(crate) fn add_issue_label(
+        &self,
+        repository: &Repository,
+        number: u64,
+        label: &str,
+    ) -> Result<(), GitHubError> {
+        let url = self.endpoint(&format!(
+            "repos/{}/{}/issues/{number}/labels",
+            repository.owner(),
+            repository.name()
+        ))?;
+        let labels = [label.to_owned()];
+        let response = self
+            .client
+            .post(url)
+            .json(&AddIssueLabelsRequest { labels: &labels })
+            .send()
+            .map_err(|source| GitHubError::MutationUncertain {
+                operation: "adding the requested Priority label",
+                source,
+            })?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        Err(mutation_status_error(
+            status,
+            response.headers(),
+            "adding the requested Priority label",
+        ))
+    }
+
+    pub(crate) fn remove_issue_label(
+        &self,
+        repository: &Repository,
+        number: u64,
+        label: &str,
+    ) -> Result<(), GitHubError> {
+        let mut url = self.endpoint(&format!(
+            "repos/{}/{}/issues/{number}/labels",
+            repository.owner(),
+            repository.name()
+        ))?;
+        url.path_segments_mut()
+            .map_err(|_| GitHubError::InvalidLabelUrl)?
+            .push(label);
+        let response =
+            self.client
+                .delete(url)
+                .send()
+                .map_err(|source| GitHubError::MutationUncertain {
+                    operation: "removing an obsolete Priority label",
+                    source,
+                })?;
+        let status = response.status();
+        if status.is_success() || status == StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+        Err(mutation_status_error(
+            status,
+            response.headers(),
+            "removing an obsolete Priority label",
+        ))
     }
 
     fn paginate<T>(
@@ -390,6 +488,18 @@ fn api_status_error(status: StatusCode, headers: &HeaderMap) -> GitHubError {
     }
 }
 
+fn mutation_status_error(
+    status: StatusCode,
+    headers: &HeaderMap,
+    operation: &'static str,
+) -> GitHubError {
+    if status.is_server_error() || status == StatusCode::REQUEST_TIMEOUT {
+        GitHubError::MutationUncertainStatus { operation, status }
+    } else {
+        api_status_error(status, headers)
+    }
+}
+
 #[derive(Deserialize)]
 struct GitHubIssue {
     id: u64,
@@ -560,6 +670,20 @@ pub(crate) enum GitHubError {
     BuildClient(reqwest::Error),
     #[error("GitHub request failed: {0}")]
     Request(reqwest::Error),
+    #[error(
+        "the outcome of {operation} is uncertain because the GitHub request failed; Local replica was not changed: {source}"
+    )]
+    MutationUncertain {
+        operation: &'static str,
+        source: reqwest::Error,
+    },
+    #[error(
+        "the outcome of {operation} is uncertain after GitHub returned HTTP {status}; Local replica was not changed"
+    )]
+    MutationUncertainStatus {
+        operation: &'static str,
+        status: StatusCode,
+    },
     #[error("GitHub returned HTTP {0}")]
     Status(StatusCode),
     #[error("GitHub rejected authentication with HTTP {0}")]
@@ -581,4 +705,34 @@ pub(crate) enum GitHubError {
     InvalidUrl { source: url::ParseError },
     #[error("a dependency contained an invalid repository URL")]
     InvalidRepositoryUrl,
+    #[error("could not construct a safe Issue-label URL")]
+    InvalidLabelUrl,
+    #[error("GitHub returned an Issue different from the requested Issue")]
+    IssueIdentityMismatch,
+    #[error("{0} is a Pull Request; Declared priority updates require an Issue")]
+    PullRequestPriority(String),
+}
+
+impl GitHubError {
+    pub(crate) fn permits_offline_queue(&self) -> bool {
+        match self {
+            Self::Request(_) | Self::MutationUncertain { .. } => true,
+            Self::Status(status) | Self::MutationUncertainStatus { status, .. } => {
+                status.is_server_error() || *status == StatusCode::REQUEST_TIMEOUT
+            }
+            Self::InvalidToken
+            | Self::BuildClient(_)
+            | Self::Authentication(_)
+            | Self::RateLimited { .. }
+            | Self::Decode(_)
+            | Self::InvalidLink
+            | Self::PaginationLoop
+            | Self::CrossOriginPagination
+            | Self::InvalidUrl { .. }
+            | Self::InvalidRepositoryUrl
+            | Self::InvalidLabelUrl
+            | Self::IssueIdentityMismatch
+            | Self::PullRequestPriority(_) => false,
+        }
+    }
 }

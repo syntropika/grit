@@ -11,11 +11,15 @@ use crate::{
     model::Issue,
     operational::{OperationalGraph, ReadyAnalysis},
     priority::PriorityState,
+    working_graph::{PendingProvenance, WorkingGraph},
 };
 
 #[derive(Serialize)]
 pub(crate) struct NextAnalysis {
     input_hash: String,
+    pending: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pending_operation_ids: Vec<String>,
     mode: RankingMode,
     parameters: Parameters,
     metrics: MetricStates,
@@ -49,6 +53,8 @@ impl NextAnalysis {
         };
         Self {
             input_hash: result.input_hash,
+            pending: result.pending,
+            pending_operation_ids: result.pending_operation_ids,
             mode: result.mode,
             parameters: Parameters {
                 horizon: result.horizon,
@@ -106,6 +112,8 @@ impl NextAnalysis {
 
 pub(super) struct NextResult {
     pub(super) input_hash: String,
+    pub(super) pending: bool,
+    pub(super) pending_operation_ids: Vec<String>,
     pub(super) horizon: u8,
     pub(super) state_budget: usize,
     pub(super) mode: RankingMode,
@@ -165,6 +173,8 @@ struct PageRankMetricState {
 
 #[derive(Serialize)]
 pub(crate) struct CandidateResult {
+    #[serde(flatten)]
+    provenance: PendingProvenance,
     first_issue: IssueReference,
     #[serde(skip_serializing_if = "Option::is_none")]
     critical_distance: Option<usize>,
@@ -172,7 +182,7 @@ pub(crate) struct CandidateResult {
     pagerank_bucket: Option<u64>,
     rollout: Rollout,
     outcome: Outcome,
-    reasons: Vec<Reason>,
+    reasons: Vec<ReasonEvidence>,
 }
 
 impl CandidateResult {
@@ -180,13 +190,19 @@ impl CandidateResult {
         let reason = self
             .reasons
             .last()
-            .map(Reason::human_message)
+            .map(|evidence| evidence.reason.human_message())
             .unwrap_or("it is the deterministic best executable first step");
+        let pending = if self.provenance.is_pending() {
+            " [pending]"
+        } else {
+            ""
+        };
         format!(
-            "#{} {} [{}]: {} (unlocks {})",
+            "#{} {} [{}]{}: {} (unlocks {})",
             self.first_issue.number,
             self.first_issue.title,
             self.first_issue.priority.display_name(),
+            pending,
             reason,
             self.outcome.unlock_profile.count
         )
@@ -195,6 +211,8 @@ impl CandidateResult {
 
 #[derive(Clone, Serialize)]
 pub(super) struct IssueReference {
+    #[serde(flatten)]
+    provenance: PendingProvenance,
     key: String,
     number: u64,
     url: String,
@@ -257,6 +275,14 @@ struct UnlockAvailability {
     assigned: usize,
 }
 
+#[derive(Serialize)]
+struct ReasonEvidence {
+    #[serde(flatten)]
+    reason: Reason,
+    #[serde(flatten)]
+    provenance: PendingProvenance,
+}
+
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum RunnerUpScope {
@@ -307,11 +333,20 @@ impl NextSummary {
 
 pub(super) fn candidate_output(
     candidate: EvaluatedCandidate<'_>,
-    repository: &str,
+    working: &WorkingGraph<'_>,
+    ranking_provenance_context: &[u64],
     reasons: Vec<Reason>,
 ) -> CandidateResult {
     let (candidate, critical_route) = candidate.into_parts();
-    let first_issue = issue_reference(repository, candidate.issue);
+    let first_issue = issue_reference(working, candidate.issue);
+    let provenance = working.provenance_for_issues(
+        candidate
+            .steps
+            .iter()
+            .map(|step| step.issue.number)
+            .chain(candidate.unlocks.iter().map(|issue| issue.number))
+            .chain(ranking_provenance_context.iter().copied()),
+    );
     let available_unlocks = candidate
         .unlocks
         .iter()
@@ -321,10 +356,11 @@ pub(super) fn candidate_output(
         .unlocks
         .iter()
         .map(|issue| Unlock {
-            issue: issue_reference(repository, issue),
+            issue: issue_reference(working, issue),
         })
         .collect();
     CandidateResult {
+        provenance: provenance.clone(),
         first_issue: first_issue.clone(),
         critical_distance: critical_route.map(|route| route.distance().get()),
         pagerank_bucket: candidate.pagerank_bucket,
@@ -336,7 +372,7 @@ pub(super) fn candidate_output(
                 .map(|(index, step)| RolloutStep {
                     position: (index + 1) as u8,
                     mode: step_mode(step.selection.mode()),
-                    issue: issue_reference(repository, step.issue),
+                    issue: issue_reference(working, step.issue),
                 })
                 .collect(),
         },
@@ -354,17 +390,24 @@ pub(super) fn candidate_output(
                 assigned: candidate.unlocks.len() - available_unlocks,
             },
         },
-        reasons,
+        reasons: reasons
+            .into_iter()
+            .map(|reason| ReasonEvidence {
+                reason,
+                provenance: provenance.clone(),
+            })
+            .collect(),
     }
 }
 
-pub(super) fn issue_reference(repository: &str, issue: &Issue) -> IssueReference {
+pub(super) fn issue_reference(working: &WorkingGraph<'_>, issue: &Issue) -> IssueReference {
     IssueReference {
-        key: format!("{repository}#{}", issue.number),
+        provenance: working.provenance_for_issue(issue.number),
+        key: format!("{}#{}", working.replica().repository, issue.number),
         number: issue.number,
         url: issue.url.clone(),
         title: issue.title.clone(),
-        priority: PriorityState::from_issue_labels(&issue.labels),
+        priority: working.priority(issue),
         availability: if issue.assignees.is_empty() {
             Availability::Available
         } else {
