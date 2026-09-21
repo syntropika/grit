@@ -1,8 +1,11 @@
 use std::{fs, process::Command};
 
+use chrono::{DateTime, Duration, SecondsFormat};
 use mockito::{Matcher, Mock, Server};
 use serde_json::Value;
 use tempfile::TempDir;
+
+mod support;
 
 #[test]
 fn ready_separates_readiness_from_default_and_assignee_execution_scopes() {
@@ -23,9 +26,8 @@ fn ready_separates_readiness_from_default_and_assignee_execution_scopes() {
         "acme/widgets",
         issue_inventory().to_owned(),
         dependencies,
-        2,
+        1,
     );
-
     let state = TempDir::new().expect("temporary state directory");
     let default = ready_command(&state, &github.url(), None)
         .output()
@@ -50,6 +52,14 @@ fn ready_separates_readiness_from_default_and_assignee_execution_scopes() {
     assert_eq!(default["summary"]["assigned_ready_count"], 1);
     assert_eq!(default["summary"]["blocked_count"], 1);
     assert_eq!(default["warnings"], serde_json::json!([]));
+    mocks.assert();
+
+    let delta_mocks = mock_unchanged_delta(
+        &mut github,
+        "acme/widgets",
+        &replica_since(&state, "acme/widgets"),
+        issue_inventory().to_owned(),
+    );
 
     let assigned = ready_command(&state, &github.url(), Some("alice"))
         .output()
@@ -67,7 +77,7 @@ fn ready_separates_readiness_from_default_and_assignee_execution_scopes() {
     assert_eq!(assigned["issues"][0]["available"], false);
     assert_eq!(assigned["issues"][0]["assignees"][0], "alice");
 
-    mocks.assert();
+    delta_mocks.assert();
 }
 
 #[test]
@@ -181,6 +191,18 @@ struct RepositoryMocks {
     dependencies: Vec<Mock>,
 }
 
+struct DeltaMocks {
+    issues: Mock,
+    comments: Mock,
+}
+
+impl DeltaMocks {
+    fn assert(self) {
+        self.issues.assert();
+        self.comments.assert();
+    }
+}
+
 impl RepositoryMocks {
     fn assert(self) {
         self.issues.assert();
@@ -245,6 +267,33 @@ fn mock_repository(
     }
 }
 
+fn mock_unchanged_delta(
+    github: &mut Server,
+    repository: &str,
+    since: &str,
+    issue_inventory: String,
+) -> DeltaMocks {
+    let issues_path = format!("/repos/{repository}/issues");
+    let issues = github
+        .mock("GET", issues_path.as_str())
+        .match_query(support::issue_delta_query(since, None))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(issue_inventory)
+        .create();
+
+    let comments_path = format!("/repos/{repository}/issues/comments");
+    let comments = github
+        .mock("GET", comments_path.as_str())
+        .match_query(support::comment_delta_query(since, None))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("[]")
+        .create();
+
+    DeltaMocks { issues, comments }
+}
+
 fn ready_command_for(
     state: &TempDir,
     api_url: &str,
@@ -262,6 +311,21 @@ fn ready_command_for(
         .env("GRIT_STATE_DIR", state.path())
         .env("PATH", "");
     command
+}
+
+fn replica_since(state: &TempDir, repository: &str) -> String {
+    let replica_path = state
+        .path()
+        .join("repositories")
+        .join(repository)
+        .join("replica.json");
+    let replica: Value = serde_json::from_slice(&fs::read(replica_path).expect("Local replica"))
+        .expect("replica JSON");
+    let watermark = replica["sync"]["ordinary_issues"]["watermark"]
+        .as_str()
+        .expect("ordinary-Issue watermark");
+    let watermark = DateTime::parse_from_rfc3339(watermark).expect("valid watermark");
+    (watermark - Duration::minutes(1)).to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
 fn issue_numbers(document: &Value) -> Vec<u64> {

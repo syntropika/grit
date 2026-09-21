@@ -1,8 +1,11 @@
 use std::{fs, os::unix::fs::PermissionsExt, process::Command};
 
+use chrono::{DateTime, Duration, SecondsFormat};
 use mockito::Matcher;
 use serde_json::Value;
 use tempfile::TempDir;
+
+mod support;
 
 #[test]
 fn sync_uses_gh_token_and_reports_a_versioned_snapshot() {
@@ -327,17 +330,16 @@ fn pagination_failure_preserves_the_previous_complete_replica() {
 
     let replica_path = state.path().join("repositories/acme/widgets/replica.json");
     let complete_replica = fs::read(&replica_path).expect("initial complete replica");
+    let since = replica_since(&complete_replica);
 
     let mut failing_github = mockito::Server::new();
     let next = format!(
-        "<{}/repos/acme/widgets/issues?state=all&sort=created&direction=asc&per_page=100&page=2>; rel=\"next\"",
-        failing_github.url()
+        "<{}/repos/acme/widgets/issues?state=all&sort=created&direction=asc&since={since}&per_page=100&page=2>; rel=\"next\"",
+        failing_github.url(),
     );
     let first_page = failing_github
         .mock("GET", "/repos/acme/widgets/issues")
-        .match_query(Matcher::Exact(
-            "state=all&sort=created&direction=asc&per_page=100".into(),
-        ))
+        .match_query(support::issue_delta_query(&since, None))
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_header("link", &next)
@@ -345,9 +347,7 @@ fn pagination_failure_preserves_the_previous_complete_replica() {
         .create();
     let failed_page = failing_github
         .mock("GET", "/repos/acme/widgets/issues")
-        .match_query(Matcher::Exact(
-            "state=all&sort=created&direction=asc&per_page=100&page=2".into(),
-        ))
+        .match_query(support::issue_delta_query(&since, Some(2)))
         .with_status(500)
         .with_header("content-type", "application/json")
         .with_body("{\"message\":\"temporary failure\"}")
@@ -440,6 +440,51 @@ fn authentication_failure_does_not_publish_a_replica() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("no authenticated gh session"));
     assert!(!state.path().join("repositories").exists());
+}
+
+#[test]
+fn sync_rebuilds_a_corrupt_local_replica_when_github_is_available() {
+    let mut github = mockito::Server::new();
+    let issues = github
+        .mock("GET", "/repos/acme/widgets/issues")
+        .match_query(Matcher::AllOf(vec![
+            Matcher::UrlEncoded("state".into(), "all".into()),
+            Matcher::UrlEncoded("sort".into(), "created".into()),
+            Matcher::UrlEncoded("direction".into(), "asc".into()),
+            Matcher::UrlEncoded("per_page".into(), "100".into()),
+        ]))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("[]")
+        .create();
+    let comments = github
+        .mock("GET", "/repos/acme/widgets/issues/comments")
+        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("[]")
+        .create();
+    let state = TempDir::new().expect("temporary state directory");
+    let replica_path = state.path().join("repositories/acme/widgets/replica.json");
+    fs::create_dir_all(replica_path.parent().expect("replica directory"))
+        .expect("replica directory");
+    fs::write(&replica_path, "{\"schema_version\":").expect("corrupt replica");
+
+    let output = sync_command(&state, &github.url(), "acme/widgets", true)
+        .output()
+        .expect("repairing sync");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rebuilt: Value = serde_json::from_slice(&fs::read(replica_path).expect("rebuilt replica"))
+        .expect("rebuilt replica JSON");
+    assert_eq!(rebuilt["schema_version"], "grit.local-replica/v1");
+    assert_eq!(rebuilt["issues"], serde_json::json!([]));
+    issues.assert();
+    comments.assert();
 }
 
 #[test]
@@ -541,6 +586,15 @@ fn sync_command(state: &TempDir, api_url: &str, repository: &str, json: bool) ->
         .env("GRIT_STATE_DIR", state.path())
         .env("PATH", "");
     command
+}
+
+fn replica_since(bytes: &[u8]) -> String {
+    let replica: Value = serde_json::from_slice(bytes).expect("replica JSON");
+    let watermark = replica["sync"]["ordinary_issues"]["watermark"]
+        .as_str()
+        .expect("ordinary-Issue watermark");
+    let watermark = DateTime::parse_from_rfc3339(watermark).expect("valid watermark");
+    (watermark - Duration::minutes(1)).to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
 fn issue_inventory() -> &'static str {
