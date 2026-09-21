@@ -142,6 +142,42 @@ fn multistep_draft_rollouts_follow_stable_ids_instead_of_synthetic_numbers() {
         ranked["comparison_to_runner_up"]["component"],
         "stable_node_key"
     );
+    let warm = grit(&state, &github.url())
+        .env_remove("GH_TOKEN")
+        .args(["next", "--repo", "acme/widgets", "--horizon", "3", "--json"])
+        .arg("--profile")
+        .output()
+        .expect("rank from cache");
+    assert_success(&warm);
+    let warm: Value = serde_json::from_slice(&warm.stdout).expect("warm JSON");
+    assert_eq!(warm["performance"]["cache_hit"], true);
+    assert_eq!(warm["recommendation"], ranked["recommendation"]);
+    let plan = grit(&state, &github.url())
+        .env_remove("GH_TOKEN")
+        .args(["plan", "--repo", "acme/widgets", "--horizon", "3", "--json"])
+        .output()
+        .expect("plan Draft Issues");
+    assert_success(&plan);
+    let plan: Value = serde_json::from_slice(&plan.stdout).expect("plan JSON");
+    assert_eq!(plan["decision"]["recommendation"], ranked["recommendation"]);
+    for issues in [
+        &plan["parallel_now"],
+        &plan["dependency_layers"]["layers"][0]["issues"],
+    ] {
+        let actual: Vec<_> = issues
+            .as_array()
+            .expect("structural Issues")
+            .iter()
+            .map(|issue| {
+                assert!(
+                    issue.get("number").is_none(),
+                    "Draft must not expose synthetic GitHub number"
+                );
+                issue["temporary_id"].as_str().expect("Draft identity")
+            })
+            .collect();
+        assert_eq!(actual, identities.map(|(id, _)| id));
+    }
 }
 
 #[test]

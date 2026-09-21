@@ -1,6 +1,6 @@
 use std::{cmp::Ordering, collections::BTreeSet};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub(super) const FIRST_STEP_LIMIT: usize = 96;
 pub(super) const BEAM_LIMIT: usize = 64;
@@ -10,7 +10,7 @@ pub(super) const PROBE_WORK_BUDGET: usize = 262_144;
 pub(super) const INITIAL_POTENTIAL_VISITS: usize = 1_024;
 pub(super) const STATE_POTENTIAL_VISITS: usize = 512;
 
-#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Copy, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum SearchRestriction {
     FirstStepShortlist,

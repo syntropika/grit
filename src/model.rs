@@ -374,7 +374,7 @@ impl std::fmt::Display for TemporaryIssueId {
     }
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum StableNodeKey {
     GitHub(u64),
     Draft(TemporaryIssueId),
