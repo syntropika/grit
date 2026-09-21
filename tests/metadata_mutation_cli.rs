@@ -470,6 +470,13 @@ fn load_outbox(state: &TempDir) -> Value {
 }
 
 fn seed_replica(github: &mut Server, state: &TempDir) {
+    let events = github
+        .mock("GET", "/repos/acme/widgets/issues/events")
+        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("[]")
+        .create();
     let issues = Arc::new(Mutex::new(vec![issue(1), issue(2)]));
     let labels = github
         .mock("GET", "/repos/acme/widgets/labels")
@@ -519,6 +526,7 @@ fn seed_replica(github: &mut Server, state: &TempDir) {
         .expect("seed replica");
     assert_success(&output);
     labels.assert();
+    events.assert();
     issue_inventory.assert();
     comments.assert();
     dependencies.assert();
@@ -558,6 +566,14 @@ fn mock_dynamic_inventory(
         .with_body("[]")
         .expect(inventories)
         .create();
+    let events = github
+        .mock("GET", "/repos/acme/widgets/issues/events")
+        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("[]")
+        .expect(inventories)
+        .create();
     let issue_state = Arc::clone(&remote);
     let issues = github
         .mock("GET", "/repos/acme/widgets/issues")
@@ -584,7 +600,7 @@ fn mock_dynamic_inventory(
         .with_body("[]")
         .expect(inventories)
         .create();
-    let mut mocks = vec![labels, issues, comments];
+    let mut mocks = vec![labels, events, issues, comments];
     if dependency_reads > 0 {
         mocks.push(
             github

@@ -797,25 +797,21 @@ fn mock_remove_response(github: &mut Server, status: usize) -> Mock {
 }
 
 struct FailedInventoryMocks {
+    events: Mock,
     labels: Mock,
     issues: Mock,
 }
 
 impl FailedInventoryMocks {
     fn assert(self) {
+        self.events.assert();
         self.labels.assert();
         self.issues.assert();
     }
 }
 
 fn mock_failed_inventory(github: &mut Server, status: usize) -> FailedInventoryMocks {
-    let labels = github
-        .mock("GET", "/repos/acme/widgets/labels")
-        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body("[]")
-        .create();
+    let (labels, events) = mock_sync_metadata(github);
     let issues = github
         .mock("GET", "/repos/acme/widgets/issues")
         .match_query(Matcher::AllOf(vec![
@@ -828,7 +824,11 @@ fn mock_failed_inventory(github: &mut Server, status: usize) -> FailedInventoryM
         .with_header("content-type", "application/json")
         .with_body(json!({"message": "unavailable"}).to_string())
         .create();
-    FailedInventoryMocks { labels, issues }
+    FailedInventoryMocks {
+        labels,
+        events,
+        issues,
+    }
 }
 
 fn mock_reconciliation(github: &mut Server, body: &str) -> Mock {
@@ -880,6 +880,7 @@ fn assert_offline_ready(state: &TempDir, api_url: &str, expected: Vec<u64>) {
 
 struct RepositoryMocks {
     labels: Mock,
+    events: Mock,
     issues: Mock,
     comments: Mock,
     dependencies: Vec<Mock>,
@@ -888,6 +889,7 @@ struct RepositoryMocks {
 impl RepositoryMocks {
     fn assert(self) {
         self.labels.assert();
+        self.events.assert();
         self.issues.assert();
         self.comments.assert();
         for dependency in self.dependencies {
@@ -915,13 +917,7 @@ fn mock_repository_state(
     issue_one_labels: &[&str],
     issue_two_labels: &[&str],
 ) -> RepositoryMocks {
-    let labels = github
-        .mock("GET", "/repos/acme/widgets/labels")
-        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body("[]")
-        .create();
+    let (labels, events) = mock_sync_metadata(github);
     let issues = github
         .mock("GET", "/repos/acme/widgets/issues")
         .match_query(Matcher::AllOf(vec![
@@ -971,6 +967,7 @@ fn mock_repository_state(
     ];
     RepositoryMocks {
         labels,
+        events,
         issues,
         comments,
         dependencies,
@@ -1069,6 +1066,11 @@ fn dropped_reconciliation_server() -> (String, thread::JoinHandle<()>) {
     let applied_edge = blocker_for(2);
     let steps = vec![
         ("GET", "/repos/acme/widgets/labels", Some("[]".to_owned())),
+        (
+            "GET",
+            "/repos/acme/widgets/issues/events",
+            Some("[]".to_owned()),
+        ),
         ("GET", "/repos/acme/widgets/issues", Some(issues.clone())),
         (
             "GET",
@@ -1097,6 +1099,11 @@ fn dropped_reconciliation_server() -> (String, thread::JoinHandle<()>) {
             None,
         ),
         ("GET", "/repos/acme/widgets/labels", Some("[]".to_owned())),
+        (
+            "GET",
+            "/repos/acme/widgets/issues/events",
+            Some("[]".to_owned()),
+        ),
         ("GET", "/repos/acme/widgets/issues", Some(issues)),
         (
             "GET",
@@ -1190,4 +1197,22 @@ fn read_request_headers(stream: &mut impl Read) {
         }
         request.push(byte[0]);
     }
+}
+
+fn mock_sync_metadata(github: &mut Server) -> (Mock, Mock) {
+    let labels = github
+        .mock("GET", "/repos/acme/widgets/labels")
+        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("[]")
+        .create();
+    let events = github
+        .mock("GET", "/repos/acme/widgets/issues/events")
+        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("[]")
+        .create();
+    (labels, events)
 }

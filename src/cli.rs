@@ -1,4 +1,4 @@
-use std::env;
+use std::{env, path::PathBuf};
 
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
@@ -12,6 +12,7 @@ use crate::{
         CreateLabelRequest, DependencyChange, DependencyIntent, GitHubClient, GitHubError,
         LabelCreation,
     },
+    graph::{GraphError, PublicGraphOptions, confirm_public_repository, publish_site},
     issue_create::{self, PendingIssueCreateError},
     issue_field::{self, IssueField, IssueFieldUpdateError, IssueFieldValue, IssueStateValue},
     metadata::{GenericLabel, MetadataError, MetadataSetTarget, PendingIssueOperand},
@@ -32,15 +33,18 @@ use crate::{
         Repository, RepositoryError,
     },
     store::{ReplicaStore, StoreError},
+    triage::{self, TriageReport},
     working_graph::{PendingProvenance, WorkingGraph, WorkingGraphError},
 };
 
 const SYNC_SCHEMA_VERSION: &str = "grit.sync/v1";
 const READY_SCHEMA_VERSION: &str = "grit.ready/v1";
+const GRAPH_SCHEMA_VERSION: &str = "grit.graph/v1";
+const DEPENDENCY_MUTATION_SCHEMA_VERSION: &str = "grit.dependency-mutation/v1";
 const INIT_SCHEMA_VERSION: &str = "grit.init/v1";
+const TRIAGE_SCHEMA_VERSION: &str = "grit.triage/v1";
 const PRIORITY_UPDATE_SCHEMA_VERSION: &str = "grit.priority-update/v1";
 const RESOLVE_SCHEMA_VERSION: &str = "grit.resolve/v1";
-const DEPENDENCY_MUTATION_SCHEMA_VERSION: &str = "grit.dependency-mutation/v1";
 const ISSUE_CREATE_SCHEMA_VERSION: &str = "grit.issue-create/v1";
 const ISSUE_FIELD_UPDATE_SCHEMA_VERSION: &str = "grit.issue-field-update/v1";
 const METADATA_MUTATION_SCHEMA_VERSION: &str = "grit.metadata-set/v1";
@@ -77,9 +81,21 @@ enum Command {
         /// Select Ready work assigned to this GitHub login.
         #[arg(long)]
         assignee: Option<String>,
-        /// Number of completions to evaluate; this slice implements exactly one.
-        #[arg(long, default_value_t = ranking::HORIZON)]
+        /// Number of completions to evaluate, from one through the default three.
+        #[arg(long, default_value_t = ranking::DEFAULT_HORIZON)]
         horizon: u8,
+        /// Emit versioned machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Surface actionable operational graph problems.
+    Triage {
+        /// Repository in OWNER/REPO form.
+        #[arg(long)]
+        repo: String,
+        /// Evaluate execution-scope membership for this GitHub login.
+        #[arg(long)]
+        assignee: Option<String>,
         /// Emit versioned machine-readable output.
         #[arg(long)]
         json: bool,
@@ -155,6 +171,27 @@ enum Command {
         /// Emit versioned machine-readable output.
         #[arg(long)]
         json: bool,
+    },
+    /// Generate a deterministic static Issue graph site.
+    Graph {
+        /// Repository in OWNER/REPO form.
+        #[arg(long)]
+        repo: String,
+        /// Target directory for the complete static site.
+        #[arg(long)]
+        output: PathBuf,
+        /// Emit versioned machine-readable output.
+        #[arg(long)]
+        json: bool,
+        /// Generate a fail-closed artifact safe for deliberate public publication.
+        #[arg(long)]
+        public: bool,
+        /// Publish labels in this explicitly allowed category prefix. Repeatable.
+        #[arg(long, requires = "public")]
+        public_label_prefix: Vec<String>,
+        /// Publish GitHub assignee logins in the public artifact.
+        #[arg(long, requires = "public")]
+        public_include_assignees: bool,
     },
     /// Make one Issue blocked by another native GitHub Issue.
     Block {
@@ -269,6 +306,23 @@ pub(crate) fn execute() -> Result<(), CliError> {
             body,
             json,
         } => create_issue(&Repository::parse(&repo)?, title, body, json),
+        Command::Graph {
+            repo,
+            output,
+            json,
+            public,
+            public_label_prefix,
+            public_include_assignees,
+        } => graph(
+            &Repository::parse(&repo)?,
+            &output,
+            json,
+            public,
+            PublicGraphOptions {
+                label_prefixes: public_label_prefix,
+                include_assignees: public_include_assignees,
+            },
+        ),
         Command::Next {
             repo,
             assignee,
@@ -280,6 +334,11 @@ pub(crate) fn execute() -> Result<(), CliError> {
             horizon,
             json,
         ),
+        Command::Triage {
+            repo,
+            assignee,
+            json,
+        } => triage_command(&Repository::parse(&repo)?, assignee.as_deref(), json),
         Command::Update {
             issue,
             priority,
@@ -298,7 +357,6 @@ pub(crate) fn execute() -> Result<(), CliError> {
                 update_issue_field(&issue, field, desired, json)
             }
         }
-        Command::Init { repo, json } => initialize(&Repository::parse(&repo)?, json),
         Command::Label {
             issue,
             add,
@@ -317,6 +375,7 @@ pub(crate) fn execute() -> Result<(), CliError> {
         Command::Unblock { issue, by, json } => {
             mutate_dependency(&issue, &by, DependencyIntent::Unblock, json)
         }
+        Command::Init { repo, json } => initialize(&Repository::parse(&repo)?, json),
         Command::Sync { repo, json } => sync(&Repository::parse(&repo)?, json),
         Command::Ready {
             repo,
@@ -677,6 +736,60 @@ fn print_reconciliation(
     Ok(())
 }
 
+fn graph(
+    repository: &Repository,
+    output: &std::path::Path,
+    json: bool,
+    public: bool,
+    public_options: PublicGraphOptions,
+) -> Result<(), CliError> {
+    let (replica, source, site) = if public {
+        let client = github_client()?;
+        let metadata = client.fetch_repository_metadata(repository)?;
+        let confirmed = confirm_public_repository(repository.full_name(), metadata)?;
+        let (replica, source) = refresh_or_local_with_client(repository, &client)?;
+        let site =
+            crate::graph::publish_public_site(&replica, &confirmed, &public_options, output)?;
+        (replica, source, site)
+    } else {
+        let (replica, source) = refresh_or_local(repository)?;
+        let site = publish_site(&replica, output)?;
+        (replica, source, site)
+    };
+    let output_path = output.display().to_string();
+    let result = GraphOutput {
+        schema_version: GRAPH_SCHEMA_VERSION,
+        command: "graph",
+        repository: &replica.repository,
+        source,
+        synced_at: &replica.synced_at,
+        input_hash: &site.input_hash,
+        output: &output_path,
+        artifact: GraphArtifactSummary {
+            schema_version: site.schema_version,
+            node_count: site.node_count,
+            edge_count: site.edge_count,
+            artifact_hash: &site.artifact_hash,
+        },
+    };
+    if json {
+        serde_json::to_writer(std::io::stdout().lock(), &result).map_err(CliError::EncodeOutput)?;
+        println!();
+    } else {
+        println!(
+            "Generated {} nodes and {} Dependencies in {}",
+            site.node_count, site.edge_count, output_path
+        );
+        if source.is_fallback() {
+            eprintln!(
+                "warning: GitHub refresh failed; generated from Local replica at {}",
+                replica.synced_at
+            );
+        }
+    }
+    Ok(())
+}
+
 fn initialize(repository: &Repository, json: bool) -> Result<(), CliError> {
     let client = github_client()?;
     let labels = client.fetch_labels(repository)?;
@@ -806,6 +919,53 @@ fn print_issue_field_update(
     Ok(())
 }
 
+fn triage_command(
+    repository: &Repository,
+    assignee: Option<&str>,
+    json: bool,
+) -> Result<(), CliError> {
+    let (replica, source) = refresh_or_local(repository)?;
+    let scope = assignee
+        .map(ExecutionScope::Assignee)
+        .unwrap_or(ExecutionScope::Available);
+    let report = triage::analyze(&replica, scope);
+    let warnings: Vec<_> = source.warning().into_iter().collect();
+    if json {
+        let output = TriageOutput {
+            schema_version: TRIAGE_SCHEMA_VERSION,
+            command: "triage",
+            repository: &replica.repository,
+            source,
+            synced_at: &replica.synced_at,
+            input_hash: &replica.input_hash,
+            execution_scope: execution_scope_output(assignee),
+            report,
+            warnings,
+        };
+        serde_json::to_writer(std::io::stdout().lock(), &output).map_err(CliError::EncodeOutput)?;
+        println!();
+    } else {
+        println!(
+            "Triage diagnostics in {} (scope {}, synced_at {}):",
+            replica.repository,
+            execution_scope_name(assignee),
+            replica.synced_at
+        );
+        let lines = report.human_lines();
+        if lines.is_empty() {
+            println!("No actionable graph problems");
+        } else {
+            for line in lines {
+                println!("{line}");
+            }
+        }
+        for warning in warnings {
+            eprintln!("warning: {}", warning.message);
+        }
+    }
+    Ok(())
+}
+
 fn update_priority(issue: &str, requested: PrioritySelection, json: bool) -> Result<(), CliError> {
     let issue = IssueReference::parse(issue)?;
     let client = match github_client() {
@@ -915,7 +1075,7 @@ fn next(
     horizon: u8,
     json: bool,
 ) -> Result<(), CliError> {
-    if horizon != ranking::HORIZON {
+    if !(ranking::MIN_HORIZON..=ranking::MAX_HORIZON).contains(&horizon) {
         return Err(CliError::UnsupportedNextHorizon(horizon));
     }
     let (replica, source) = refresh_or_local(repository)?;
@@ -924,7 +1084,7 @@ fn next(
     let scope = assignee
         .map(ExecutionScope::Assignee)
         .unwrap_or(ExecutionScope::Available);
-    let analysis = ranking::analyze(&working, scope);
+    let analysis = ranking::analyze(&working, scope, horizon);
     let warnings = analysis_warnings(&working, source);
     if json {
         let output = NextOutput {
@@ -950,6 +1110,9 @@ fn next(
             Some(recommendation) => println!("{}", recommendation.human_summary()),
             None => println!("{}", analysis.summary().human_empty_summary()),
         }
+        if let Some(warning) = analysis.truncation_warning() {
+            eprintln!("warning: {warning}");
+        }
         for warning in &warnings {
             print_warning(warning);
         }
@@ -959,8 +1122,23 @@ fn next(
 
 fn synchronize(repository: &Repository) -> Result<LocalReplica, CliError> {
     let client = github_client()?;
-    let replica = replica_sync::fetch(&client, repository)?;
-    ReplicaStore::discover(repository)?.publish(&replica)?;
+    synchronize_with_client(repository, &client)
+}
+
+fn synchronize_with_client(
+    repository: &Repository,
+    client: &GitHubClient,
+) -> Result<LocalReplica, CliError> {
+    let store = ReplicaStore::discover(repository)?;
+    let previous = match store.load(repository) {
+        Ok(replica) => Some(replica),
+        Err(StoreError::MissingReplica | StoreError::Decode(_) | StoreError::InvalidReplica(_)) => {
+            None
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let replica = replica_sync::refresh(client, repository, previous.as_ref())?;
+    store.publish(&replica)?;
     Ok(replica)
 }
 
@@ -1121,16 +1299,17 @@ fn print_sync_result(replica: &LocalReplica, json: bool) -> Result<(), CliError>
 }
 
 fn snapshot_summary(replica: &LocalReplica) -> SnapshotSummary<'_> {
+    let comment_count = replica
+        .issues
+        .iter()
+        .map(|issue| issue.comments.len())
+        .sum();
     SnapshotSummary {
         schema_version: &replica.schema_version,
         synced_at: &replica.synced_at,
         input_hash: &replica.input_hash,
         issue_count: replica.issues.len(),
-        comment_count: replica
-            .issues
-            .iter()
-            .map(|issue| issue.comments.len())
-            .sum(),
+        comment_count,
         dependency_count: replica.dependencies.len(),
     }
 }
@@ -1214,7 +1393,23 @@ fn ready(repository: &Repository, assignee: Option<&str>, json: bool) -> Result<
 }
 
 fn refresh_or_local(repository: &Repository) -> Result<(LocalReplica, ReplicaSource), CliError> {
-    match synchronize(repository) {
+    let refresh = github_client().and_then(|client| synchronize_with_client(repository, &client));
+    refresh_or_local_after(repository, refresh)
+}
+
+fn refresh_or_local_with_client(
+    repository: &Repository,
+    client: &GitHubClient,
+) -> Result<(LocalReplica, ReplicaSource), CliError> {
+    let refresh = synchronize_with_client(repository, client);
+    refresh_or_local_after(repository, refresh)
+}
+
+fn refresh_or_local_after(
+    repository: &Repository,
+    refresh: Result<LocalReplica, CliError>,
+) -> Result<(LocalReplica, ReplicaSource), CliError> {
+    match refresh {
         Ok(replica) => Ok((replica, ReplicaSource::Live)),
         Err(refresh_error) => {
             let store = ReplicaStore::discover(repository)?;
@@ -1293,6 +1488,12 @@ fn print_warning(warning: &ReadyWarning) {
             warning.labels.join(", ")
         );
     }
+}
+
+fn execution_scope_name(assignee: Option<&str>) -> String {
+    assignee
+        .map(|assignee| format!("assignee:{assignee}"))
+        .unwrap_or_else(|| "available".to_owned())
 }
 
 fn api_base_url() -> Result<Url, CliError> {
@@ -1400,12 +1601,53 @@ struct ResolutionOutput<'a> {
 }
 
 #[derive(Serialize)]
+struct GraphOutput<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    repository: &'a str,
+    source: ReplicaSource,
+    synced_at: &'a str,
+    input_hash: &'a str,
+    output: &'a str,
+    artifact: GraphArtifactSummary<'a>,
+}
+
+#[derive(Serialize)]
+struct GraphArtifactSummary<'a> {
+    schema_version: &'static str,
+    node_count: usize,
+    edge_count: usize,
+    artifact_hash: &'a str,
+}
+
+#[derive(Serialize)]
+struct DependencyEdgeOutput {
+    blocked: String,
+    blocker: String,
+    kind: &'static str,
+}
+
+#[derive(Serialize)]
 struct InitOutput<'a> {
     schema_version: &'static str,
     command: &'static str,
     repository: &'a str,
     created_labels: Vec<String>,
     already_present: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct TriageOutput<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    repository: &'a str,
+    source: ReplicaSource,
+    synced_at: &'a str,
+    input_hash: &'a str,
+    execution_scope: ExecutionScopeOutput<'a>,
+    #[serde(flatten)]
+    report: TriageReport,
+    warnings: Vec<ReadyWarning>,
 }
 
 #[derive(Serialize)]
@@ -1577,13 +1819,6 @@ struct PriorityIssueOutput<'a> {
     key: &'a str,
     number: u64,
     url: &'a str,
-}
-
-#[derive(Serialize)]
-struct DependencyEdgeOutput {
-    blocked: String,
-    blocker: String,
-    kind: &'static str,
 }
 
 #[derive(Serialize)]
@@ -1785,9 +2020,11 @@ pub(crate) enum CliError {
         online: String,
         queue: PendingDependencyUpdateError,
     },
+    #[error(transparent)]
+    Graph(#[from] GraphError),
     #[error("could not encode command JSON output: {0}")]
     EncodeOutput(serde_json::Error),
-    #[error("this implementation supports only next/v1 horizon 1, not horizon {0}")]
+    #[error("next/v1 horizon must be between 1 and 3, not {0}")]
     UnsupportedNextHorizon(u8),
     #[error("GitHub refresh failed ({refresh}); no valid Local replica is available ({replica})")]
     RefreshAndReplicaUnavailable { refresh: String, replica: String },
