@@ -44,7 +44,7 @@ impl<'graph, 'issues, 'scope, 'pagerank, 'working>
             let mut successors = Vec::new();
             for state in &beam {
                 let remaining = self.horizon as usize - state.partial.steps.len();
-                let mut next = frontier(&state.rollout, remaining, &self.p0_targets, self.working);
+                let mut next = frontier(&state.rollout, remaining, &self.p0_targets);
                 if next.mode == RankingMode::Normal {
                     next.steps
                         .retain(|step| state.causal.contains(step.issue.number));
