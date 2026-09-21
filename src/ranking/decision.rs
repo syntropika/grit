@@ -1,17 +1,41 @@
 use std::cmp::Ordering;
 
 use serde::Serialize;
+use serde_json::{Value, json};
 
 use super::EvaluatedCandidate;
 use crate::priority::PriorityComparison;
 
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum RankingMode {
     None,
     P0Ready,
     P0Route,
     Normal,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum StepPriority {
+    NoStep,
+    P4,
+    P3,
+    Neutral,
+    P1,
+    P0,
+}
+
+impl From<PriorityComparison> for StepPriority {
+    fn from(priority: PriorityComparison) -> Self {
+        match priority {
+            PriorityComparison::P0 => Self::P0,
+            PriorityComparison::P1 => Self::P1,
+            PriorityComparison::Neutral => Self::Neutral,
+            PriorityComparison::P3 => Self::P3,
+            PriorityComparison::P4 => Self::P4,
+        }
+    }
 }
 
 impl RankingMode {
@@ -44,11 +68,11 @@ impl PriorityProfile {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) enum DecisiveComparison {
     P0Curve {
-        left: usize,
-        right: usize,
+        left: Vec<usize>,
+        right: Vec<usize>,
     },
     UnlockCount {
         left: usize,
@@ -58,9 +82,13 @@ pub(super) enum DecisiveComparison {
         left: PriorityProfile,
         right: PriorityProfile,
     },
-    StepPriority {
-        left: PriorityComparison,
-        right: PriorityComparison,
+    UnlockCurve {
+        left: Vec<usize>,
+        right: Vec<usize>,
+    },
+    StepPrioritySequence {
+        left: Vec<StepPriority>,
+        right: Vec<StepPriority>,
     },
     PageRankBucket {
         left: u64,
@@ -73,32 +101,97 @@ pub(super) enum DecisiveComparison {
 }
 
 impl DecisiveComparison {
-    pub(super) fn is_close_call(self) -> bool {
-        matches!(
-            self,
-            Self::PageRankBucket { .. } | Self::StableNodeKey { .. }
-        )
+    pub(super) fn is_close_call(&self) -> bool {
+        self.descriptor().close_call
     }
 
-    pub(super) fn reason_code(self) -> &'static str {
+    pub(super) fn descriptor(&self) -> ComparisonDescriptor {
         match self {
-            Self::P0Curve { .. } => "unlocks_more_p0",
-            Self::UnlockCount { .. } => "unlocks_more_work",
-            Self::UnlockPriorityProfile { .. } => "unlocks_higher_priority_work",
-            Self::StepPriority { .. } => "declared_priority_tiebreak",
-            Self::PageRankBucket { .. } => "pagerank_tiebreak",
-            Self::StableNodeKey { .. } => "deterministic_tiebreak",
+            Self::P0Curve { left, right } => ComparisonDescriptor::new(
+                "unlocks_more_p0",
+                "p0_curve",
+                json!(left),
+                json!(right),
+                "it unlocks more P0 work",
+                false,
+            ),
+            Self::UnlockCount { left, right } => ComparisonDescriptor::new(
+                "unlocks_more_work",
+                "unlock_count",
+                json!(left),
+                json!(right),
+                "it unlocks more work",
+                false,
+            ),
+            Self::UnlockPriorityProfile { left, right } => ComparisonDescriptor::new(
+                "unlocks_higher_priority_work",
+                "unlock_priority_profile",
+                json!(left),
+                json!(right),
+                "it unlocks higher-priority work",
+                false,
+            ),
+            Self::UnlockCurve { left, right } => ComparisonDescriptor::new(
+                "unlocks_earlier",
+                "unlock_curve",
+                json!(left),
+                json!(right),
+                "it unlocks work earlier",
+                false,
+            ),
+            Self::StepPrioritySequence { left, right } => ComparisonDescriptor::new(
+                "declared_priority_tiebreak",
+                "step_priority_sequence",
+                json!(left),
+                json!(right),
+                "the rollout's step-Priority sequence breaks the tie",
+                false,
+            ),
+            Self::PageRankBucket { left, right } => ComparisonDescriptor::new(
+                "pagerank_tiebreak",
+                "pagerank_bucket",
+                json!(left),
+                json!(right),
+                "PageRank breaks an otherwise equal result",
+                true,
+            ),
+            Self::StableNodeKey { left, right } => ComparisonDescriptor::new(
+                "deterministic_tiebreak",
+                "stable_node_key",
+                json!(left),
+                json!(right),
+                "the Stable node key breaks a complete tie",
+                true,
+            ),
         }
     }
+}
 
-    pub(super) fn component(self) -> &'static str {
-        match self {
-            Self::P0Curve { .. } => "p0_curve",
-            Self::UnlockCount { .. } => "unlock_count",
-            Self::UnlockPriorityProfile { .. } => "unlock_priority_profile",
-            Self::StepPriority { .. } => "step_priority",
-            Self::PageRankBucket { .. } => "pagerank_bucket",
-            Self::StableNodeKey { .. } => "stable_node_key",
+pub(super) struct ComparisonDescriptor {
+    pub(super) reason_code: &'static str,
+    pub(super) component: &'static str,
+    pub(super) winner_value: Value,
+    pub(super) runner_up_value: Value,
+    pub(super) human_message: &'static str,
+    close_call: bool,
+}
+
+impl ComparisonDescriptor {
+    fn new(
+        reason_code: &'static str,
+        component: &'static str,
+        winner_value: Value,
+        runner_up_value: Value,
+        human_message: &'static str,
+        close_call: bool,
+    ) -> Self {
+        Self {
+            reason_code,
+            component,
+            winner_value,
+            runner_up_value,
+            human_message,
+            close_call,
         }
     }
 }
@@ -113,12 +206,12 @@ pub(super) fn compare(
     right: &EvaluatedCandidate<'_>,
     mode: RankingMode,
 ) -> CandidateComparison {
-    if mode.is_p0() && left.p0_unlock_count != right.p0_unlock_count {
+    if mode.is_p0() && left.p0_curve != right.p0_curve {
         return CandidateComparison {
-            ordering: left.p0_unlock_count.cmp(&right.p0_unlock_count),
+            ordering: left.p0_curve.cmp(&right.p0_curve),
             decisive: DecisiveComparison::P0Curve {
-                left: left.p0_unlock_count,
-                right: right.p0_unlock_count,
+                left: left.p0_curve.clone(),
+                right: right.p0_curve.clone(),
             },
         };
     }
@@ -143,12 +236,21 @@ pub(super) fn compare(
             },
         };
     }
-    if left.step_priority != right.step_priority {
+    if left.unlock_curve != right.unlock_curve {
         return CandidateComparison {
-            ordering: priority_rank(left.step_priority).cmp(&priority_rank(right.step_priority)),
-            decisive: DecisiveComparison::StepPriority {
-                left: left.step_priority,
-                right: right.step_priority,
+            ordering: left.unlock_curve.cmp(&right.unlock_curve),
+            decisive: DecisiveComparison::UnlockCurve {
+                left: left.unlock_curve.clone(),
+                right: right.unlock_curve.clone(),
+            },
+        };
+    }
+    if left.step_priorities != right.step_priorities {
+        return CandidateComparison {
+            ordering: left.step_priorities.cmp(&right.step_priorities),
+            decisive: DecisiveComparison::StepPrioritySequence {
+                left: left.step_priorities.clone(),
+                right: right.step_priorities.clone(),
             },
         };
     }
@@ -167,16 +269,6 @@ pub(super) fn compare(
             left: stable_key(left.issue.number),
             right: stable_key(right.issue.number),
         },
-    }
-}
-
-fn priority_rank(priority: PriorityComparison) -> u8 {
-    match priority {
-        PriorityComparison::P0 => 5,
-        PriorityComparison::P1 => 4,
-        PriorityComparison::Neutral => 3,
-        PriorityComparison::P3 => 2,
-        PriorityComparison::P4 => 1,
     }
 }
 

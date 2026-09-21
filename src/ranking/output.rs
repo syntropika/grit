@@ -1,15 +1,16 @@
 use serde::Serialize;
 
 use super::{
-    ALTERNATIVE_LIMIT, EvaluatedCandidate, HORIZON,
-    decision::{PriorityProfile, RankingMode},
+    ALTERNATIVE_LIMIT, EvaluatedCandidate,
+    decision::{PriorityProfile, RankingMode, StepPriority},
     explanation::{ComparisonEvidence, Reason},
     pagerank,
+    search::SearchRestriction,
 };
 use crate::{
     model::Issue,
     operational::{OperationalGraph, ReadyAnalysis},
-    priority::{PriorityComparison, PriorityState},
+    priority::PriorityState,
 };
 
 #[derive(Serialize)]
@@ -23,14 +24,14 @@ pub(crate) struct NextAnalysis {
     comparison_to_runner_up: Option<ComparisonEvidence>,
     close_call: bool,
     search_complete: bool,
-    truncated_by: Vec<&'static str>,
+    truncated_by: Vec<SearchRestriction>,
     global_optimum_claimed: bool,
     runner_up_scope: RunnerUpScope,
     summary: NextSummary,
 }
 
 impl NextAnalysis {
-    pub(super) fn exact_horizon_one(result: ExactHorizonOneResult) -> Self {
+    pub(super) fn from_search(result: NextResult) -> Self {
         let pagerank = if result.pagerank_available {
             PageRankMetricState {
                 state: MetricAvailability::Available,
@@ -50,8 +51,9 @@ impl NextAnalysis {
             input_hash: result.input_hash,
             mode: result.mode,
             parameters: Parameters {
-                horizon: HORIZON,
+                horizon: result.horizon,
                 alternative_limit: ALTERNATIVE_LIMIT,
+                state_budget: result.state_budget,
                 pagerank: PageRankParameters {
                     damping: pagerank::DAMPING,
                     iterations: pagerank::ITERATIONS,
@@ -68,10 +70,14 @@ impl NextAnalysis {
             alternatives: result.alternatives,
             comparison_to_runner_up: result.comparison_to_runner_up,
             close_call: result.close_call,
-            search_complete: true,
-            truncated_by: Vec::new(),
-            global_optimum_claimed: true,
-            runner_up_scope: RunnerUpScope::Global,
+            search_complete: result.search_complete,
+            truncated_by: result.truncated_by,
+            global_optimum_claimed: result.search_complete,
+            runner_up_scope: if result.search_complete {
+                RunnerUpScope::Global
+            } else {
+                RunnerUpScope::Explored
+            },
             summary: result.summary,
         }
     }
@@ -83,16 +89,33 @@ impl NextAnalysis {
     pub(crate) fn summary(&self) -> &NextSummary {
         &self.summary
     }
+
+    pub(crate) fn truncation_warning(&self) -> Option<String> {
+        (!self.search_complete).then(|| {
+            format!(
+                "next/v1 search was restricted by {}; this is the best explored recommendation and no global optimum is claimed",
+                self.truncated_by
+                    .iter()
+                    .map(|restriction| restriction.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+    }
 }
 
-pub(super) struct ExactHorizonOneResult {
+pub(super) struct NextResult {
     pub(super) input_hash: String,
+    pub(super) horizon: u8,
+    pub(super) state_budget: usize,
     pub(super) mode: RankingMode,
     pub(super) pagerank_available: bool,
     pub(super) recommendation: Option<CandidateResult>,
     pub(super) alternatives: Vec<CandidateResult>,
     pub(super) comparison_to_runner_up: Option<ComparisonEvidence>,
     pub(super) close_call: bool,
+    pub(super) search_complete: bool,
+    pub(super) truncated_by: Vec<SearchRestriction>,
     pub(super) summary: NextSummary,
 }
 
@@ -100,6 +123,7 @@ pub(super) struct ExactHorizonOneResult {
 struct Parameters {
     horizon: u8,
     alternative_limit: usize,
+    state_budget: usize,
     pagerank: PageRankParameters,
 }
 
@@ -215,9 +239,9 @@ struct Outcome {
 struct UnlockProfile {
     count: usize,
     priority_profile: PriorityProfile,
-    curve: [usize; 1],
-    p0_curve: [usize; 1],
-    step_priorities: [PriorityComparison; 1],
+    curve: Vec<usize>,
+    p0_curve: Vec<usize>,
+    step_priorities: Vec<StepPriority>,
 }
 
 #[derive(Serialize)]
@@ -235,6 +259,7 @@ struct UnlockAvailability {
 #[serde(rename_all = "snake_case")]
 enum RunnerUpScope {
     Global,
+    Explored,
 }
 
 #[derive(Serialize)]
@@ -280,7 +305,6 @@ impl NextSummary {
 
 pub(super) fn candidate_output(
     candidate: EvaluatedCandidate<'_>,
-    mode: RankingMode,
     repository: &str,
     reasons: Vec<Reason>,
 ) -> CandidateResult {
@@ -301,19 +325,24 @@ pub(super) fn candidate_output(
         first_issue: first_issue.clone(),
         pagerank_bucket: candidate.pagerank_bucket,
         rollout: Rollout {
-            steps: vec![RolloutStep {
-                position: 1,
-                mode: step_mode(mode),
-                issue: first_issue,
-            }],
+            steps: candidate
+                .steps
+                .iter()
+                .enumerate()
+                .map(|(index, step)| RolloutStep {
+                    position: (index + 1) as u8,
+                    mode: step_mode(step.mode),
+                    issue: issue_reference(repository, step.issue),
+                })
+                .collect(),
         },
         outcome: Outcome {
             unlock_profile: UnlockProfile {
                 count: candidate.unlocks.len(),
                 priority_profile: candidate.priority_profile,
-                curve: [candidate.unlocks.len()],
-                p0_curve: [candidate.p0_unlock_count],
-                step_priorities: [candidate.step_priority],
+                curve: candidate.unlock_curve,
+                p0_curve: candidate.p0_curve,
+                step_priorities: candidate.step_priorities,
             },
             unlocks,
             unlock_availability: UnlockAvailability {
