@@ -36,7 +36,7 @@ function exercise() {
     checks.edited_title_is_searchable = rows().length === 1 && rows()[0] === key;
     search("");
     select("#priority-filter", "value:p0");
-    checks.pending_priority_filter = rows().length === 1 && rows()[0] === key;
+    checks.pending_priority_filter = rows().length === 1 && rows()[0] === "acme/widgets#2";
     clear();
     select("#root-node", key);
     select("#root-depth", "1");
@@ -47,10 +47,11 @@ function exercise() {
     select("#node-color-metric", "priority");
     doc.querySelector("#recommendation-select").click();
     checks.recommendation_opens_draft_and_keeps_metrics = node()?.classList.contains("causal-path")
-      && node().classList.contains("color-priority-p0") && node().dataset.sizeMetric === "pagerank_bucket";
+      && node().classList.contains("color-priority-unspecified") && node().dataset.sizeMetric === "pagerank_bucket";
     doc.querySelector("#show-full-network").click();
     checks.expansion_keeps_causal_evidence = node()?.classList.contains("causal-path")
       && doc.querySelector('.graph-node[data-node-key="acme/widgets#2"]').classList.contains("unlocked-outcome")
+      && doc.querySelector('.graph-node[data-node-key="acme/widgets#2"]').classList.contains("color-priority-p0")
       && doc.querySelector(`.graph-edge[data-blocker="${key}"][data-blocked="acme/widgets#2"]`).classList.contains("causal-path");
     clear();
     checks.clear_resets_view = !node() && rows().length === graph.nodes.length

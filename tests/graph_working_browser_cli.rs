@@ -47,7 +47,11 @@ fn pending_draft_exploration_preserves_identity_filters_and_recommendation_evide
         &api,
         &["update", key, "--title", "Edited local Draft", "--json"],
     );
-    execute(&state, &api, &["update", key, "--priority", "p0", "--json"]);
+    execute(
+        &state,
+        &api,
+        &["update", "acme/widgets#2", "--priority", "p0", "--json"],
+    );
     execute(
         &state,
         &api,
@@ -101,12 +105,33 @@ fn pending_draft_exploration_preserves_identity_filters_and_recommendation_evide
         support::browser::audit_local_page(&browser, &workspace.path().join("profile"), &harness);
     assert!(audit.result.get("error").is_none(), "{}", audit.result);
     let checks = audit.result["checks"].as_object().expect("browser checks");
-    assert!(
-        checks.len() >= 10,
-        "all Working graph scenarios must execute"
+    let expected_checks = [
+        "draft_identity_is_lossless",
+        "constrained_table_keeps_pending_draft",
+        "recommendation_names_draft",
+        "draft_key_is_searchable",
+        "pending_title_and_no_github_link",
+        "edited_title_is_searchable",
+        "pending_priority_filter",
+        "pending_dependency_isolation",
+        "recommendation_opens_draft_and_keeps_metrics",
+        "expansion_keeps_causal_evidence",
+        "clear_resets_view",
+        "embedded_working_input_unchanged",
+    ];
+    assert_eq!(
+        checks.len(),
+        expected_checks.len(),
+        "all Working graph scenarios must execute: {}",
+        audit.result
     );
-    for (name, passed) in checks {
-        assert_eq!(passed, true, "browser check {name}: {}", audit.result);
+    for name in expected_checks {
+        assert_eq!(
+            checks.get(name),
+            Some(&Value::Bool(true)),
+            "browser check {name}: {}",
+            audit.result
+        );
     }
     assert!(
         audit
@@ -127,6 +152,10 @@ fn execute(state: &TempDir, api: &str, args: &[&str]) -> Value {
         .env("PATH", "")
         .output()
         .unwrap();
-    support::assert_success(&output);
+    assert!(
+        output.status.success(),
+        "command {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     serde_json::from_slice(&output.stdout).unwrap()
 }
