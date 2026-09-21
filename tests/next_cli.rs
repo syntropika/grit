@@ -137,6 +137,346 @@ fn next_evaluates_the_complete_frontier_with_and_unlocks_and_deduplication() {
 }
 
 #[test]
+fn default_rollout_follows_executable_chains_and_counts_distinct_ready_transitions() {
+    let mut github = Server::new();
+    let state = TempDir::new().expect("temporary state directory");
+    let mut issues = vec![
+        issue(1, "open", &["priority:p4"], &[]),
+        issue(2, "open", &["priority:p1"], &[]),
+        issue(10, "open", &["priority:p4"], &[]),
+        issue(11, "open", &["priority:p4"], &[]),
+        issue(17, "open", &["priority:p1"], &[]),
+        issue(20, "open", &["priority:p1"], &[]),
+        issue(21, "open", &["priority:p1"], &[]),
+    ];
+    for number in 12..=16 {
+        let assignees = if number == 12 { &["alice"][..] } else { &[] };
+        issues.push(issue(number, "open", &["priority:p4"], assignees));
+    }
+    let mut fanout_dependencies = vec![
+        internal_blocker(1, "open"),
+        internal_blocker(10, "open"),
+        internal_blocker(11, "open"),
+        internal_blocker(11, "open"),
+    ];
+    let mut dependencies = vec![
+        (1, vec![]),
+        (2, vec![]),
+        (10, vec![internal_blocker(1, "open")]),
+        (11, vec![internal_blocker(10, "open")]),
+        (12, std::mem::take(&mut fanout_dependencies)),
+        (17, vec![internal_blocker(12, "open")]),
+        (20, vec![internal_blocker(2, "open")]),
+        (21, vec![internal_blocker(2, "open")]),
+    ];
+    for number in 13..=16 {
+        dependencies.push((number, vec![internal_blocker(11, "open")]));
+    }
+    let mocks = mock_repository(&mut github, "acme/rollout", issues, dependencies);
+
+    let output = next_default_command(&state, &github.url(), "acme/rollout", true)
+        .output()
+        .expect("run three-step next");
+    assert_success(&output);
+    let output: Value = serde_json::from_slice(&output.stdout).expect("next JSON");
+    let recommendation = &output["recommendation"];
+
+    assert_eq!(output["parameters"]["horizon"], 3);
+    assert_eq!(output["mode"], "normal");
+    assert_eq!(output["search_complete"], true);
+    assert_eq!(recommendation["first_issue"]["number"], 1);
+    assert_eq!(
+        rollout_numbers(recommendation),
+        vec![1, 10, 11],
+        "every continuation must come from the newly produced Executable state"
+    );
+    assert_eq!(
+        recommendation["outcome"]["unlock_profile"],
+        json!({
+            "count": 7,
+            "priority_profile": {"p1": 0, "neutral": 0, "p3": 0, "p4": 7},
+            "curve": [1, 2, 7],
+            "p0_curve": [0, 0, 0],
+            "step_priorities": ["p4", "p4", "p4"]
+        })
+    );
+    assert_eq!(
+        unlock_numbers(recommendation),
+        vec![10, 11, 12, 13, 14, 15, 16]
+    );
+    assert_eq!(
+        recommendation["outcome"]["unlock_availability"],
+        json!({"available": 6, "assigned": 1})
+    );
+    assert!(!unlock_numbers(recommendation).contains(&17));
+    assert_eq!(
+        output["comparison_to_runner_up"]["reason_code"],
+        "unlocks_more_work"
+    );
+    mocks.assert();
+}
+
+#[test]
+fn normal_rollouts_compare_downstream_priority_before_unlock_timing() {
+    let mut github = Server::new();
+    let state = TempDir::new().expect("temporary state directory");
+    let issues = vec![
+        issue(1, "open", &["priority:p4"], &[]),
+        issue(2, "open", &["priority:p4"], &[]),
+        issue(10, "open", &["priority:p4"], &[]),
+        issue(11, "open", &["priority:p4"], &[]),
+        issue(12, "open", &["priority:p4"], &[]),
+        issue(13, "open", &["priority:p4"], &[]),
+        issue(20, "open", &["priority:p1"], &[]),
+        issue(21, "open", &["priority:p1"], &[]),
+        issue(22, "open", &["priority:p1"], &[]),
+        issue(23, "open", &["priority:p1"], &[]),
+    ];
+    let dependencies = vec![
+        (1, vec![]),
+        (2, vec![]),
+        (10, vec![internal_blocker(1, "open")]),
+        (11, vec![internal_blocker(10, "open")]),
+        (12, vec![internal_blocker(11, "open")]),
+        (13, vec![internal_blocker(11, "open")]),
+        (20, vec![internal_blocker(2, "open")]),
+        (21, vec![internal_blocker(20, "open")]),
+        (22, vec![internal_blocker(21, "open")]),
+        (23, vec![internal_blocker(21, "open")]),
+    ];
+    let mocks = mock_repository(&mut github, "acme/profile", issues, dependencies);
+
+    let output = next_default_command(&state, &github.url(), "acme/profile", true)
+        .output()
+        .expect("run Priority-profile next");
+    assert_success(&output);
+    let output: Value = serde_json::from_slice(&output.stdout).expect("next JSON");
+
+    assert_eq!(output["recommendation"]["first_issue"]["number"], 2);
+    assert_eq!(
+        output["recommendation"]["outcome"]["unlock_profile"]["count"],
+        4
+    );
+    assert_eq!(
+        output["recommendation"]["outcome"]["unlock_profile"]["priority_profile"],
+        json!({"p1": 4, "neutral": 0, "p3": 0, "p4": 0})
+    );
+    assert_eq!(
+        output["comparison_to_runner_up"]["reason_code"],
+        "unlocks_higher_priority_work"
+    );
+    mocks.assert();
+}
+
+#[test]
+fn normal_rollouts_compare_unlock_curve_before_step_priority_sequence() {
+    let mut github = Server::new();
+    let state = TempDir::new().expect("temporary state directory");
+    let issues = vec![
+        issue(1, "open", &["priority:p4"], &[]),
+        issue(2, "open", &["priority:p4"], &[]),
+        issue(10, "open", &["priority:p4"], &[]),
+        issue(11, "open", &["priority:p4"], &[]),
+        issue(12, "open", &["priority:p4"], &[]),
+        issue(13, "open", &["priority:p4"], &[]),
+        issue(20, "open", &["priority:p4"], &[]),
+        issue(21, "open", &["priority:p4"], &[]),
+        issue(22, "open", &["priority:p4"], &[]),
+        issue(23, "open", &["priority:p4"], &[]),
+    ];
+    let dependencies = vec![
+        (1, vec![]),
+        (2, vec![]),
+        (10, vec![internal_blocker(1, "open")]),
+        (11, vec![internal_blocker(10, "open")]),
+        (12, vec![internal_blocker(11, "open")]),
+        (13, vec![internal_blocker(11, "open")]),
+        (20, vec![internal_blocker(2, "open")]),
+        (21, vec![internal_blocker(2, "open")]),
+        (22, vec![internal_blocker(20, "open")]),
+        (23, vec![internal_blocker(22, "open")]),
+    ];
+    let mocks = mock_repository(&mut github, "acme/curve", issues, dependencies);
+
+    let output = next_default_command(&state, &github.url(), "acme/curve", true)
+        .output()
+        .expect("run Unlock-curve next");
+    assert_success(&output);
+    let output: Value = serde_json::from_slice(&output.stdout).expect("next JSON");
+
+    assert_eq!(output["recommendation"]["first_issue"]["number"], 2);
+    assert_eq!(
+        output["recommendation"]["outcome"]["unlock_profile"]["curve"],
+        json!([2, 3, 4])
+    );
+    assert_eq!(
+        output["alternatives"][0]["outcome"]["unlock_profile"]["curve"],
+        json!([1, 3, 4])
+    );
+    assert_eq!(
+        output["comparison_to_runner_up"]["reason_code"],
+        "unlocks_earlier"
+    );
+    mocks.assert();
+}
+
+#[test]
+fn normal_rollouts_compare_and_pad_the_step_priority_sequence() {
+    let mut github = Server::new();
+    let state = TempDir::new().expect("temporary state directory");
+    let issues = vec![
+        issue(1, "open", &["priority:p1"], &[]),
+        issue(2, "open", &["priority:p4"], &[]),
+        issue(10, "open", &["priority:p4"], &[]),
+        issue(11, "open", &["priority:p4"], &[]),
+        issue(12, "open", &["priority:p4"], &[]),
+        issue(13, "open", &["priority:p4"], &[]),
+        issue(20, "open", &["priority:p4"], &[]),
+        issue(21, "open", &["priority:p4"], &[]),
+        issue(22, "open", &["priority:p4"], &[]),
+        issue(23, "open", &["priority:p4"], &[]),
+    ];
+    let dependencies = vec![
+        (1, vec![]),
+        (2, vec![]),
+        (10, vec![internal_blocker(1, "open")]),
+        (11, vec![internal_blocker(10, "open")]),
+        (12, vec![internal_blocker(11, "open")]),
+        (13, vec![internal_blocker(11, "open")]),
+        (20, vec![internal_blocker(2, "open")]),
+        (21, vec![internal_blocker(20, "open")]),
+        (22, vec![internal_blocker(21, "open")]),
+        (23, vec![internal_blocker(21, "open")]),
+    ];
+    let mocks = mock_repository(&mut github, "acme/steps", issues, dependencies);
+
+    let output = next_default_command(&state, &github.url(), "acme/steps", true)
+        .output()
+        .expect("run step-Priority next");
+    assert_success(&output);
+    let output: Value = serde_json::from_slice(&output.stdout).expect("next JSON");
+
+    assert_eq!(output["recommendation"]["first_issue"]["number"], 1);
+    assert_eq!(
+        output["recommendation"]["outcome"]["unlock_profile"]["step_priorities"],
+        json!(["p1", "p4", "p4"])
+    );
+    assert_eq!(
+        output["comparison_to_runner_up"]["reason_code"],
+        "declared_priority_tiebreak"
+    );
+    mocks.assert();
+
+    drop(github);
+    let human = next_default_human_command(&state, "http://127.0.0.1:9", "acme/steps")
+        .output()
+        .expect("run human step-Priority output");
+    assert_success(&human);
+    assert!(
+        String::from_utf8_lossy(&human.stdout)
+            .contains("the rollout's step-Priority sequence breaks the tie")
+    );
+
+    let mut padding_github = Server::new();
+    let padding_state = TempDir::new().expect("padding state directory");
+    let padding_mocks = mock_repository(
+        &mut padding_github,
+        "acme/padding",
+        vec![issue(1, "open", &["priority:p1"], &[])],
+        vec![(1, vec![])],
+    );
+    let padding = next_default_command(&padding_state, &padding_github.url(), "acme/padding", true)
+        .output()
+        .expect("run padded rollout");
+    assert_success(&padding);
+    let padding: Value = serde_json::from_slice(&padding.stdout).expect("padding JSON");
+    assert_eq!(
+        padding["recommendation"]["outcome"]["unlock_profile"]["curve"],
+        json!([0, 0, 0])
+    );
+    assert_eq!(
+        padding["recommendation"]["outcome"]["unlock_profile"]["step_priorities"],
+        json!(["p1", "no_step", "no_step"])
+    );
+    padding_mocks.assert();
+}
+
+#[test]
+fn state_budget_restriction_is_reported_without_a_global_optimum_claim() {
+    let mut github = Server::new();
+    let state = TempDir::new().expect("temporary state directory");
+    let issues = (1..=30)
+        .map(|number| {
+            let priority = if number == 1 {
+                "priority:p1"
+            } else {
+                "priority:p4"
+            };
+            issue(number, "open", &[priority], &[])
+        })
+        .collect();
+    let dependencies = (1..=30).map(|number| (number, vec![])).collect();
+    let mocks = mock_repository(&mut github, "acme/truncated", issues, dependencies);
+
+    let output = next_default_command(&state, &github.url(), "acme/truncated", true)
+        .output()
+        .expect("run bounded rollout search");
+    assert_success(&output);
+    let output: Value = serde_json::from_slice(&output.stdout).expect("next JSON");
+
+    assert_eq!(output["summary"]["candidate_count"], 30);
+    assert_eq!(output["search_complete"], false);
+    assert_eq!(output["truncated_by"], json!(["state_budget"]));
+    assert_eq!(output["global_optimum_claimed"], false);
+    assert_eq!(output["runner_up_scope"], "explored");
+    mocks.assert();
+
+    drop(github);
+    let human = next_default_human_command(&state, "http://127.0.0.1:9", "acme/truncated")
+        .output()
+        .expect("run truncated human output");
+    assert_success(&human);
+    let stderr = String::from_utf8_lossy(&human.stderr);
+    assert!(
+        stderr.contains("restricted by state_budget"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("no global optimum is claimed"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn deferred_multistep_p0_routes_do_not_make_an_unsupported_optimum_claim() {
+    let mut github = Server::new();
+    let state = TempDir::new().expect("temporary state directory");
+    let issues = vec![
+        issue(1, "open", &["priority:p4"], &[]),
+        issue(2, "open", &["priority:p4"], &[]),
+        issue(3, "open", &["priority:p0"], &[]),
+    ];
+    let dependencies = vec![
+        (1, vec![]),
+        (2, vec![internal_blocker(1, "open")]),
+        (3, vec![internal_blocker(2, "open")]),
+    ];
+    let mocks = mock_repository(&mut github, "acme/deferred-p0", issues, dependencies);
+
+    let output = next_default_command(&state, &github.url(), "acme/deferred-p0", true)
+        .output()
+        .expect("run deferred P0 search");
+    assert_success(&output);
+    let output: Value = serde_json::from_slice(&output.stdout).expect("next JSON");
+
+    assert_eq!(output["search_complete"], false);
+    assert_eq!(output["truncated_by"], json!(["p0_frontier"]));
+    assert_eq!(output["global_optimum_claimed"], false);
+    assert_eq!(output["runner_up_scope"], "explored");
+    mocks.assert();
+}
+
+#[test]
 fn executable_p0_gate_prefers_the_p0_that_unlocks_more_critical_work() {
     let mut github = Server::new();
     let state = TempDir::new().expect("temporary state directory");
@@ -393,7 +733,7 @@ fn no_candidate_succeeds_with_categories_and_deterministic_offline_json() {
 }
 
 #[test]
-fn empty_graph_omits_pagerank_globally_and_horizon_two_is_rejected() {
+fn empty_graph_omits_pagerank_globally_and_out_of_range_horizon_is_rejected() {
     let mut github = Server::new();
     let state = TempDir::new().expect("temporary state directory");
     let mocks = mock_repository(&mut github, "acme/empty", vec![], vec![]);
@@ -408,18 +748,46 @@ fn empty_graph_omits_pagerank_globally_and_horizon_two_is_rejected() {
     mocks.assert();
 
     let unsupported = Command::new(env!("CARGO_BIN_EXE_grit"))
-        .args(["next", "--repo", "acme/empty", "--horizon", "2", "--json"])
+        .args(["next", "--repo", "acme/empty", "--horizon", "4", "--json"])
         .env("GRIT_STATE_DIR", state.path())
         .env("PATH", "")
         .output()
         .expect("unsupported horizon");
     assert!(!unsupported.status.success());
-    assert!(String::from_utf8_lossy(&unsupported.stderr).contains("horizon 1"));
+    assert!(String::from_utf8_lossy(&unsupported.stderr).contains("between 1 and 3"));
 }
 
 fn next_command(state: &TempDir, api_url: &str, repository: &str, online: bool) -> Command {
+    next_command_with_horizon(state, api_url, repository, online, Some(1))
+}
+
+fn next_default_command(state: &TempDir, api_url: &str, repository: &str, online: bool) -> Command {
+    next_command_with_horizon(state, api_url, repository, online, None)
+}
+
+fn next_default_human_command(state: &TempDir, api_url: &str, repository: &str) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_grit"));
-    command.args(["next", "--repo", repository, "--horizon", "1", "--json"]);
+    command.args(["next", "--repo", repository]);
+    command
+        .env("GRIT_GITHUB_API_URL", api_url)
+        .env("GRIT_STATE_DIR", state.path())
+        .env_remove("GH_TOKEN")
+        .env("PATH", "");
+    command
+}
+
+fn next_command_with_horizon(
+    state: &TempDir,
+    api_url: &str,
+    repository: &str,
+    online: bool,
+    horizon: Option<u8>,
+) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_grit"));
+    command.args(["next", "--repo", repository, "--json"]);
+    if let Some(horizon) = horizon {
+        command.args(["--horizon", &horizon.to_string()]);
+    }
     command
         .env("GRIT_GITHUB_API_URL", api_url)
         .env("GRIT_STATE_DIR", state.path())
@@ -430,6 +798,28 @@ fn next_command(state: &TempDir, api_url: &str, repository: &str, online: bool) 
         command.env_remove("GH_TOKEN");
     }
     command
+}
+
+fn rollout_numbers(candidate: &Value) -> Vec<u64> {
+    candidate["rollout"]["steps"]
+        .as_array()
+        .expect("rollout steps")
+        .iter()
+        .map(|step| step["issue"]["number"].as_u64().expect("step Issue number"))
+        .collect()
+}
+
+fn unlock_numbers(candidate: &Value) -> Vec<u64> {
+    candidate["outcome"]["unlocks"]
+        .as_array()
+        .expect("unlocks")
+        .iter()
+        .map(|unlock| {
+            unlock["issue"]["number"]
+                .as_u64()
+                .expect("unlocked Issue number")
+        })
+        .collect()
 }
 
 fn ready_command(state: &TempDir, api_url: &str, repository: &str) -> Command {
@@ -444,6 +834,7 @@ fn ready_command(state: &TempDir, api_url: &str, repository: &str) -> Command {
 }
 
 struct RepositoryMocks {
+    events: Mock,
     labels: Mock,
     issues: Mock,
     comments: Mock,
@@ -452,6 +843,7 @@ struct RepositoryMocks {
 
 impl RepositoryMocks {
     fn assert(self) {
+        self.events.assert();
         self.labels.assert();
         self.issues.assert();
         self.comments.assert();
@@ -468,6 +860,14 @@ fn mock_repository(
     dependencies: Vec<(u64, Vec<Value>)>,
 ) -> RepositoryMocks {
     let labels_path = format!("/repos/{repository}/labels");
+    let events_path = format!("/repos/{repository}/issues/events");
+    let events = github
+        .mock("GET", events_path.as_str())
+        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("[]")
+        .create();
     let labels = github
         .mock("GET", labels_path.as_str())
         .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
@@ -522,6 +922,7 @@ fn mock_repository(
         })
         .collect();
     RepositoryMocks {
+        events,
         labels,
         issues,
         comments,

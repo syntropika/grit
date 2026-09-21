@@ -693,6 +693,16 @@ fn mock_stateful_repository(
     let mut mocks = Vec::new();
     mocks.push(
         github
+            .mock("GET", "/repos/acme/reconcile/issues/events")
+            .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+            .with_status_code_from_request(status(Arc::clone(&remote)))
+            .with_header("content-type", "application/json")
+            .with_body("[]")
+            .expect_at_least(1)
+            .create(),
+    );
+    mocks.push(
+        github
             .mock("GET", "/repos/acme/reconcile/labels")
             .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
             .with_status_code_from_request(status(Arc::clone(&remote)))
