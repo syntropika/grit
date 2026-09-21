@@ -59,6 +59,7 @@ fn ready_separates_readiness_from_default_and_assignee_execution_scopes() {
         "acme/widgets",
         &replica_since(&state, "acme/widgets"),
         issue_inventory().to_owned(),
+        5,
     );
 
     let assigned = ready_command(&state, &github.url(), Some("alice"))
@@ -189,17 +190,22 @@ struct RepositoryMocks {
     issues: Mock,
     comments: Mock,
     dependencies: Vec<Mock>,
+    events: Mock,
 }
 
 struct DeltaMocks {
     issues: Mock,
     comments: Mock,
+    events: Mock,
+    count: Mock,
 }
 
 impl DeltaMocks {
     fn assert(self) {
         self.issues.assert();
         self.comments.assert();
+        self.events.assert();
+        self.count.assert();
     }
 }
 
@@ -210,6 +216,7 @@ impl RepositoryMocks {
         for dependency in self.dependencies {
             dependency.assert();
         }
+        self.events.assert();
     }
 }
 
@@ -259,11 +266,21 @@ fn mock_repository(
                 .create()
         })
         .collect();
+    let events_path = format!("/repos/{repository}/issues/events");
+    let events = github
+        .mock("GET", events_path.as_str())
+        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(checkpoint_event())
+        .expect(expected_calls)
+        .create();
 
     RepositoryMocks {
         issues,
         comments,
         dependencies,
+        events,
     }
 }
 
@@ -272,6 +289,7 @@ fn mock_unchanged_delta(
     repository: &str,
     since: &str,
     issue_inventory: String,
+    issue_count: u64,
 ) -> DeltaMocks {
     let issues_path = format!("/repos/{repository}/issues");
     let issues = github
@@ -291,7 +309,26 @@ fn mock_unchanged_delta(
         .with_body("[]")
         .create();
 
-    DeltaMocks { issues, comments }
+    let events_path = format!("/repos/{repository}/issues/events");
+    let events = github
+        .mock("GET", events_path.as_str())
+        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(checkpoint_event())
+        .create();
+    let count = support::mock_issue_count(github, issue_count);
+
+    DeltaMocks {
+        issues,
+        comments,
+        events,
+        count,
+    }
+}
+
+fn checkpoint_event() -> &'static str {
+    r#"[{"id":100,"event":"labeled","created_at":"2026-08-01T00:00:00Z","issue":null}]"#
 }
 
 fn ready_command_for(

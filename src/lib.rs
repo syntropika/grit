@@ -1,5 +1,6 @@
 mod auth;
 mod cli;
+mod dependency_events;
 mod github;
 mod model;
 mod operational;

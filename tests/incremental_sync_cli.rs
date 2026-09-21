@@ -1,6 +1,6 @@
-use std::{fs, process::Command};
+use std::fs;
 
-use chrono::{DateTime, Duration, SecondsFormat};
+use chrono::DateTime;
 use mockito::{Matcher, Mock, Server};
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -22,12 +22,12 @@ fn incremental_sync_upserts_old_and_new_issues_with_every_ordinary_change() {
     );
     let initial = mock_initial(&mut github, vec![initial_issue.clone()], &[7]);
 
-    let first = sync_command(&state, &github.url())
+    let first = support::sync_command(&state, &github.url(), "acme/widgets")
         .output()
         .expect("initial sync");
-    assert_success(&first);
+    support::assert_success(&first);
     initial.assert();
-    let initial_since = replica_since(&state);
+    let initial_since = support::replica_since(&state, "acme/widgets");
 
     let closed = issue_with_classification(
         7,
@@ -63,17 +63,21 @@ fn incremental_sync_upserts_old_and_new_issues_with_every_ordinary_change() {
     );
     let dependency_seven = mock_dependencies(&mut github, 7);
     let dependency_ten = mock_dependencies(&mut github, 10);
+    let events = mock_events(&mut github);
+    let count = support::mock_issue_count(&mut github, 2);
 
-    let second = sync_command(&state, &github.url())
+    let second = support::sync_command(&state, &github.url(), "acme/widgets")
         .output()
         .expect("incremental sync");
-    assert_success(&second);
+    support::assert_success(&second);
     changed_issues.assert();
     changed_comments.assert();
     dependency_seven.assert();
     dependency_ten.assert();
+    events.assert();
+    count.assert();
 
-    let replica = load_replica(&state);
+    let replica = support::load_replica(&state, "acme/widgets");
     let watermark = DateTime::parse_from_rfc3339(
         replica["sync"]["ordinary_issues"]["watermark"]
             .as_str()
@@ -101,7 +105,7 @@ fn incremental_sync_upserts_old_and_new_issues_with_every_ordinary_change() {
     );
     assert_eq!(replica_issue(&replica, 10)["title"], "New Issue");
 
-    let second_since = replica_since(&state);
+    let second_since = support::replica_since(&state, "acme/widgets");
     let reopened = issue_with_classification(
         7,
         "open",
@@ -122,16 +126,20 @@ fn incremental_sync_upserts_old_and_new_issues_with_every_ordinary_change() {
     let no_new_comments =
         mock_comment_delta(&mut github, &second_since, None, 200, "[]".to_owned(), None);
     let reopened_dependencies = mock_dependencies(&mut github, 7);
+    let events = mock_events(&mut github);
+    let count = support::mock_issue_count(&mut github, 2);
 
-    let third = sync_command(&state, &github.url())
+    let third = support::sync_command(&state, &github.url(), "acme/widgets")
         .output()
         .expect("reopening sync");
-    assert_success(&third);
+    support::assert_success(&third);
     reopened_issues.assert();
     no_new_comments.assert();
     reopened_dependencies.assert();
+    events.assert();
+    count.assert();
 
-    let replica = load_replica(&state);
+    let replica = support::load_replica(&state, "acme/widgets");
     let issue_seven = replica_issue(&replica, 7);
     assert_eq!(issue_seven["state"], "open");
     assert_eq!(issue_seven["title"], "Reopened old Issue");
@@ -157,13 +165,13 @@ fn unchanged_sync_uses_only_safe_query_scoped_conditional_requests() {
     let initial_issue = issue(7, "open", "Stable Issue", "No changes", INITIAL_WATERMARK);
     let initial = mock_initial(&mut github, vec![initial_issue.clone()], &[7]);
 
-    let first = sync_command(&state, &github.url())
+    let first = support::sync_command(&state, &github.url(), "acme/widgets")
         .output()
         .expect("initial sync");
-    assert_success(&first);
+    support::assert_success(&first);
     initial.assert();
     let initial_watermark = replica_watermark(&state);
-    let initial_since = replica_since(&state);
+    let initial_since = support::replica_since(&state, "acme/widgets");
 
     let warm_issues = mock_issue_delta(
         &mut github,
@@ -181,13 +189,17 @@ fn unchanged_sync_uses_only_safe_query_scoped_conditional_requests() {
         "[]".to_owned(),
         Some("\"comments-safe-v1\""),
     );
+    let events = mock_events(&mut github);
+    let count = support::mock_issue_count(&mut github, 1);
 
-    let second = sync_command(&state, &github.url())
+    let second = support::sync_command(&state, &github.url(), "acme/widgets")
         .output()
         .expect("warm conditional state");
-    assert_success(&second);
+    support::assert_success(&second);
     warm_issues.assert();
     warm_comments.assert();
+    events.assert();
+    count.assert();
 
     let unchanged_issues = mock_issue_delta(
         &mut github,
@@ -205,15 +217,19 @@ fn unchanged_sync_uses_only_safe_query_scoped_conditional_requests() {
         String::new(),
         None,
     );
+    let events = mock_events(&mut github);
+    let count = support::mock_issue_count(&mut github, 1);
 
-    let third = sync_command(&state, &github.url())
+    let third = support::sync_command(&state, &github.url(), "acme/widgets")
         .output()
         .expect("unchanged conditional sync");
-    assert_success(&third);
+    support::assert_success(&third);
     unchanged_issues.assert();
     unchanged_comments.assert();
+    events.assert();
+    count.assert();
 
-    let replica = load_replica(&state);
+    let replica = support::load_replica(&state, "acme/widgets");
     assert_eq!(replica["issues"].as_array().expect("Issues").len(), 1);
     assert_eq!(replica_issue(&replica, 7)["title"], "Stable Issue");
     assert_eq!(
@@ -228,12 +244,12 @@ fn a_paginated_etag_is_not_reused_as_a_global_continuity_signal() {
     let state = TempDir::new().expect("temporary state directory");
     let initial_issue = issue(7, "open", "Stable Issue", "No changes", INITIAL_WATERMARK);
     let initial = mock_initial(&mut github, vec![initial_issue.clone()], &[7]);
-    let first = sync_command(&state, &github.url())
+    let first = support::sync_command(&state, &github.url(), "acme/widgets")
         .output()
         .expect("initial sync");
-    assert_success(&first);
+    support::assert_success(&first);
     initial.assert();
-    let initial_since = replica_since(&state);
+    let initial_since = support::replica_since(&state, "acme/widgets");
 
     let mut pull_request = issue(
         8,
@@ -275,14 +291,18 @@ fn a_paginated_etag_is_not_reused_as_a_global_continuity_signal() {
         "[]".to_owned(),
         Some("\"comments-safe-v1\""),
     );
+    let events = mock_events(&mut github);
+    let count = support::mock_issue_count(&mut github, 1);
 
-    let second = sync_command(&state, &github.url())
+    let second = support::sync_command(&state, &github.url(), "acme/widgets")
         .output()
         .expect("paginated delta");
-    assert_success(&second);
+    support::assert_success(&second);
     paginated_first.assert();
     paginated_second.assert();
     warm_comments.assert();
+    events.assert();
+    count.assert();
 
     let next_issues = mock_issue_delta(
         &mut github,
@@ -300,12 +320,16 @@ fn a_paginated_etag_is_not_reused_as_a_global_continuity_signal() {
         String::new(),
         None,
     );
-    let third = sync_command(&state, &github.url())
+    let events = mock_events(&mut github);
+    let count = support::mock_issue_count(&mut github, 1);
+    let third = support::sync_command(&state, &github.url(), "acme/widgets")
         .output()
         .expect("post-pagination delta");
-    assert_success(&third);
+    support::assert_success(&third);
     next_issues.assert();
     next_comments.assert();
+    events.assert();
+    count.assert();
 }
 
 #[test]
@@ -317,13 +341,13 @@ fn interrupted_incremental_pagination_preserves_the_complete_replica_and_cursor(
         vec![issue(7, "open", "Complete", "Saved", INITIAL_WATERMARK)],
         &[7],
     );
-    let first = sync_command(&state, &github.url())
+    let first = support::sync_command(&state, &github.url(), "acme/widgets")
         .output()
         .expect("initial sync");
-    assert_success(&first);
+    support::assert_success(&first);
     initial.assert();
-    let initial_since = replica_since(&state);
-    let replica_path = replica_path(&state);
+    let initial_since = support::replica_since(&state, "acme/widgets");
+    let replica_path = support::replica_path(&state, "acme/widgets");
     let before = fs::read(&replica_path).expect("complete replica");
 
     let next = format!(
@@ -358,7 +382,7 @@ fn interrupted_incremental_pagination_preserves_the_complete_replica_and_cursor(
         .with_body("{\"message\":\"rate limit\"}")
         .create();
 
-    let failed = sync_command(&state, &github.url())
+    let failed = support::sync_command(&state, &github.url(), "acme/widgets")
         .output()
         .expect("interrupted incremental sync");
     assert!(!failed.status.success());
@@ -372,6 +396,7 @@ struct InitialMocks {
     issues: Mock,
     comments: Mock,
     dependencies: Vec<Mock>,
+    events: Mock,
 }
 
 impl InitialMocks {
@@ -381,6 +406,7 @@ impl InitialMocks {
         for dependency in self.dependencies {
             dependency.assert();
         }
+        self.events.assert();
     }
 }
 
@@ -414,11 +440,27 @@ fn mock_initial(
         .iter()
         .map(|number| mock_dependencies(github, *number))
         .collect();
+    let events = mock_events(github);
     InitialMocks {
         issues,
         comments,
         dependencies,
+        events,
     }
+}
+
+fn mock_events(github: &mut Server) -> Mock {
+    github
+        .mock("GET", "/repos/acme/widgets/issues/events")
+        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(checkpoint_event())
+        .create()
+}
+
+fn checkpoint_event() -> &'static str {
+    r#"[{"id":100,"event":"labeled","created_at":"2026-08-01T00:00:00Z","issue":null}]"#
 }
 
 fn mock_issue_delta(
@@ -474,17 +516,6 @@ fn mock_dependencies(github: &mut Server, issue_number: u64) -> Mock {
         .with_header("content-type", "application/json")
         .with_body("[]")
         .create()
-}
-
-fn sync_command(state: &TempDir, api_url: &str) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_grit"));
-    command.args(["sync", "--repo", "acme/widgets", "--json"]);
-    command
-        .env("GH_TOKEN", "automation-token")
-        .env("GRIT_GITHUB_API_URL", api_url)
-        .env("GRIT_STATE_DIR", state.path())
-        .env("PATH", "");
-    command
 }
 
 fn issue(number: u64, state: &str, title: &str, body: &str, updated_at: &str) -> Value {
@@ -554,34 +585,11 @@ fn comment(id: u64, issue_number: u64, body: &str, updated_at: &str) -> Value {
     })
 }
 
-fn assert_success(output: &std::process::Output) {
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-fn replica_path(state: &TempDir) -> std::path::PathBuf {
-    state.path().join("repositories/acme/widgets/replica.json")
-}
-
-fn load_replica(state: &TempDir) -> Value {
-    serde_json::from_slice(&fs::read(replica_path(state)).expect("Local replica"))
-        .expect("replica JSON")
-}
-
 fn replica_watermark(state: &TempDir) -> String {
-    load_replica(state)["sync"]["ordinary_issues"]["watermark"]
+    support::load_replica(state, "acme/widgets")["sync"]["ordinary_issues"]["watermark"]
         .as_str()
         .expect("ordinary-Issue watermark")
         .to_owned()
-}
-
-fn replica_since(state: &TempDir) -> String {
-    let watermark = replica_watermark(state);
-    let watermark = DateTime::parse_from_rfc3339(&watermark).expect("valid watermark");
-    (watermark - Duration::minutes(1)).to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
 fn replica_issue(replica: &Value, number: u64) -> &Value {

@@ -8,7 +8,9 @@ The current executable tracer implements full and incremental synchronization
 plus Executable frontier enumeration from
 [Issue #2](https://github.com/syntropika/grit/issues/2) and
 [Issue #3](https://github.com/syntropika/grit/issues/3), with ordinary Issue
-deltas from [Issue #4](https://github.com/syntropika/grit/issues/4).
+deltas from [Issue #4](https://github.com/syntropika/grit/issues/4) and
+Dependency-event continuity from
+[Issue #5](https://github.com/syntropika/grit/issues/5).
 
 ## Build and test
 
@@ -48,6 +50,16 @@ and refresh Dependencies only for Issues whose ordinary fields changed. A
 scoped ETag is reused only when the preceding delta proved that the complete
 representation fit in fewer than 100 items; it is never treated as a
 Repository-wide continuity guarantee.
+
+Dependency additions and removals use a separate Repository event checkpoint.
+Grit canonicalizes the mirrored `blocked_by` and `blocking` events into one
+edge direction and fetches any referenced in-scope Issue absent from the Local
+replica. A one-request GraphQL count probe also detects Issues that disappeared
+without a REST delta tombstone. If that count diverges, the checkpoint
+disappears from the available event history, no event-ID anchor exists, an
+event cannot be interpreted safely, or an Issue was transferred or deleted,
+Grit discards the partial delta and performs a Full reconciliation before
+publishing anything.
 
 Grit writes only a normalized model and atomically replaces the previous valid
 replica after every required page has completed. A failed or rate-limited delta

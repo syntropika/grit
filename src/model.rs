@@ -62,6 +62,14 @@ impl LocalReplica {
 pub(crate) struct SyncMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) ordinary_issues: Option<OrdinaryIssueCursor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) dependency_events: Option<DependencyEventCheckpoint>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct DependencyEventCheckpoint {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) latest_event_id: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
