@@ -39,15 +39,7 @@ requires notarization, use a local source build instead.
 
 ## Install from source
 
-The crates.io package is named `syntropika-grit`; its executable is `grit`.
-With Rust 1.94.0 or newer:
-
-```bash
-cargo install --locked syntropika-grit --version 0.1.1
-grit --version
-```
-
-To build the matching Git tag with the pinned toolchain instead:
+With Rust 1.94.0 installed:
 
 ```bash
 cargo +1.94.0 install --locked --git https://github.com/syntropika/grit --tag v0.1.1
@@ -55,6 +47,7 @@ grit --version
 ```
 
 Cargo installs into its binary directory, usually `$HOME/.cargo/bin`.
+This installs the tagged Grit repository; no crates.io package is required.
 
 ## Install the agent skill
 

@@ -9,8 +9,9 @@
 - Update the installation guide and quickstart for the configured login.
 - Bundle a Grit usage skill and install it offline with `grit skill install`,
   using the native `skillinstaller` library for provider destinations.
-- Publish the `syntropika-grit` Cargo package while keeping the executable
-  named `grit`. Include the agent skill in both source and binary distributions.
+- Prepare source packaging as `syntropika-grit` while keeping the executable
+  named `grit`. Include the agent skill in source and binary distributions;
+  registry publication is deferred.
 
 ## 0.1.0
 

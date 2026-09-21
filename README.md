@@ -24,10 +24,10 @@ so work with another unresolved blocker stays blocked.
 Download a Linux or macOS binary for x86_64 or ARM64 from
 [GitHub Releases](https://github.com/syntropika/grit/releases/latest). See the
 [installation guide](docs/installation.md) for system requirements and checksum
-verification. With Rust 1.94.0 or newer, install from crates.io:
+verification. With Rust 1.94.0 installed, you can also build v0.1.1 from source:
 
 ```bash
-cargo install --locked syntropika-grit --version 0.1.1
+cargo +1.94.0 install --locked --git https://github.com/syntropika/grit --tag v0.1.1
 ```
 
 Sign in through your browser, then replace `OWNER/REPO` with the repository
