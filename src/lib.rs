@@ -1,9 +1,11 @@
 mod atomic_file;
 mod auth;
 mod cli;
+mod dependency_events;
 mod dependency_update;
 mod draft_identity;
 mod github;
+mod graph;
 mod issue_create;
 mod model;
 mod operation_marker;
@@ -16,6 +18,8 @@ mod reconciliation;
 mod replica_sync;
 mod repository;
 mod store;
+mod synchronization;
+mod triage;
 mod working_graph;
 
 use std::process::ExitCode;
