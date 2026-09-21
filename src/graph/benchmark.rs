@@ -49,6 +49,11 @@ fn dense_graph_browser_benchmark() {
             render::network_view_javascript(),
         )
         .expect("benchmark network-view JavaScript");
+        fs::write(
+            site.path().join("graph-query.js"),
+            render::graph_query_javascript(),
+        )
+        .expect("benchmark graph-query JavaScript");
         fs::write(site.path().join("app.js"), render::javascript()).expect("benchmark JavaScript");
         fs::write(site.path().join("graph.json"), &graph_json).expect("benchmark graph JSON");
         fs::write(site.path().join("graph.schema.json"), &schema_json)
@@ -103,6 +108,7 @@ fn dense_graph_browser_benchmark() {
             + html.len()
             + render::stylesheet().len()
             + render::network_view_javascript().len()
+            + render::graph_query_javascript().len()
             + render::javascript().len();
 
         println!(

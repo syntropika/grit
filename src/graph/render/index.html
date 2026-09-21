@@ -10,6 +10,7 @@
     <script id="graph-data" type="application/json">{{graph_data}}</script>
     <script id="graph-presentation-data" type="application/json">{{presentation_data}}</script>
     <script src="./network-view.js" defer></script>
+    <script src="./graph-query.js" defer></script>
     <script src="./app.js" defer></script>
   </head>
   <body>
@@ -22,16 +23,59 @@
       </div>
     </header>
     <main>
-      <section class="toolbar" aria-label="Graph controls">
-        <label for="graph-search">Search Issues</label>
-        <input id="graph-search" type="search" autocomplete="off" placeholder="Issue number or title" aria-describedby="search-help search-status">
-        <span id="search-help" class="visually-hidden">Type a number or title. Press Enter to select the first result.</span>
-        <output id="search-status" role="status" aria-live="polite"></output>
-        <div class="zoom-controls" aria-label="Zoom controls">
-          <button id="zoom-out" type="button" aria-label="Zoom out">−</button>
-          <button id="zoom-reset" type="button">100%</button>
-          <button id="zoom-in" type="button" aria-label="Zoom in">+</button>
+      <section class="control-panel" aria-label="Graph exploration controls">
+        <div class="toolbar">
+          <label for="graph-search">Search Issues</label>
+          <input id="graph-search" type="search" autocomplete="off" placeholder="Issue number or title" aria-describedby="search-help search-status">
+          <span id="search-help" class="visually-hidden">Type a number or title. Press Enter to select the first result.</span>
+          <output id="search-status" role="status" aria-live="polite"></output>
+          <div class="zoom-controls" role="group" aria-label="Zoom controls">
+            <button id="zoom-out" type="button" aria-label="Zoom out">−</button>
+            <button id="zoom-reset" type="button">100%</button>
+            <button id="zoom-in" type="button" aria-label="Zoom in">+</button>
+          </div>
         </div>
+        <fieldset class="filter-controls">
+          <legend>Filter visible graph</legend>
+          <label for="readiness-filter">Readiness
+            <select id="readiness-filter"><option value="sentinel:all">All readiness</option></select>
+          </label>
+          <label for="state-filter">State
+            <select id="state-filter"><option value="sentinel:all">All states</option></select>
+          </label>
+          <label for="priority-filter">Declared priority
+            <select id="priority-filter"><option value="sentinel:all">All priorities</option></select>
+          </label>
+          <label for="area-filter">Area
+            <select id="area-filter"><option value="sentinel:all">All areas</option></select>
+          </label>
+          <label for="assignee-filter">Assignee
+            <select id="assignee-filter"><option value="sentinel:all">All assignees</option></select>
+          </label>
+          <label for="component-filter">Component
+            <select id="component-filter"><option value="sentinel:all">All components</option></select>
+          </label>
+          <span id="optional-filters"></span>
+        </fieldset>
+        <fieldset class="relationship-controls">
+          <legend>Isolate or highlight relationships</legend>
+          <label for="root-node">Root
+            <select id="root-node"></select>
+          </label>
+          <label for="root-depth">Depth
+            <input id="root-depth" type="number" min="0" step="1" value="1" inputmode="numeric">
+          </label>
+          <button id="isolate-root" type="button">Isolate root + depth</button>
+          <button id="highlight-upstream" type="button">Highlight upstream</button>
+          <button id="highlight-downstream" type="button">Highlight downstream</button>
+          <label for="path-target">Path target
+            <select id="path-target"></select>
+          </label>
+          <button id="highlight-path" type="button">Highlight path</button>
+          <button id="clear-view" type="button">Clear view</button>
+          <output id="view-status" role="status" aria-live="polite"></output>
+          <p class="control-help">Root isolation follows both directions without moving nodes or changing metrics. Highlights follow Dependency arrows from blocker to dependent.</p>
+        </fieldset>
       </section>
       <section id="network-mode" class="network-mode" aria-labelledby="network-mode-heading" hidden>
         <div>
@@ -50,7 +94,7 @@
             </div>
           </div>
           <div class="graph-frame">
-            <svg id="graph-canvas" data-zoom="1" role="img" aria-labelledby="graph-heading graph-help">
+            <svg id="graph-canvas" data-zoom="1" role="group" aria-labelledby="graph-heading graph-help">
               <defs>
                 <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
                   <path d="M 0 0 L 10 5 L 0 10 z"></path>
@@ -84,8 +128,10 @@
                 <th scope="col">Layer</th>
                 <th scope="col">Assignees</th>
                 <th scope="col">Labels</th>
+                {{project_header}}
                 <th scope="col">Blockers</th>
                 <th scope="col">Dependents</th>
+                <th scope="col">Relationship</th>
               </tr>
             </thead>
             <tbody>{{rows}}</tbody>

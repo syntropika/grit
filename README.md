@@ -11,8 +11,9 @@ frontier enumeration from
 artifact and browser explorer from
 [Issue #8](https://github.com/syntropika/grit/issues/8) and
 [Issue #12](https://github.com/syntropika/grit/issues/12), including the
-dense-graph guardrail from
-[Issue #17](https://github.com/syntropika/grit/issues/17).
+relationship filters and isolation tools from
+[Issue #16](https://github.com/syntropika/grit/issues/16) and the dense-graph
+guardrail from [Issue #17](https://github.com/syntropika/grit/issues/17).
 
 ## Build and test
 
@@ -98,7 +99,7 @@ grit graph --repo OWNER/REPO --output site/
 grit graph --repo OWNER/REPO --output site/ --json
 ```
 
-The target contains `index.html`, `app.css`, `network-view.js`, `app.js`,
+The target contains `index.html`, `app.css`, `graph-query.js`, `network-view.js`, `app.js`,
 `graph.json`, and `graph.schema.json`. The versioned JSON uses explicit
 `blocked` and `blocker`
 edge roles, normalized Issue fields, precomputed layered positions,
@@ -111,6 +112,19 @@ Issue table. Its detail panel shows readiness, blockers, dependents, and the
 canonical GitHub link. Labels appear only on hover, focus, or selection, and
 the zoom controls never recalculate layout or ranking. All assets are local;
 the browser does not contact GitHub or any other network service.
+
+Readiness, state, Declared priority, area-label, assignee, and disconnected
+component filters compose over the static data. Area, multi-component, and
+optional Project controls are omitted when their source data is absent; the
+current Issues-only artifact has no Project membership and therefore renders
+no Project filter. Root-and-depth isolation follows Dependencies in both
+directions to bound the visible
+neighborhood while preserving every precomputed position and metric. Separate
+actions highlight transitive upstream blockers, transitive downstream
+dependents, or the shortest directed path between two selected nodes. The
+table mirrors the filtered nodes and relationship annotations, including all
+matching results outside a constrained network window. `Clear view` restores
+the initial graph view.
 
 The measured full-network range is 5,000 nodes and 20,000 edges. Larger
 artifacts open with an at-most-500-node overview seeded from Ready Issues.

@@ -41,6 +41,8 @@ fn graph_generates_a_deterministic_valid_offline_site_without_raw_records() {
     let stylesheet_bytes = fs::read(output_directory.join("app.css")).expect("graph stylesheet");
     let network_view_bytes =
         fs::read(output_directory.join("network-view.js")).expect("network-view JavaScript");
+    let graph_query_bytes =
+        fs::read(output_directory.join("graph-query.js")).expect("graph query JavaScript");
     let javascript_bytes = fs::read(output_directory.join("app.js")).expect("graph JavaScript");
     let schema_bytes = fs::read(output_directory.join("graph.schema.json")).expect("graph schema");
     let graph: Value = serde_json::from_slice(&graph_bytes).expect("artifact JSON");
@@ -73,6 +75,13 @@ fn graph_generates_a_deterministic_valid_offline_site_without_raw_records() {
     assert_eq!(graph["nodes"][3]["kind"], "external_blocker");
     assert_eq!(graph["nodes"][3]["readiness"], "external_open");
     assert_eq!(graph["nodes"][0]["position"]["layer"], 0);
+    assert!(
+        graph["nodes"]
+            .as_array()
+            .expect("nodes")
+            .iter()
+            .all(|node| node.get("projects").is_none())
+    );
     assert_eq!(graph["nodes"][1]["position"]["layer"], Value::Null);
     assert_eq!(
         graph["edges"],
@@ -105,6 +114,8 @@ fn graph_generates_a_deterministic_valid_offline_site_without_raw_records() {
     let html = String::from_utf8(html_bytes.clone()).expect("UTF-8 HTML");
     assert!(html.contains("<table"));
     assert!(html.contains("<caption>Issue graph for acme/widgets</caption>"));
+    assert!(html.contains("class=\"zoom-controls\" role=\"group\""));
+    assert!(html.contains("id=\"graph-canvas\" data-zoom=\"1\" role=\"group\""));
     assert!(html.contains("Root &lt;script&gt;alert(1)&lt;/script&gt;"));
     assert!(html.contains("area:&lt;img src=x onerror=alert(2)&gt;"));
     assert!(!html.contains("<script>alert(1)</script>"));
@@ -121,12 +132,26 @@ fn graph_generates_a_deterministic_valid_offline_site_without_raw_records() {
     assert!(html.contains("href=\"./app.css\""));
     assert!(!String::from_utf8_lossy(&javascript_bytes).contains("fetch("));
     assert!(!String::from_utf8_lossy(&network_view_bytes).contains("fetch("));
+    assert!(html.contains("src=\"./graph-query.js\""));
+    assert!(!String::from_utf8_lossy(&graph_query_bytes).contains("fetch("));
     assert!(!String::from_utf8_lossy(&stylesheet_bytes).contains("url(http"));
 
     let schema: Value = serde_json::from_slice(&schema_bytes).expect("schema JSON");
     assert_eq!(schema["additionalProperties"], false);
     assert_eq!(schema["$defs"]["node"]["additionalProperties"], false);
     assert_eq!(schema["$defs"]["edge"]["additionalProperties"], false);
+    assert!(
+        schema["$defs"]["node"]["properties"]
+            .get("projects")
+            .is_some()
+    );
+    assert!(
+        !schema["$defs"]["node"]["required"]
+            .as_array()
+            .expect("required node properties")
+            .iter()
+            .any(|field| field == "projects")
+    );
     let schema_text = String::from_utf8(schema_bytes.clone()).expect("UTF-8 schema");
     assert!(schema_text.contains("pending"));
     assert!(schema_text.contains("operation_ids"));
@@ -163,6 +188,11 @@ fn graph_generates_a_deterministic_valid_offline_site_without_raw_records() {
     assert_eq!(
         fs::read(output_directory.join("app.js")).expect("regenerated JavaScript"),
         javascript_bytes
+    );
+    assert_eq!(
+        fs::read(output_directory.join("graph-query.js"))
+            .expect("regenerated graph query JavaScript"),
+        graph_query_bytes
     );
 }
 
@@ -248,11 +278,13 @@ fn generated_site_is_a_keyboard_accessible_offline_graph_explorer() {
 
     let constrained_output_directory = workspace.path().join("constrained-site");
     prepare_constrained_browser_site(&output_directory, &constrained_output_directory);
+    let project_output_directory = workspace.path().join("project-site");
+    prepare_project_browser_site(&output_directory, &project_output_directory);
 
     let harness = workspace.path().join("browser-test.html");
     fs::write(
         &harness,
-        "<!doctype html><html><body><iframe id=\"app\" src=\"./site/index.html\"></iframe><iframe id=\"constrained-app\" src=\"./constrained-site/index.html\"></iframe><output id=\"result\">pending</output><script src=\"./browser-test.js\"></script></body></html>\n",
+        "<!doctype html><html><body><iframe id=\"app\" src=\"./site/index.html\"></iframe><iframe id=\"constrained-app\" src=\"./constrained-site/index.html\"></iframe><iframe id=\"project-app\" src=\"./project-site/index.html\"></iframe><output id=\"result\">pending</output><script src=\"./browser-test.js\"></script></body></html>\n",
     )
     .expect("browser harness");
     fs::write(
@@ -311,6 +343,28 @@ fn generated_site_is_a_keyboard_accessible_offline_graph_explorer() {
         "constrained_search_keeps_table",
         "selected_result_opens_neighborhood",
         "constrained_reset_and_explicit_expand",
+        "constrained_filters_keep_complete_table",
+        "constrained_highlights_survive_window_changes",
+        "constrained_isolation_and_clear",
+        "readiness_filter",
+        "state_filter",
+        "priority_filter",
+        "priority_conflict_filter",
+        "area_filter",
+        "assignee_filter",
+        "assignee_named_unassigned_filter",
+        "assignee_named_all_filter",
+        "unassigned_filter",
+        "filters_compose",
+        "project_filter_absent_without_data",
+        "project_filter_dom_interface",
+        "disconnected_component_filter",
+        "root_depth_isolation",
+        "clear_restores_canonical_graph",
+        "upstream_highlight",
+        "downstream_highlight",
+        "selected_path_highlight",
+        "accessible_table_matches_visible_graph",
         "no_injected_elements",
     ];
     assert_eq!(
@@ -446,18 +500,87 @@ fn issue_inventory() -> String {
 }
 
 fn browser_issue_inventory() -> String {
-    json!([
-        issue(
-            1,
-            "Root <script>alert(1)</script><!-- grit:operation operation-123 -->",
-            "open"
-        ),
-        issue(2, "Dependent", "open"),
-        issue(3, "Historical", "closed"),
-        issue(4, "Cycle A", "open"),
-        issue(5, "Cycle B", "open")
-    ])
-    .to_string()
+    let mut root = issue(
+        1,
+        "Root <script>alert(1)</script><!-- grit:operation operation-123 -->",
+        "open",
+    );
+    root["labels"] = json!([
+        label(9001, "area:<img src=x onerror=alert(2)>"),
+        label(9101, "area:core"),
+        label(9201, "priority:p1")
+    ]);
+    let mut dependent = issue(2, "Dependent", "open");
+    dependent["assignees"] = json!([actor(2, "alice")]);
+    dependent["labels"] = json!([label(9102, "area:web"), label(9202, "priority:p0")]);
+    let mut historical = issue(3, "Historical", "closed");
+    historical["labels"] = json!([label(9103, "area:docs")]);
+    let mut cycle_a = issue(4, "Cycle A", "open");
+    cycle_a["assignees"] = json!([actor(4, "alice")]);
+    cycle_a["labels"] = json!([label(9104, "area:core"), label(9204, "priority:p2")]);
+    let mut cycle_b = issue(5, "Cycle B", "open");
+    cycle_b["assignees"] = json!([actor(5, "bob"), actor(55, "unassigned"), actor(56, "all")]);
+    cycle_b["labels"] = json!([
+        label(9105, "area:core"),
+        label(9205, "priority:p2"),
+        label(9305, "priority:p3")
+    ]);
+    json!([root, dependent, historical, cycle_a, cycle_b]).to_string()
+}
+
+fn prepare_project_browser_site(source: &std::path::Path, target: &std::path::Path) {
+    fs::create_dir(target).expect("Project browser site directory");
+    for asset in [
+        "app.css",
+        "graph-query.js",
+        "network-view.js",
+        "app.js",
+        "graph.schema.json",
+    ] {
+        fs::copy(source.join(asset), target.join(asset)).expect("copy Project browser site asset");
+    }
+
+    let mut graph: Value = serde_json::from_slice(
+        &fs::read(source.join("graph.json")).expect("source graph artifact"),
+    )
+    .expect("source graph JSON");
+    graph["nodes"][0]["projects"] = json!(["All"]);
+    fs::write(
+        target.join("graph.json"),
+        serde_json::to_vec_pretty(&graph).expect("Project graph JSON"),
+    )
+    .expect("Project graph artifact");
+
+    let mut html = fs::read_to_string(source.join("index.html")).expect("source graph HTML");
+    let marker = "<script id=\"graph-data\" type=\"application/json\">";
+    let data_start = html.find(marker).expect("embedded graph data") + marker.len();
+    let data_end = data_start
+        + html[data_start..]
+            .find("</script>")
+            .expect("embedded graph data terminator");
+    let embedded = serde_json::to_string(&graph)
+        .expect("embedded Project graph JSON")
+        .replace('&', "\\u0026")
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029");
+    html.replace_range(data_start..data_end, &embedded);
+    fs::write(target.join("index.html"), html).expect("Project browser site HTML");
+}
+
+fn actor(id: u64, login: &str) -> Value {
+    json!({"login": login, "id": id, "node_id": format!("U_{id}")})
+}
+
+fn label(id: u64, name: &str) -> Value {
+    json!({
+        "id": id,
+        "node_id": format!("L_{id}"),
+        "name": name,
+        "color": "123456",
+        "description": null
+    })
 }
 
 fn prepare_constrained_browser_site(source: &std::path::Path, target: &std::path::Path) {
@@ -465,6 +588,7 @@ fn prepare_constrained_browser_site(source: &std::path::Path, target: &std::path
     for asset in [
         "app.css",
         "network-view.js",
+        "graph-query.js",
         "app.js",
         "graph.json",
         "graph.schema.json",
