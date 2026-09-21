@@ -210,7 +210,7 @@
   function matchesSearch(node, query, numberQuery) {
     return !query
       || (numberQuery !== null && String(node.number) === numberQuery)
-      || (node.key || "").toLocaleLowerCase().includes(query)
+      || (numberQuery === null && (node.key || "").toLocaleLowerCase().includes(query))
       || (node.title || "").toLocaleLowerCase().includes(query);
   }
 

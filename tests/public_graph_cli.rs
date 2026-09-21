@@ -4,7 +4,6 @@ use mockito::{Matcher, Mock, Server};
 use serde_json::{Map, Value, json};
 use tempfile::TempDir;
 
-#[allow(dead_code)]
 mod support;
 
 use support::browser::audit_local_page;

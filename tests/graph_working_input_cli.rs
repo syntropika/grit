@@ -9,7 +9,6 @@ use mockito::Server;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-#[allow(dead_code)]
 mod support;
 
 const REPOSITORY: &str = "acme/widgets";
@@ -53,11 +52,15 @@ fn graph_next_and_plan_share_pending_drafts_dependencies_priorities_and_titles()
 
             let draft = graph_node(&graph, &pending.draft_key);
             assert_eq!(draft["title"], "Edited Draft title");
-            assert_eq!(draft["priority"]["comparison"], "p0");
+            assert_eq!(draft["priority"]["state"], "unspecified");
             assert!(draft["common"]["number"].is_null());
             assert_eq!(draft["common"]["temporary_id"], pending.temporary_id);
             assert_eq!(draft["common"]["provenance"]["state"], "pending");
             assert_eq!(draft["url"], "");
+            assert_eq!(
+                graph_node(&graph, "acme/widgets#2")["priority"]["comparison"],
+                "p0"
+            );
             assert_eq!(graph_node(&graph, "acme/widgets#1")["title"], PRIVATE_TITLE);
             assert_eq!(
                 graph_node(&graph, "acme/widgets#1")["priority"]["comparison"],
@@ -86,7 +89,7 @@ fn graph_next_and_plan_share_pending_drafts_dependencies_priorities_and_titles()
                     .find(|issue| issue["key"] == pending.draft_key)
                     .unwrap();
                 assert!(draft["number"].is_null());
-                assert_eq!(draft["priority"]["comparison"], "p0");
+                assert_eq!(draft["priority"]["state"], "unspecified");
             }
             assert_private_text_excluded(&graph);
 
@@ -268,7 +271,7 @@ impl Fixture {
         ]);
         let draft_key = created["draft"]["key"].as_str().unwrap().to_owned();
         let temporary_id = created["draft"]["temporary_id"].clone();
-        self.queue(&["update", &draft_key, "--priority", "p0", "--json"]);
+        self.queue(&["update", "acme/widgets#2", "--priority", "p0", "--json"]);
         self.queue(&[
             "update",
             &draft_key,
