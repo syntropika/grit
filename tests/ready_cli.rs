@@ -187,6 +187,7 @@ fn ready_command(state: &TempDir, api_url: &str, assignee: Option<&str>) -> Comm
 }
 
 struct RepositoryMocks {
+    labels: Mock,
     issues: Mock,
     comments: Mock,
     dependencies: Vec<Mock>,
@@ -194,6 +195,7 @@ struct RepositoryMocks {
 }
 
 struct DeltaMocks {
+    labels: Mock,
     issues: Mock,
     comments: Mock,
     events: Mock,
@@ -202,6 +204,7 @@ struct DeltaMocks {
 
 impl DeltaMocks {
     fn assert(self) {
+        self.labels.assert();
         self.issues.assert();
         self.comments.assert();
         self.events.assert();
@@ -211,6 +214,7 @@ impl DeltaMocks {
 
 impl RepositoryMocks {
     fn assert(self) {
+        self.labels.assert();
         self.issues.assert();
         self.comments.assert();
         for dependency in self.dependencies {
@@ -227,6 +231,15 @@ fn mock_repository(
     dependencies: Vec<(u64, String)>,
     expected_calls: usize,
 ) -> RepositoryMocks {
+    let labels_path = format!("/repos/{repository}/labels");
+    let labels = github
+        .mock("GET", labels_path.as_str())
+        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(canonical_labels())
+        .expect(expected_calls)
+        .create();
     let issues_path = format!("/repos/{repository}/issues");
     let issues = github
         .mock("GET", issues_path.as_str())
@@ -277,11 +290,29 @@ fn mock_repository(
         .create();
 
     RepositoryMocks {
+        labels,
         issues,
         comments,
         dependencies,
         events,
     }
+}
+
+fn canonical_labels() -> String {
+    serde_json::to_string(
+        &(0_u64..=4)
+            .map(|priority| {
+                serde_json::json!({
+                    "id": priority + 100,
+                    "node_id": format!("L_{priority}"),
+                    "name": format!("priority:p{priority}"),
+                    "color": "123456",
+                    "description": null
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
+    .expect("canonical labels")
 }
 
 fn mock_unchanged_delta(
@@ -291,6 +322,14 @@ fn mock_unchanged_delta(
     issue_inventory: String,
     issue_count: u64,
 ) -> DeltaMocks {
+    let labels_path = format!("/repos/{repository}/labels");
+    let labels = github
+        .mock("GET", labels_path.as_str())
+        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(canonical_labels())
+        .create();
     let issues_path = format!("/repos/{repository}/issues");
     let issues = github
         .mock("GET", issues_path.as_str())
@@ -320,6 +359,7 @@ fn mock_unchanged_delta(
     let count = support::mock_issue_count(github, issue_count);
 
     DeltaMocks {
+        labels,
         issues,
         comments,
         events,

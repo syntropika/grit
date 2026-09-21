@@ -7,6 +7,7 @@ mod support;
 #[test]
 fn relationship_events_update_the_graph_without_issue_timestamp_changes() {
     let mut github = Server::new();
+    let labels = mock_labels(&mut github, 2);
     let state = TempDir::new().expect("temporary state directory");
     let one = issue(1, "First");
     let two = issue(2, "Second");
@@ -95,11 +96,13 @@ fn relationship_events_update_the_graph_without_issue_timestamp_changes() {
     assert_eq!(replica["dependencies"][0]["blocked"]["number"], 3);
     assert_eq!(replica["dependencies"][0]["blocker"]["number"], 1);
     assert_eq!(replica["sync"]["dependency_events"]["latest_event_id"], 102);
+    labels.assert();
 }
 
 #[test]
 fn a_missing_event_checkpoint_repairs_the_graph_with_full_reconciliation() {
     let mut github = Server::new();
+    let labels = mock_labels(&mut github, 2);
     let state = TempDir::new().expect("temporary state directory");
     let one = issue(1, "First");
     let two = issue(2, "Second");
@@ -167,11 +170,13 @@ fn a_missing_event_checkpoint_repairs_the_graph_with_full_reconciliation() {
     assert_eq!(replica["dependencies"][0]["blocked"]["number"], 2);
     assert_eq!(replica["dependencies"][0]["blocker"]["number"], 1);
     assert_eq!(replica["sync"]["dependency_events"]["latest_event_id"], 200);
+    labels.assert();
 }
 
 #[test]
 fn mirrored_removal_events_delete_one_canonical_dependency() {
     let mut github = Server::new();
+    let labels = mock_labels(&mut github, 2);
     let state = TempDir::new().expect("temporary state directory");
     let one = issue(1, "First");
     let two = issue(2, "Second");
@@ -228,11 +233,13 @@ fn mirrored_removal_events_delete_one_canonical_dependency() {
             .expect("Dependencies")
             .is_empty()
     );
+    labels.assert();
 }
 
 #[test]
 fn opposite_same_second_events_replay_in_feed_chronology_not_event_id_order() {
     let mut github = Server::new();
+    let labels = mock_labels(&mut github, 2);
     let state = TempDir::new().expect("temporary state directory");
     let one = issue(1, "First");
     let two = issue(2, "Second");
@@ -283,11 +290,13 @@ fn opposite_same_second_events_replay_in_feed_chronology_not_event_id_order() {
             .is_empty()
     );
     assert_eq!(replica["sync"]["dependency_events"]["latest_event_id"], 7);
+    labels.assert();
 }
 
 #[test]
 fn an_unsupported_structural_event_forces_full_reconciliation() {
     let mut github = Server::new();
+    let labels = mock_labels(&mut github, 2);
     let state = TempDir::new().expect("temporary state directory");
     let one = issue(1, "First");
     let initial = mock_full(
@@ -338,11 +347,13 @@ fn an_unsupported_structural_event_forces_full_reconciliation() {
         support::load_replica(&state, "acme/widgets")["sync"]["dependency_events"]["latest_event_id"],
         101
     );
+    labels.assert();
 }
 
 #[test]
 fn a_remote_issue_count_drop_reconciles_a_deletion_missing_from_delta_feeds() {
     let mut github = Server::new();
+    let labels = mock_labels(&mut github, 2);
     let state = TempDir::new().expect("temporary state directory");
     let one = issue(1, "Survives");
     let two = issue(2, "Deleted remotely");
@@ -387,11 +398,13 @@ fn a_remote_issue_count_drop_reconciles_a_deletion_missing_from_delta_feeds() {
     let replica = support::load_replica(&state, "acme/widgets");
     assert_eq!(replica["issues"].as_array().expect("Issues").len(), 1);
     assert!(replica_issue(&replica, 2).is_none());
+    labels.assert();
 }
 
 #[test]
 fn an_empty_event_feed_without_an_id_anchor_reconciles_fully_again() {
     let mut github = Server::new();
+    let labels = mock_labels(&mut github, 2);
     let state = TempDir::new().expect("temporary state directory");
     let one = issue(1, "No event history");
     let initial = mock_full(
@@ -420,6 +433,7 @@ fn an_empty_event_feed_without_an_id_anchor_reconciles_fully_again() {
             .expect("unanchored reconciliation"),
     );
     reconciled.assert();
+    labels.assert();
 }
 
 struct FullMocks {
@@ -613,4 +627,15 @@ fn replica_issue(replica: &Value, number: u64) -> Option<&Value> {
         .expect("Issues")
         .iter()
         .find(|issue| issue["number"] == number)
+}
+
+fn mock_labels(github: &mut Server, expected_calls: usize) -> Mock {
+    github
+        .mock("GET", "/repos/acme/widgets/labels")
+        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("[]")
+        .expect(expected_calls)
+        .create()
 }

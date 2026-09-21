@@ -12,6 +12,7 @@ const INITIAL_WATERMARK: &str = "2026-08-02T11:00:00Z";
 #[test]
 fn incremental_sync_upserts_old_and_new_issues_with_every_ordinary_change() {
     let mut github = Server::new();
+    let labels = mock_labels(&mut github, 3);
     let state = TempDir::new().expect("temporary state directory");
     let initial_issue = issue(
         7,
@@ -156,11 +157,13 @@ fn incremental_sync_upserts_old_and_new_issues_with_every_ordinary_change() {
             .len(),
         1
     );
+    labels.assert();
 }
 
 #[test]
 fn unchanged_sync_uses_only_safe_query_scoped_conditional_requests() {
     let mut github = Server::new();
+    let labels = mock_labels(&mut github, 3);
     let state = TempDir::new().expect("temporary state directory");
     let initial_issue = issue(7, "open", "Stable Issue", "No changes", INITIAL_WATERMARK);
     let initial = mock_initial(&mut github, vec![initial_issue.clone()], &[7]);
@@ -236,11 +239,13 @@ fn unchanged_sync_uses_only_safe_query_scoped_conditional_requests() {
         replica["sync"]["ordinary_issues"]["watermark"],
         initial_watermark
     );
+    labels.assert();
 }
 
 #[test]
 fn a_paginated_etag_is_not_reused_as_a_global_continuity_signal() {
     let mut github = Server::new();
+    let labels = mock_labels(&mut github, 3);
     let state = TempDir::new().expect("temporary state directory");
     let initial_issue = issue(7, "open", "Stable Issue", "No changes", INITIAL_WATERMARK);
     let initial = mock_initial(&mut github, vec![initial_issue.clone()], &[7]);
@@ -330,11 +335,13 @@ fn a_paginated_etag_is_not_reused_as_a_global_continuity_signal() {
     next_comments.assert();
     events.assert();
     count.assert();
+    labels.assert();
 }
 
 #[test]
 fn interrupted_incremental_pagination_preserves_the_complete_replica_and_cursor() {
     let mut github = Server::new();
+    let labels = mock_labels(&mut github, 2);
     let state = TempDir::new().expect("temporary state directory");
     let initial = mock_initial(
         &mut github,
@@ -390,6 +397,7 @@ fn interrupted_incremental_pagination_preserves_the_complete_replica_and_cursor(
     assert_eq!(fs::read(&replica_path).expect("preserved replica"), before);
     first_page.assert();
     failed_page.assert();
+    labels.assert();
 }
 
 struct InitialMocks {
@@ -599,4 +607,15 @@ fn replica_issue(replica: &Value, number: u64) -> &Value {
         .iter()
         .find(|issue| issue["number"] == number)
         .expect("Issue in replica")
+}
+
+fn mock_labels(github: &mut Server, expected_calls: usize) -> Mock {
+    github
+        .mock("GET", "/repos/acme/widgets/labels")
+        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("[]")
+        .expect(expected_calls)
+        .create()
 }

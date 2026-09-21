@@ -5,12 +5,13 @@ use crate::{
     github::{CommentChange, ConditionalPages, DependencyEventWindow, GitHubClient, GitHubError},
     model::{
         BlockerIdentity, BlockerScope, Dependency, DependencyEventCheckpoint, Issue, IssueIdentity,
-        LocalReplica, OrdinaryIssueCursor, SyncMetadata, Watermark,
+        Label, LocalReplica, OrdinaryIssueCursor, SyncMetadata, Watermark,
     },
     repository::Repository,
 };
 
 pub(crate) struct RepositoryData {
+    pub(crate) labels: Vec<Label>,
     pub(crate) issues: Vec<Issue>,
     pub(crate) dependencies: Vec<Dependency>,
     pub(crate) sync: SyncMetadata,
@@ -21,14 +22,18 @@ pub(crate) fn refresh_repository(
     repository: &Repository,
     previous: Option<&LocalReplica>,
 ) -> Result<RepositoryData, GitHubError> {
-    if let Some(previous) = previous
+    let labels = client.fetch_labels(repository)?;
+    let mut data = if let Some(previous) = previous
         && let Some(cursor) = previous.sync.ordinary_issues.as_ref()
         && let Some(dependency_checkpoint) = previous.sync.dependency_events.as_ref()
         && dependency_checkpoint.latest_event_id.is_some()
     {
-        return refresh_incremental(client, repository, previous, cursor, dependency_checkpoint);
-    }
-    refresh_full(client, repository)
+        refresh_incremental(client, repository, previous, cursor, dependency_checkpoint)?
+    } else {
+        refresh_full(client, repository)?
+    };
+    data.labels = labels;
+    Ok(data)
 }
 
 fn refresh_full(
@@ -48,6 +53,7 @@ fn refresh_full(
         );
     }
     Ok(RepositoryData {
+        labels: Vec::new(),
         issues,
         dependencies: dependencies.into_values().collect(),
         sync: SyncMetadata {
@@ -153,6 +159,7 @@ fn refresh_incremental(
     let watermark_advanced = watermark != cursor.watermark;
 
     Ok(RepositoryData {
+        labels: Vec::new(),
         issues,
         dependencies: dependencies.into_values().collect(),
         sync: SyncMetadata {
