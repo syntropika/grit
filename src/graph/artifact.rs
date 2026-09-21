@@ -341,11 +341,18 @@ pub(super) fn build(
 ) -> Result<GraphArtifact, GraphError> {
     let prepared = PreparedRepository::prepare(replica);
     let ranking::AnalysisBundle {
-        next,
+        run,
         ready,
         candidate_unlock_counts: unlock_counts,
         pagerank_buckets,
-    } = ranking::analyze_prepared_bundle(&prepared, scope, horizon);
+    } = ranking::analyze_prepared_bundle(
+        &prepared,
+        scope,
+        horizon,
+        &[],
+        &mut ranking::RankingCache::default(),
+    );
+    let next = run.analysis;
     let ready_numbers: BTreeSet<_> = ready.ready.iter().map(|issue| issue.number).collect();
     let effective_input_hash = next.input_hash().to_owned();
     let decision = next.clone().into_plan_decision();

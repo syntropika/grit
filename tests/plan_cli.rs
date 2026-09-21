@@ -53,15 +53,16 @@ fn plan_reuses_next_decision_and_ready_execution_frontier() {
     mocks.assert();
     drop(github);
 
+    let plan = grit_command(&state, &api_url, "plan")
+        .output()
+        .expect("offline grit plan");
     let next = grit_command(&state, &api_url, "next")
+        .arg("--profile")
         .output()
         .expect("offline grit next");
     let ready = grit_command(&state, &api_url, "ready")
         .output()
         .expect("offline grit ready");
-    let plan = grit_command(&state, &api_url, "plan")
-        .output()
-        .expect("offline grit plan");
     assert_success(&next);
     assert_success(&ready);
     assert_success(&plan);
@@ -72,13 +73,29 @@ fn plan_reuses_next_decision_and_ready_execution_frontier() {
     assert_eq!(plan["schema_version"], "grit.plan/v1");
     assert_eq!(plan["policy_version"], "next/v1");
     assert_eq!(plan["command"], "plan");
-    assert_eq!(plan["decision"]["input_hash"], next["input_hash"]);
-    assert_eq!(plan["decision"]["mode"], next["mode"]);
-    assert_eq!(plan["decision"]["recommendation"], next["recommendation"]);
-    assert_eq!(
-        plan["decision"]["comparison_to_runner_up"],
-        next["comparison_to_runner_up"]
-    );
+    assert_eq!(next["performance"]["cache_hit"], true);
+    for field in [
+        "input_hash",
+        "mode",
+        "metrics",
+        "recommendation",
+        "comparison_to_runner_up",
+        "close_call",
+        "search_complete",
+        "truncated_by",
+        "global_optimum_claimed",
+        "runner_up_scope",
+        "summary",
+        "work",
+    ] {
+        assert_eq!(plan["decision"][field], next[field], "shared {field}");
+    }
+    for field in ["horizon", "state_budget", "pagerank"] {
+        assert_eq!(
+            plan["decision"]["parameters"][field], next["parameters"][field],
+            "shared parameter {field}"
+        );
+    }
     assert!(plan["decision"].get("alternatives").is_none());
     assert!(
         plan["decision"]["parameters"]
