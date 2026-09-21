@@ -19,6 +19,7 @@ use crate::{
         present_canonical_labels,
     },
     priority_update::{self, PriorityUpdateError},
+    ranking::{self, NextAnalysis},
     replica_sync::{self, ReplicaSyncError},
     repository::{IssueReference, IssueReferenceError, Repository, RepositoryError},
     store::{ReplicaStore, StoreError},
@@ -42,6 +43,21 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Recommend the best executable first step under next/v1.
+    Next {
+        /// Repository in OWNER/REPO form.
+        #[arg(long)]
+        repo: String,
+        /// Select Ready work assigned to this GitHub login.
+        #[arg(long)]
+        assignee: Option<String>,
+        /// Number of completions to evaluate; this slice implements exactly one.
+        #[arg(long, default_value_t = ranking::HORIZON)]
+        horizon: u8,
+        /// Emit versioned machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
     /// Surface actionable operational graph problems.
     Triage {
         /// Repository in OWNER/REPO form.
@@ -134,6 +150,17 @@ enum Command {
 pub(crate) fn execute() -> Result<(), CliError> {
     let cli = Cli::parse();
     match cli.command {
+        Command::Next {
+            repo,
+            assignee,
+            horizon,
+            json,
+        } => next(
+            &Repository::parse(&repo)?,
+            assignee.as_deref(),
+            horizon,
+            json,
+        ),
         Command::Triage {
             repo,
             assignee,
@@ -330,6 +357,52 @@ fn sync(repository: &Repository, json: bool) -> Result<(), CliError> {
     Ok(())
 }
 
+fn next(
+    repository: &Repository,
+    assignee: Option<&str>,
+    horizon: u8,
+    json: bool,
+) -> Result<(), CliError> {
+    if horizon != ranking::HORIZON {
+        return Err(CliError::UnsupportedNextHorizon(horizon));
+    }
+    let (replica, source) = refresh_or_local(repository)?;
+    let scope = assignee
+        .map(ExecutionScope::Assignee)
+        .unwrap_or(ExecutionScope::Available);
+    let analysis = ranking::analyze(&replica, scope);
+    let warnings = analysis_warnings(&replica, source);
+    if json {
+        let output = NextOutput {
+            schema_version: ranking::OUTPUT_SCHEMA_VERSION,
+            policy_version: ranking::POLICY_VERSION,
+            command: "next",
+            repository: &replica.repository,
+            source,
+            synced_at: &replica.synced_at,
+            replica_snapshot_hash: &replica.input_hash,
+            execution_scope: execution_scope_output(assignee),
+            analysis,
+            warnings,
+        };
+        serde_json::to_writer(std::io::stdout().lock(), &output).map_err(CliError::EncodeOutput)?;
+        println!();
+    } else {
+        println!(
+            "next/v1 recommendation in {} (synced_at {}):",
+            replica.repository, replica.synced_at
+        );
+        match analysis.recommendation() {
+            Some(recommendation) => println!("{}", recommendation.human_summary()),
+            None => println!("{}", analysis.summary().human_empty_summary()),
+        }
+        for warning in &warnings {
+            print_warning(warning);
+        }
+    }
+    Ok(())
+}
+
 fn synchronize(repository: &Repository) -> Result<LocalReplica, CliError> {
     let store = ReplicaStore::discover(repository)?;
     let previous = match store.load(repository) {
@@ -451,42 +524,7 @@ fn ready(repository: &Repository, assignee: Option<&str>, json: bool) -> Result<
         .map(ExecutionScope::Assignee)
         .unwrap_or(ExecutionScope::Available);
     let analysis = analyze_ready(&replica, scope);
-    let mut warnings = Vec::new();
-    if let Some(repository_labels) = replica.repository_labels.as_deref() {
-        let missing_labels: Vec<_> = missing_canonical_labels(repository_labels)
-            .into_iter()
-            .map(str::to_owned)
-            .collect();
-        if !missing_labels.is_empty() {
-            warnings.push(ReadyWarning {
-                code: "missing_priority_labels",
-                message: "Repository is missing canonical Priority labels".to_owned(),
-                issue_number: None,
-                labels: missing_labels,
-            });
-        }
-    }
-    for issue in replica
-        .issues
-        .iter()
-        .filter(|issue| issue.state.eq_ignore_ascii_case("open"))
-    {
-        let priority = PriorityState::from_issue_labels(&issue.labels);
-        if let Some(labels) = priority.conflict_labels() {
-            warnings.push(ReadyWarning {
-                code: "priority_conflict",
-                message: format!(
-                    "Issue #{} has multiple canonical Priority labels",
-                    issue.number
-                ),
-                issue_number: Some(issue.number),
-                labels: labels.to_vec(),
-            });
-        }
-    }
-    if let Some(warning) = source.warning() {
-        warnings.push(warning);
-    }
+    let warnings = analysis_warnings(&replica, source);
     let issues: Vec<_> = analysis
         .executable
         .iter()
@@ -539,15 +577,7 @@ fn ready(repository: &Repository, assignee: Option<&str>, json: bool) -> Result<
             );
         }
         for warning in &output.warnings {
-            if warning.labels.is_empty() {
-                eprintln!("warning: {}", warning.message);
-            } else {
-                eprintln!(
-                    "warning: {} ({})",
-                    warning.message,
-                    warning.labels.join(", ")
-                );
-            }
+            print_warning(warning);
         }
     }
     Ok(())
@@ -569,6 +599,46 @@ fn refresh_or_local(repository: &Repository) -> Result<(LocalReplica, ReplicaSou
     }
 }
 
+fn analysis_warnings(replica: &LocalReplica, source: ReplicaSource) -> Vec<ReadyWarning> {
+    let mut warnings = Vec::new();
+    if let Some(repository_labels) = replica.repository_labels.as_deref() {
+        let missing_labels: Vec<_> = missing_canonical_labels(repository_labels)
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        if !missing_labels.is_empty() {
+            warnings.push(ReadyWarning {
+                code: "missing_priority_labels",
+                message: "Repository is missing canonical Priority labels".to_owned(),
+                issue_number: None,
+                labels: missing_labels,
+            });
+        }
+    }
+    for issue in replica
+        .issues
+        .iter()
+        .filter(|issue| issue.state.eq_ignore_ascii_case("open"))
+    {
+        let priority = PriorityState::from_issue_labels(&issue.labels);
+        if let Some(labels) = priority.conflict_labels() {
+            warnings.push(ReadyWarning {
+                code: "priority_conflict",
+                message: format!(
+                    "Issue #{} has multiple canonical Priority labels",
+                    issue.number
+                ),
+                issue_number: Some(issue.number),
+                labels: labels.to_vec(),
+            });
+        }
+    }
+    if let Some(warning) = source.warning() {
+        warnings.push(warning);
+    }
+    warnings
+}
+
 fn execution_scope_output(assignee: Option<&str>) -> ExecutionScopeOutput<'_> {
     match assignee {
         Some(assignee) => ExecutionScopeOutput {
@@ -579,6 +649,18 @@ fn execution_scope_output(assignee: Option<&str>) -> ExecutionScopeOutput<'_> {
             mode: "available",
             assignee: None,
         },
+    }
+}
+
+fn print_warning(warning: &ReadyWarning) {
+    if warning.labels.is_empty() {
+        eprintln!("warning: {}", warning.message);
+    } else {
+        eprintln!(
+            "warning: {} ({})",
+            warning.message,
+            warning.labels.join(", ")
+        );
     }
 }
 
@@ -684,6 +766,21 @@ struct TriageOutput<'a> {
     execution_scope: ExecutionScopeOutput<'a>,
     #[serde(flatten)]
     report: TriageReport,
+    warnings: Vec<ReadyWarning>,
+}
+
+#[derive(Serialize)]
+struct NextOutput<'a> {
+    schema_version: &'static str,
+    policy_version: &'static str,
+    command: &'static str,
+    repository: &'a str,
+    source: ReplicaSource,
+    synced_at: &'a str,
+    replica_snapshot_hash: &'a str,
+    execution_scope: ExecutionScopeOutput<'a>,
+    #[serde(flatten)]
+    analysis: NextAnalysis,
     warnings: Vec<ReadyWarning>,
 }
 
@@ -846,6 +943,8 @@ pub(crate) enum CliError {
     Graph(#[from] GraphError),
     #[error("could not encode command JSON output: {0}")]
     EncodeOutput(serde_json::Error),
+    #[error("this implementation supports only next/v1 horizon 1, not horizon {0}")]
+    UnsupportedNextHorizon(u8),
     #[error("GitHub refresh failed ({refresh}); no valid Local replica is available ({replica})")]
     RefreshAndReplicaUnavailable { refresh: String, replica: String },
     #[error(

@@ -7,7 +7,8 @@ replica so later analysis can be fast and work offline.
 Grit supports full and incremental synchronization, Dependency-event continuity,
 Executable frontier enumeration, canonical Declared priority initialization,
 native Dependency mutations, Declared priority updates, and deterministic
-static graph artifacts, with actionable triage diagnostics.
+static graph artifacts, with actionable triage diagnostics and exact horizon-one
+next-work recommendations.
 
 ## Build and test
 
@@ -114,6 +115,28 @@ If GitHub cannot be reached, `ready` uses the latest valid Local replica and
 reports its unchanged `synced_at`. A replica is accepted only when its schema,
 Repository scope, timestamp, and deterministic content hash validate. If no
 valid replica exists, the command fails instead of inventing an empty graph.
+
+## Recommend the next Issue
+
+`grit next` evaluates every Issue in the active Executable frontier exactly at
+horizon one:
+
+```bash
+grit next --repo OWNER/REPO --horizon 1
+grit next --repo OWNER/REPO --assignee LOGIN --horizon 1 --json
+```
+
+The `next/v1` policy first enforces Executable P0 and one-step P0-route gates.
+It then compares real AND-aware Unlock sets, downstream Priority composition,
+the first step's Declared priority, a quantized PageRank tie-break, and finally
+the Stable node key. It never recommends blocked or out-of-scope work.
+
+Robot output reports both snapshot and effective-input hashes, metric states,
+the global runner-up comparison, structured reasons, and whether the result is
+a close structural tie. If no Issue is Executable, the command succeeds with a
+null recommendation and categorized blocker counts. Like `ready`, it attempts
+a pull Synchronization and falls back to the latest valid Local replica without
+mutating GitHub.
 
 ## Triage graph problems
 

@@ -7,6 +7,7 @@ mod model;
 mod operational;
 mod priority;
 mod priority_update;
+mod ranking;
 mod replica_sync;
 mod repository;
 mod store;
