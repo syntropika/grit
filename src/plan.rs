@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use serde::Serialize;
 
 use crate::{
-    model::Issue,
+    model::{Issue, StableNodeKey, TemporaryIssueId},
     operational::{BlockerResolution, ExecutionScope, OperationalGraph, PreparedRepository},
     priority::PriorityState,
     working_graph::{PendingProvenance, WorkingGraph},
@@ -18,7 +18,13 @@ pub(crate) struct StructuralPlan<'a> {
 pub(crate) struct PlanIssue<'a> {
     #[serde(flatten)]
     provenance: PendingProvenance,
-    pub(crate) number: u64,
+    pub(crate) key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    number: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temporary_id: Option<TemporaryIssueId>,
+    #[serde(skip)]
+    ordering_key: StableNodeKey,
     pub(crate) url: &'a str,
     pub(crate) title: &'a str,
     pub(crate) ready_now: bool,
@@ -27,6 +33,14 @@ pub(crate) struct PlanIssue<'a> {
     pub(crate) executable: bool,
     pub(crate) priority: PriorityState,
     pub(crate) assignees: Vec<&'a str>,
+}
+
+impl PlanIssue<'_> {
+    pub(crate) fn display_reference(&self) -> String {
+        self.number
+            .map(|number| format!("#{number}"))
+            .unwrap_or_else(|| self.key.clone())
+    }
 }
 
 #[derive(Serialize)]
@@ -55,7 +69,7 @@ impl DependencyLayers<'_> {
                         } else {
                             "outside execution scope"
                         };
-                        format!("#{} ({eligibility})", issue.number)
+                        format!("{} ({eligibility})", issue.display_reference())
                     })
                     .collect::<Vec<_>>()
                     .join(", ");
@@ -66,7 +80,7 @@ impl DependencyLayers<'_> {
             let issues = self
                 .unresolved
                 .iter()
-                .map(|entry| format!("#{}", entry.issue.number))
+                .map(|entry| entry.issue.display_reference())
                 .collect::<Vec<_>>()
                 .join(", ");
             lines.push(format!("unresolved: {issues}"));
@@ -186,9 +200,12 @@ fn dependency_layers<'a>(
     }
     let layers = by_layer
         .into_iter()
-        .map(|(index, issues)| DependencyLayer { index, issues })
+        .map(|(index, mut issues)| {
+            issues.sort_by_key(|issue| issue.ordering_key);
+            DependencyLayer { index, issues }
+        })
         .collect();
-    let unresolved = unresolved
+    let mut unresolved: Vec<_> = unresolved
         .into_iter()
         .filter_map(|(number, reasons)| {
             graph.issue(number).map(|issue| UnresolvedIssue {
@@ -198,6 +215,7 @@ fn dependency_layers<'a>(
         })
         .collect();
 
+    unresolved.sort_by_key(|entry| entry.issue.ordering_key);
     DependencyLayers {
         interpretation: "counterfactual_dependency_layers",
         layers,
@@ -263,7 +281,10 @@ fn plan_issue<'a>(
     let execution_scope_eligible = scope.contains(issue);
     PlanIssue {
         provenance: working.ranking_provenance_for_issues([issue.number]),
-        number: issue.number,
+        key: issue.display_key(&working.replica().repository),
+        number: (!issue.is_draft()).then_some(issue.number),
+        temporary_id: issue.temporary_id(),
+        ordering_key: issue.stable_node_key(),
         url: &issue.url,
         title: &issue.title,
         ready_now,

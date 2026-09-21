@@ -138,11 +138,12 @@ impl<'a> OperationalGraph<'a> {
             .iter()
             .map(|(number, issue)| (*number, IssueState::parse(&issue.state)))
             .collect();
-        let open_numbers: Vec<_> = issue_states
+        let mut open_numbers: Vec<_> = issue_states
             .iter()
             .filter(|(_, state)| **state == IssueState::Open)
             .map(|(number, _)| *number)
             .collect();
+        open_numbers.sort_by_key(|number| issues[number].stable_node_key());
         let open_index = open_numbers
             .iter()
             .enumerate()
@@ -191,6 +192,9 @@ impl<'a> OperationalGraph<'a> {
                 .entry(*blocker)
                 .or_default()
                 .push(*blocked);
+        }
+        for dependents in dependents_by_blocker.values_mut() {
+            dependents.sort_by_key(|number| issues[number].stable_node_key());
         }
         (
             Self {
@@ -302,7 +306,7 @@ impl<'a> OperationalGraph<'a> {
             .filter(|number| self.is_ready(**number))
             .filter_map(|number| self.issue(*number))
             .collect();
-        ready.sort_by_key(|issue| issue.number);
+        ready.sort_by_key(|issue| issue.stable_node_key());
         let assigned_ready_count = ready
             .iter()
             .filter(|issue| !issue.assignees.is_empty())

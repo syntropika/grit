@@ -421,6 +421,7 @@ fn search_signature(result: &SearchResult<'_>) -> SearchSignature {
 
 fn issue(number: u64, p0: bool) -> crate::model::Issue {
     crate::model::Issue {
+        identity: crate::model::IssueIdentityState::GitHub,
         id: number,
         node_id: format!("I_{number}"),
         number,

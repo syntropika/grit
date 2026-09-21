@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use reqwest::{
     StatusCode,
@@ -19,6 +19,7 @@ use crate::{
         Actor, BlockerIdentity, BlockerScope, Comment, Dependency, EntityTag, Issue, IssueIdentity,
         Label,
     },
+    operation_marker,
     repository::{IssueReference, Repository},
 };
 
@@ -27,6 +28,14 @@ const API_VERSION: &str = "2026-03-10";
 pub(crate) struct GitHubClient {
     client: Client,
     base_url: Url,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CreatedIssueIdentity {
+    pub(crate) id: u64,
+    pub(crate) node_id: String,
+    pub(crate) number: u64,
+    pub(crate) url: String,
 }
 
 pub(crate) enum LabelCreation {
@@ -44,6 +53,12 @@ pub(crate) struct CreateLabelRequest<'a> {
 #[derive(Serialize)]
 struct AddIssueLabelsRequest<'a> {
     labels: &'a [String],
+}
+
+#[derive(Serialize)]
+struct CreateIssueRequest<'a> {
+    title: &'a str,
+    body: String,
 }
 
 impl<'a> CreateLabelRequest<'a> {
@@ -318,6 +333,100 @@ impl GitHubClient {
             )));
         }
         Ok(issue.normalize())
+    }
+
+    pub(crate) fn create_issue(
+        &self,
+        repository: &Repository,
+        title: &str,
+        body: &str,
+        marker: &str,
+    ) -> Result<CreatedIssueIdentity, GitHubError> {
+        let url = self.endpoint(&format!(
+            "repos/{}/{}/issues",
+            repository.owner(),
+            repository.name()
+        ))?;
+        let response = self
+            .client
+            .post(url)
+            .json(&CreateIssueRequest {
+                title,
+                body: operation_marker::embed(body, marker),
+            })
+            .send()
+            .map_err(|source| GitHubError::MutationUncertain {
+                operation: "creating the Draft Issue",
+                source,
+            })?;
+        let status = response.status();
+        if status != StatusCode::CREATED {
+            return Err(mutation_status_error(
+                status,
+                response.headers(),
+                "creating the Draft Issue",
+            ));
+        }
+        let issue: GitHubCreatedIssue = response.json().map_err(GitHubError::Decode)?;
+        if issue.pull_request.is_some() {
+            return Err(GitHubError::IssueIdentityMismatch);
+        }
+        Ok(CreatedIssueIdentity {
+            id: issue.id,
+            node_id: issue.node_id,
+            number: issue.number,
+            url: issue.html_url,
+        })
+    }
+
+    pub(crate) fn find_issues_with_markers(
+        &self,
+        repository: &Repository,
+        markers: &BTreeSet<String>,
+    ) -> Result<BTreeMap<String, Vec<CreatedIssueIdentity>>, GitHubError> {
+        if markers.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let url = self.endpoint(&format!(
+            "repos/{}/{}/issues",
+            repository.owner(),
+            repository.name()
+        ))?;
+        let issues: Vec<GitHubIssue> = self.paginate(
+            url,
+            &[
+                ("state", "all"),
+                ("sort", "created"),
+                ("direction", "asc"),
+                ("per_page", "100"),
+            ],
+        )?;
+        let mut matches = BTreeMap::<String, Vec<CreatedIssueIdentity>>::new();
+        for issue in issues
+            .into_iter()
+            .filter(|issue| issue.pull_request.is_none())
+        {
+            let identity = CreatedIssueIdentity {
+                id: issue.id,
+                node_id: issue.node_id,
+                number: issue.number,
+                url: issue.html_url,
+            };
+            for marker in issue
+                .body
+                .as_deref()
+                .into_iter()
+                .flat_map(operation_marker::values)
+            {
+                if markers.contains(marker) {
+                    matches
+                        .entry(marker.to_owned())
+                        .or_default()
+                        .push(identity.clone());
+                }
+            }
+        }
+        Ok(matches)
     }
 
     pub(crate) fn add_issue_label(
@@ -983,6 +1092,15 @@ struct GitHubIssueLocator {
     pull_request: Option<serde_json::Value>,
 }
 
+#[derive(Deserialize)]
+struct GitHubCreatedIssue {
+    id: u64,
+    node_id: String,
+    number: u64,
+    html_url: String,
+    pull_request: Option<serde_json::Value>,
+}
+
 impl GitHubIssue {
     fn normalize(self) -> Issue {
         let mut assignees: Vec<_> = self
@@ -998,12 +1116,13 @@ impl GitHubIssue {
             .collect();
         labels.sort();
         Issue {
+            identity: crate::model::IssueIdentityState::GitHub,
             id: self.id,
             node_id: self.node_id,
             number: self.number,
             url: self.html_url,
             title: self.title,
-            body: self.body.unwrap_or_default(),
+            body: operation_marker::strip(&self.body.unwrap_or_default()),
             state: self.state,
             state_reason: self.state_reason,
             author: self.user.map(GitHubActor::normalize),
@@ -1114,7 +1233,7 @@ impl GitHubComment {
             id: self.id,
             node_id: self.node_id,
             url: self.html_url,
-            body: self.body.unwrap_or_default(),
+            body: operation_marker::strip(&self.body.unwrap_or_default()),
             author: self.user.map(GitHubActor::normalize),
             author_association: self.author_association,
             created_at: self.created_at,

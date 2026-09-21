@@ -170,6 +170,7 @@ fn synthetic_replica(node_count: usize, edge_count: usize) -> LocalReplica {
 
 fn issue(number: u64) -> Issue {
     Issue {
+        identity: crate::model::IssueIdentityState::GitHub,
         id: number,
         node_id: format!("I_{number}"),
         number,

@@ -4,17 +4,21 @@ use serde::Serialize;
 use thiserror::Error;
 
 mod dependency;
+mod issue_create;
 mod priority;
 
 #[cfg(test)]
 use priority::{PendingClassification, classify_priority};
 
 use crate::{
-    github::{DependencyIntent, GitHubClient},
+    draft_identity::{
+        DraftIdentity, DraftIdentityError, DraftIdentityStore, DraftIdentityTransaction,
+    },
+    github::{DependencyIntent, GitHubClient, GitHubError},
     model::{DependencyEdgeKey, DependencyPresence, Issue, LocalReplica},
     outbox::{
-        DependencyMutationState, MutationStateUpdate, OutboxError, OutboxStore, PendingMutation,
-        PriorityMutationState, PriorityWrite,
+        DependencyMutationState, IssueCreateState, MutationKind, MutationStateUpdate, OutboxError,
+        OutboxStore, PendingMutation, PriorityMutationState, PriorityWrite,
     },
     priority::{DeclaredPriority, LogicalPriority, PrioritySelection, PriorityState},
     replica_sync::{self, ReplicaSyncError},
@@ -49,7 +53,10 @@ pub(crate) struct ReconciliationResult {
 #[derive(Clone, Serialize)]
 pub(crate) struct OperationResult {
     pub(crate) id: String,
-    pub(crate) issue_number: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) issue_number: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) temporary_id: Option<crate::model::TemporaryIssueId>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) depends_on: Vec<String>,
     pub(crate) classification: Classification,
@@ -65,6 +72,10 @@ pub(crate) struct OperationResult {
 #[derive(Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum OperationDetails {
+    IssueCreate {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        remote: Option<DraftIssueResult>,
+    },
     PriorityUpdate {
         base: LogicalPriority,
         local: LogicalPriority,
@@ -80,10 +91,22 @@ pub(crate) enum OperationDetails {
 }
 
 #[derive(Clone, Serialize)]
+pub(crate) struct DraftIssueResult {
+    pub(crate) issue_id: u64,
+    pub(crate) issue_node_id: String,
+    pub(crate) issue_number: u64,
+    pub(crate) issue_url: String,
+}
+
+#[derive(Clone, Serialize)]
 pub(crate) struct DependencyEdgeResult {
     pub(crate) blocked_number: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) blocked_temporary_id: Option<crate::model::TemporaryIssueId>,
     pub(crate) blocker_repository: String,
     pub(crate) blocker_number: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) blocker_temporary_id: Option<crate::model::TemporaryIssueId>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq, Serialize)]
@@ -159,12 +182,32 @@ pub(crate) fn reconcile(
     let outbox_store = OutboxStore::discover(repository)?;
     let mut transaction = outbox_store.begin_transaction(repository)?;
     let preflight = replica_sync::fetch(client, repository)?;
+    let identity_store = DraftIdentityStore::discover(repository)?;
+    let mut identity_transaction = identity_store.begin_transaction(repository)?;
+    let markers_to_recover: BTreeSet<_> = transaction
+        .operations()
+        .iter()
+        .filter(|operation| {
+            matches!(
+                operation.issue_create_state(),
+                Some(IssueCreateState::AwaitingMarker { .. })
+            )
+        })
+        .filter_map(|operation| {
+            operation
+                .issue_create_view()
+                .map(|create| create.marker.to_owned())
+        })
+        .collect();
+    let marker_matches = client.find_issues_with_markers(repository, &markers_to_recover)?;
     let pass = ReconciliationPass {
         client,
         repository,
         transaction: &mut transaction,
         remote: priority::remote_priorities(&preflight),
         remote_dependencies: dependency::remote_dependencies(&preflight),
+        identity_transaction: &mut identity_transaction,
+        marker_matches,
         results: Vec::new(),
         requires_final_refresh: false,
     }
@@ -193,17 +236,19 @@ pub(crate) fn reconcile(
     })
 }
 
-struct ReconciliationPass<'client, 'transaction, 'store> {
+struct ReconciliationPass<'client, 'transaction, 'store, 'identity> {
     client: &'client GitHubClient,
     repository: &'client Repository,
     transaction: &'transaction mut crate::outbox::OutboxTransaction<'store>,
     remote: BTreeMap<u64, RemotePriority>,
     remote_dependencies: BTreeSet<DependencyEdgeKey>,
+    identity_transaction: &'identity mut DraftIdentityTransaction<'identity>,
+    marker_matches: BTreeMap<String, Vec<crate::github::CreatedIssueIdentity>>,
     results: Vec<OperationResult>,
     requires_final_refresh: bool,
 }
 
-impl ReconciliationPass<'_, '_, '_> {
+impl ReconciliationPass<'_, '_, '_, '_> {
     fn run(mut self) -> Result<PassResult, ReconciliationError> {
         let operation_ids: Vec<_> = self
             .transaction
@@ -228,10 +273,19 @@ impl ReconciliationPass<'_, '_, '_> {
             .expect("operation ID came from this transaction")
             .clone();
         let blocked_by = self.blocking_dependencies(&operation);
-        if let Some((edge, desired)) = operation.dependency_values() {
-            self.reconcile_dependency_operation(&operation, edge.clone(), desired, blocked_by)
-        } else {
-            self.reconcile_priority_operation(&operation, blocked_by)
+        match operation.kind() {
+            MutationKind::IssueCreate => {
+                self.reconcile_issue_create_operation(&operation, blocked_by)
+            }
+            MutationKind::PriorityUpdate => {
+                self.reconcile_priority_operation(&operation, blocked_by)
+            }
+            MutationKind::DependencyUpdate => {
+                let (edge, desired) = operation
+                    .dependency_values()
+                    .expect("Dependency-update kind has Dependency values");
+                self.reconcile_dependency_operation(&operation, edge.clone(), desired, blocked_by)
+            }
         }
     }
 
@@ -285,15 +339,25 @@ fn retire_verified_operations(
             retired.insert(operation_id);
             continue;
         }
-        let verified = if operation.dependency_values().is_some() {
-            dependency::verify_terminal(
+        let verified = match operation.kind() {
+            MutationKind::IssueCreate => issue_create::verify_terminal(
+                &operation,
+                final_replica,
+                results,
+                &mut state_updates,
+            ),
+            MutationKind::DependencyUpdate => dependency::verify_terminal(
                 &operation,
                 &final_dependencies,
                 results,
                 &mut state_updates,
-            )
-        } else {
-            priority::verify_terminal(&operation, &final_priorities, results, &mut state_updates)
+            ),
+            MutationKind::PriorityUpdate => priority::verify_terminal(
+                &operation,
+                &final_priorities,
+                results,
+                &mut state_updates,
+            ),
         };
         if verified {
             retired.insert(operation_id);
@@ -327,15 +391,28 @@ fn superseded_terminal_ids(
 
 #[derive(Clone, Eq, PartialEq)]
 enum MutationTarget {
+    IssueCreate(crate::model::TemporaryIssueId),
     Priority(u64),
     Dependency(DependencyEdgeKey),
 }
 
 fn mutation_target(operation: &PendingMutation) -> MutationTarget {
-    operation
-        .dependency_values()
-        .map(|(edge, _)| MutationTarget::Dependency(edge.clone()))
-        .unwrap_or_else(|| MutationTarget::Priority(operation.issue_number()))
+    match operation.kind() {
+        MutationKind::IssueCreate => MutationTarget::IssueCreate(
+            operation
+                .issue_create_view()
+                .expect("Issue-create kind has Issue-create values")
+                .temporary_id,
+        ),
+        MutationKind::PriorityUpdate => MutationTarget::Priority(operation.issue_number()),
+        MutationKind::DependencyUpdate => MutationTarget::Dependency(
+            operation
+                .dependency_values()
+                .expect("Dependency-update kind has Dependency values")
+                .0
+                .clone(),
+        ),
+    }
 }
 
 pub(crate) fn resolve(
@@ -391,6 +468,10 @@ pub(crate) enum ReconciliationError {
     Outbox(#[from] OutboxError),
     #[error(transparent)]
     Store(#[from] StoreError),
+    #[error(transparent)]
+    DraftIdentity(#[from] DraftIdentityError),
+    #[error(transparent)]
+    GitHub(#[from] GitHubError),
     #[error("final Synchronization after Mutation reconciliation failed: {0}")]
     FinalSynchronization(ReplicaSyncError),
     #[error("accepted GitHub state could not be published to the Local replica: {0}")]

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::EvaluatedCandidate;
-use crate::priority::PriorityComparison;
+use crate::{model::StableNodeKey, priority::PriorityComparison};
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -100,8 +100,8 @@ pub(super) enum DecisiveComparison {
         right: u64,
     },
     StableNodeKey {
-        left: [u64; 2],
-        right: [u64; 2],
+        left: StableNodeKey,
+        right: StableNodeKey,
     },
 }
 
@@ -223,7 +223,7 @@ pub(super) struct RankingKey<'a> {
     pub(super) unlock_curve: &'a [usize],
     pub(super) step_priorities: &'a [StepPriority],
     pub(super) pagerank_bucket: Option<u64>,
-    pub(super) issue_number: u64,
+    pub(super) stable_node_key: StableNodeKey,
 }
 
 #[derive(Clone, Copy)]
@@ -280,7 +280,7 @@ fn ranking_key<'candidate, 'issues>(
         unlock_curve: &data.unlock_curve,
         step_priorities: &data.step_priorities,
         pagerank_bucket: data.pagerank_bucket,
-        issue_number: data.issue.number,
+        stable_node_key: data.issue.stable_node_key(),
     }
 }
 
@@ -335,7 +335,7 @@ fn compare_key_components(left: &RankingKey<'_>, right: &RankingKey<'_>) -> KeyC
         };
     }
     KeyComparison {
-        ordering: right.issue_number.cmp(&left.issue_number),
+        ordering: right.stable_node_key.cmp(&left.stable_node_key),
         decisive: DecisiveComponent::StableNodeKey,
     }
 }
@@ -375,12 +375,8 @@ fn decisive_comparison(
             right: right.pagerank_bucket.unwrap_or_default(),
         },
         DecisiveComponent::StableNodeKey => DecisiveComparison::StableNodeKey {
-            left: stable_key(left.issue_number),
-            right: stable_key(right.issue_number),
+            left: left.stable_node_key,
+            right: right.stable_node_key,
         },
     }
-}
-
-fn stable_key(issue_number: u64) -> [u64; 2] {
-    [0, issue_number]
 }

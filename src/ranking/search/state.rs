@@ -85,8 +85,8 @@ pub(super) struct RolloutOrder {
     unlock_curve: Vec<usize>,
     step_priorities: Vec<StepPriority>,
     pagerank_bucket: Option<u64>,
-    first_issue: u64,
-    sequence: Vec<u64>,
+    first_issue: Option<crate::model::StableNodeKey>,
+    sequence: Vec<crate::model::StableNodeKey>,
 }
 
 impl RolloutOrder {
@@ -140,8 +140,12 @@ impl RolloutOrder {
             unlock_curve,
             step_priorities,
             pagerank_bucket: pagerank.and_then(|pagerank| pagerank.bucket(first.issue.number)),
-            first_issue: first.issue.number,
-            sequence: partial.steps.iter().map(|step| step.issue.number).collect(),
+            first_issue: Some(first.issue.stable_node_key()),
+            sequence: partial
+                .steps
+                .iter()
+                .map(|step| step.issue.stable_node_key())
+                .collect(),
         }
     }
 
@@ -160,7 +164,9 @@ impl RolloutOrder {
             unlock_curve: &self.unlock_curve,
             step_priorities: &self.step_priorities,
             pagerank_bucket: self.pagerank_bucket,
-            issue_number: self.first_issue,
+            stable_node_key: self
+                .first_issue
+                .expect("a scored rollout has a first Issue"),
         }
     }
 }
@@ -322,6 +328,7 @@ mod tests {
 
     fn issue(number: u64) -> Issue {
         Issue {
+            identity: crate::model::IssueIdentityState::GitHub,
             id: number,
             node_id: format!("I_{number}"),
             number,

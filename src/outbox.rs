@@ -14,7 +14,8 @@ use thiserror::Error;
 
 use crate::{
     atomic_file::{self, AtomicFileError},
-    model::{DependencyEdgeKey, DependencyPresence},
+    draft_identity::DraftIdentity,
+    model::{DependencyEdgeKey, DependencyPresence, TemporaryIssueId},
     priority::LogicalPriority,
     repository::Repository,
     store::{StoreError, repository_state_directory},
@@ -50,6 +51,8 @@ impl PendingMutationOutbox {
             });
         }
         let mut operation_ids = BTreeSet::new();
+        let mut temporary_ids = BTreeSet::new();
+        let mut synthetic_numbers = BTreeSet::new();
         for operation in &self.operations {
             if operation.affected_issue_numbers().contains(&0) {
                 return Err(OutboxError::InvalidIssueNumber);
@@ -61,6 +64,20 @@ impl PendingMutationOutbox {
             }
             if !operation_ids.insert(operation.id().to_owned()) {
                 return Err(OutboxError::DuplicateOperationId(operation.id().to_owned()));
+            }
+            if let Some(create) = operation.issue_create_view()
+                && (create.synthetic_number != create.temporary_id.synthetic_number()
+                    || create.title.trim().is_empty()
+                    || !operation.depends_on().is_empty()
+                    || uuid::Uuid::parse_str(create.marker).is_err()
+                    || operation
+                        .id()
+                        .strip_prefix("op-")
+                        .is_none_or(|value| uuid::Uuid::parse_str(value).is_err())
+                    || !temporary_ids.insert(create.temporary_id)
+                    || !synthetic_numbers.insert(create.synthetic_number))
+            {
+                return Err(OutboxError::InvalidDraftIssue(operation.id().to_owned()));
             }
             if operation
                 .priority_values()
@@ -119,27 +136,89 @@ impl PendingMutationOutbox {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct PendingMutation {
+    #[serde(flatten)]
+    header: MutationHeader,
+    #[serde(flatten)]
+    payload: MutationPayload,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct MutationHeader {
+    id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    depends_on: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum PendingMutation {
+enum MutationPayload {
+    IssueCreate {
+        temporary_id: TemporaryIssueId,
+        synthetic_number: u64,
+        title: String,
+        body: String,
+        created_at: String,
+        marker: String,
+        #[serde(default, skip_serializing_if = "IssueCreateState::is_pending")]
+        state: IssueCreateState,
+    },
     PriorityUpdate {
-        id: String,
         issue_number: u64,
         base: LogicalPriority,
         desired: LogicalPriority,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        depends_on: Vec<String>,
         #[serde(default, skip_serializing_if = "PriorityMutationState::is_pending")]
         state: PriorityMutationState,
     },
     DependencyUpdate {
-        id: String,
         edge: DependencyEdgeKey,
         desired: DependencyPresence,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        depends_on: Vec<String>,
         #[serde(default, skip_serializing_if = "DependencyMutationState::is_pending")]
         state: DependencyMutationState,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MutationKind {
+    IssueCreate,
+    PriorityUpdate,
+    DependencyUpdate,
+}
+
+pub(crate) struct IssueCreateView<'a> {
+    pub(crate) temporary_id: TemporaryIssueId,
+    pub(crate) synthetic_number: u64,
+    pub(crate) title: &'a str,
+    pub(crate) body: &'a str,
+    pub(crate) created_at: &'a str,
+    pub(crate) marker: &'a str,
+    pub(crate) state: &'a IssueCreateState,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub(crate) enum IssueCreateState {
+    #[default]
+    Pending,
+    AwaitingMarker {
+        error: String,
+    },
+    Mapped {
+        issue_id: u64,
+        issue_node_id: String,
+        issue_number: u64,
+        issue_url: String,
+    },
+}
+
+impl IssueCreateState {
+    fn is_pending(&self) -> bool {
+        matches!(self, Self::Pending)
+    }
+
+    fn permits_dependents(&self) -> bool {
+        matches!(self, Self::Mapped { .. })
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -261,6 +340,30 @@ impl PriorityWrite {
 }
 
 impl PendingMutation {
+    pub(crate) fn issue_create(
+        temporary_id: TemporaryIssueId,
+        title: String,
+        body: String,
+    ) -> Self {
+        let synthetic_number = temporary_id.synthetic_number();
+        let id = format!("op-{}", uuid::Uuid::new_v4());
+        Self {
+            header: MutationHeader {
+                id,
+                depends_on: Vec::new(),
+            },
+            payload: MutationPayload::IssueCreate {
+                marker: uuid::Uuid::new_v4().to_string(),
+                temporary_id,
+                synthetic_number,
+                title,
+                body,
+                created_at: chrono::Utc::now().to_rfc3339(),
+                state: IssueCreateState::Pending,
+            },
+        }
+    }
+
     pub(crate) fn priority_update(
         repository: &Repository,
         issue_number: u64,
@@ -268,13 +371,17 @@ impl PendingMutation {
         desired: LogicalPriority,
         depends_on: Vec<String>,
     ) -> Self {
-        Self::PriorityUpdate {
-            id: new_operation_id(repository, issue_number),
-            issue_number,
-            base,
-            desired,
-            depends_on,
-            state: PriorityMutationState::Pending,
+        Self {
+            header: MutationHeader {
+                id: new_operation_id(repository, issue_number),
+                depends_on,
+            },
+            payload: MutationPayload::PriorityUpdate {
+                issue_number,
+                base,
+                desired,
+                state: PriorityMutationState::Pending,
+            },
         }
     }
 
@@ -284,33 +391,51 @@ impl PendingMutation {
         desired: DependencyPresence,
         depends_on: Vec<String>,
     ) -> Self {
-        Self::DependencyUpdate {
-            id: new_operation_id(repository, edge.blocked_number()),
-            edge,
-            desired,
-            depends_on,
-            state: DependencyMutationState::Pending,
+        Self {
+            header: MutationHeader {
+                id: new_operation_id(repository, edge.blocked_number()),
+                depends_on,
+            },
+            payload: MutationPayload::DependencyUpdate {
+                edge,
+                desired,
+                state: DependencyMutationState::Pending,
+            },
         }
     }
 
     pub(crate) fn id(&self) -> &str {
-        match self {
-            Self::PriorityUpdate { id, .. } => id,
-            Self::DependencyUpdate { id, .. } => id,
+        &self.header.id
+    }
+
+    pub(crate) fn kind(&self) -> MutationKind {
+        match self.payload {
+            MutationPayload::IssueCreate { .. } => MutationKind::IssueCreate,
+            MutationPayload::PriorityUpdate { .. } => MutationKind::PriorityUpdate,
+            MutationPayload::DependencyUpdate { .. } => MutationKind::DependencyUpdate,
         }
     }
 
     pub(crate) fn issue_number(&self) -> u64 {
-        match self {
-            Self::PriorityUpdate { issue_number, .. } => *issue_number,
-            Self::DependencyUpdate { edge, .. } => edge.blocked_number(),
+        match &self.payload {
+            MutationPayload::IssueCreate {
+                synthetic_number,
+                state,
+                ..
+            } => match state {
+                IssueCreateState::Mapped { issue_number, .. } => *issue_number,
+                _ => *synthetic_number,
+            },
+            MutationPayload::PriorityUpdate { issue_number, .. } => *issue_number,
+            MutationPayload::DependencyUpdate { edge, .. } => edge.blocked_number(),
         }
     }
 
     pub(crate) fn affected_issue_numbers(&self) -> Vec<u64> {
-        match self {
-            Self::PriorityUpdate { issue_number, .. } => vec![*issue_number],
-            Self::DependencyUpdate { edge, .. } => {
+        match &self.payload {
+            MutationPayload::IssueCreate { .. } => vec![self.issue_number()],
+            MutationPayload::PriorityUpdate { issue_number, .. } => vec![*issue_number],
+            MutationPayload::DependencyUpdate { edge, .. } => {
                 let mut affected = vec![edge.blocked_number()];
                 if edge.is_internal() {
                     affected.push(edge.blocker_number());
@@ -321,44 +446,76 @@ impl PendingMutation {
     }
 
     pub(crate) fn priority_values(&self) -> Option<(&LogicalPriority, &LogicalPriority)> {
-        match self {
-            Self::PriorityUpdate { base, desired, .. } => Some((base, desired)),
-            Self::DependencyUpdate { .. } => None,
+        match &self.payload {
+            MutationPayload::PriorityUpdate { base, desired, .. } => Some((base, desired)),
+            MutationPayload::IssueCreate { .. } | MutationPayload::DependencyUpdate { .. } => None,
         }
     }
 
     pub(crate) fn dependency_values(&self) -> Option<(&DependencyEdgeKey, DependencyPresence)> {
-        match self {
-            Self::PriorityUpdate { .. } => None,
-            Self::DependencyUpdate { edge, desired, .. } => Some((edge, *desired)),
+        match &self.payload {
+            MutationPayload::DependencyUpdate { edge, desired, .. } => Some((edge, *desired)),
+            MutationPayload::IssueCreate { .. } | MutationPayload::PriorityUpdate { .. } => None,
         }
     }
 
     pub(crate) fn depends_on(&self) -> &[String] {
-        match self {
-            Self::PriorityUpdate { depends_on, .. } => depends_on,
-            Self::DependencyUpdate { depends_on, .. } => depends_on,
-        }
+        &self.header.depends_on
     }
 
     pub(crate) fn priority_state(&self) -> Option<&PriorityMutationState> {
-        match self {
-            Self::PriorityUpdate { state, .. } => Some(state),
-            Self::DependencyUpdate { .. } => None,
+        match &self.payload {
+            MutationPayload::PriorityUpdate { state, .. } => Some(state),
+            MutationPayload::IssueCreate { .. } | MutationPayload::DependencyUpdate { .. } => None,
         }
     }
 
     pub(crate) fn dependency_state(&self) -> Option<&DependencyMutationState> {
-        match self {
-            Self::PriorityUpdate { .. } => None,
-            Self::DependencyUpdate { state, .. } => Some(state),
+        match &self.payload {
+            MutationPayload::DependencyUpdate { state, .. } => Some(state),
+            MutationPayload::IssueCreate { .. } | MutationPayload::PriorityUpdate { .. } => None,
+        }
+    }
+
+    pub(crate) fn issue_create_state(&self) -> Option<&IssueCreateState> {
+        match &self.payload {
+            MutationPayload::IssueCreate { state, .. } => Some(state),
+            MutationPayload::PriorityUpdate { .. } | MutationPayload::DependencyUpdate { .. } => {
+                None
+            }
+        }
+    }
+
+    pub(crate) fn issue_create_view(&self) -> Option<IssueCreateView<'_>> {
+        match &self.payload {
+            MutationPayload::IssueCreate {
+                temporary_id,
+                synthetic_number,
+                title,
+                body,
+                created_at,
+                marker,
+                state,
+            } => Some(IssueCreateView {
+                temporary_id: *temporary_id,
+                synthetic_number: *synthetic_number,
+                title,
+                body,
+                created_at,
+                marker,
+                state,
+            }),
+            MutationPayload::PriorityUpdate { .. } | MutationPayload::DependencyUpdate { .. } => {
+                None
+            }
         }
     }
 
     pub(crate) fn permits_dependents(&self) -> bool {
-        match self {
-            Self::PriorityUpdate { state, .. } => state.is_successfully_terminal(),
-            Self::DependencyUpdate { state, .. } => state.is_successfully_terminal(),
+        match &self.payload {
+            MutationPayload::IssueCreate { state, .. } => state.permits_dependents(),
+            MutationPayload::PriorityUpdate { state, .. } => state.is_successfully_terminal(),
+            MutationPayload::DependencyUpdate { state, .. } => state.is_successfully_terminal(),
         }
     }
 
@@ -371,18 +528,19 @@ impl PendingMutation {
     }
 
     pub(crate) fn effective_priority(&self) -> Option<&LogicalPriority> {
-        match self {
-            Self::PriorityUpdate { desired, state, .. } => match state {
+        match &self.payload {
+            MutationPayload::PriorityUpdate { desired, state, .. } => match state {
                 PriorityMutationState::ResolvedRemote { remote } => Some(remote),
                 _ => Some(desired),
             },
-            Self::DependencyUpdate { .. } => None,
+            MutationPayload::IssueCreate { .. } | MutationPayload::DependencyUpdate { .. } => None,
         }
     }
 
     fn has_safe_write_plan(&self) -> bool {
-        match self {
-            Self::PriorityUpdate { desired, state, .. } => {
+        match &self.payload {
+            MutationPayload::IssueCreate { .. } => true,
+            MutationPayload::PriorityUpdate { desired, state, .. } => {
                 let PriorityMutationState::Applying {
                     expected_labels,
                     remaining_writes,
@@ -395,7 +553,7 @@ impl PendingMutation {
                     && PriorityWrite::canonical_plan(expected_labels, desired)
                         .is_some_and(|canonical| canonical == *remaining_writes)
             }
-            Self::DependencyUpdate { .. } => true,
+            MutationPayload::DependencyUpdate { .. } => true,
         }
     }
 
@@ -404,8 +562,9 @@ impl PendingMutation {
         base: LogicalPriority,
         desired: Option<LogicalPriority>,
     ) -> Result<(), ()> {
-        match self {
-            Self::PriorityUpdate {
+        match &mut self.payload {
+            MutationPayload::IssueCreate { .. } => Err(()),
+            MutationPayload::PriorityUpdate {
                 base: current_base,
                 desired: current_desired,
                 state,
@@ -418,7 +577,7 @@ impl PendingMutation {
                 *state = PriorityMutationState::Pending;
                 Ok(())
             }
-            Self::DependencyUpdate { .. } => Err(()),
+            MutationPayload::DependencyUpdate { .. } => Err(()),
         }
     }
 }
@@ -532,12 +691,61 @@ impl OutboxTransaction<'_> {
         id: &str,
         state: PriorityMutationState,
     ) -> Result<(), OutboxError> {
-        match self.operation_mut(id)? {
-            PendingMutation::PriorityUpdate { state: current, .. } => {
+        match &mut self.operation_mut(id)?.payload {
+            MutationPayload::PriorityUpdate { state: current, .. } => {
                 *current = state;
                 Ok(())
             }
-            PendingMutation::DependencyUpdate { .. } => {
+            MutationPayload::IssueCreate { .. } | MutationPayload::DependencyUpdate { .. } => {
+                Err(OutboxError::InvalidMutationKind(id.to_owned()))
+            }
+        }
+    }
+
+    pub(crate) fn checkpoint_issue_create_state(
+        &mut self,
+        repository: &Repository,
+        id: &str,
+        state: IssueCreateState,
+    ) -> Result<(), OutboxError> {
+        self.stage_issue_create_state(id, state)?;
+        self.publish(repository)
+    }
+
+    pub(crate) fn checkpoint_draft_mapping(
+        &mut self,
+        repository: &Repository,
+        id: &str,
+        identity: &DraftIdentity,
+    ) -> Result<(), OutboxError> {
+        self.stage_issue_create_state(
+            id,
+            IssueCreateState::Mapped {
+                issue_id: identity.issue_id,
+                issue_node_id: identity.issue_node_id.clone(),
+                issue_number: identity.issue_number,
+                issue_url: identity.issue_url.clone(),
+            },
+        )?;
+        for operation in &mut self.outbox.operations {
+            if let MutationPayload::DependencyUpdate { edge, .. } = &mut operation.payload {
+                edge.resolve_temporary_id(identity.temporary_id, identity.issue_number);
+            }
+        }
+        self.publish(repository)
+    }
+
+    fn stage_issue_create_state(
+        &mut self,
+        id: &str,
+        state: IssueCreateState,
+    ) -> Result<(), OutboxError> {
+        match &mut self.operation_mut(id)?.payload {
+            MutationPayload::IssueCreate { state: current, .. } => {
+                *current = state;
+                Ok(())
+            }
+            MutationPayload::PriorityUpdate { .. } | MutationPayload::DependencyUpdate { .. } => {
                 Err(OutboxError::InvalidMutationKind(id.to_owned()))
             }
         }
@@ -558,13 +766,13 @@ impl OutboxTransaction<'_> {
         id: &str,
         state: DependencyMutationState,
     ) -> Result<(), OutboxError> {
-        match self.operation_mut(id)? {
-            PendingMutation::PriorityUpdate { .. } => {
-                Err(OutboxError::InvalidMutationKind(id.to_owned()))
-            }
-            PendingMutation::DependencyUpdate { state: current, .. } => {
+        match &mut self.operation_mut(id)?.payload {
+            MutationPayload::DependencyUpdate { state: current, .. } => {
                 *current = state;
                 Ok(())
+            }
+            MutationPayload::IssueCreate { .. } | MutationPayload::PriorityUpdate { .. } => {
+                Err(OutboxError::InvalidMutationKind(id.to_owned()))
             }
         }
     }
@@ -627,14 +835,10 @@ impl OutboxTransaction<'_> {
             .operations
             .retain(|operation| !retired.contains(operation.id()));
         for operation in &mut self.outbox.operations {
-            match operation {
-                PendingMutation::PriorityUpdate { depends_on, .. } => {
-                    depends_on.retain(|dependency| !retired.contains(dependency));
-                }
-                PendingMutation::DependencyUpdate { depends_on, .. } => {
-                    depends_on.retain(|dependency| !retired.contains(dependency));
-                }
-            }
+            operation
+                .header
+                .depends_on
+                .retain(|dependency| !retired.contains(dependency));
         }
         self.operation_index = operation_index(&self.outbox);
         self.publish(repository)
@@ -708,6 +912,8 @@ pub(crate) enum OutboxError {
     InvalidWritePlan(String),
     #[error("Pending mutation operation {0:?} has an invalid Dependency edge")]
     InvalidDependencyEdge(String),
+    #[error("Pending mutation operation {0:?} contains an invalid Draft Issue")]
+    InvalidDraftIssue(String),
     #[error("Pending mutation operation {0:?} does not exist")]
     UnknownOperation(String),
     #[error("Pending mutation operation {0:?} is not a Priority update")]

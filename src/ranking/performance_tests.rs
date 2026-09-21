@@ -338,6 +338,7 @@ fn issue(number: u64, closed: bool, p0: bool) -> Issue {
         }
     };
     Issue {
+        identity: crate::model::IssueIdentityState::GitHub,
         id: number,
         node_id: format!("I_{number}"),
         number,

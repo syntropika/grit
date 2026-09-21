@@ -13,7 +13,8 @@ Issue graph with synchronized network and accessible table selection,
 composable filters, Dependency relationship isolation, and a bounded view for dense graphs.
 Public exports use a separate allowlisted model after a live Repository visibility check.
 Unavailable Priority and Dependency updates are queued durably and projected into analysis with explicit Pending provenance.
-Structural plans share the same Working graph and cached decision as next.
+Grit also creates recoverable Draft Issues with stable temporary identities and marker-based reconciliation.
+Structural plans share the cached Working-graph analysis used by next-work recommendations.
 
 ## Build and test
 
@@ -220,6 +221,28 @@ affected descendants remain in `unresolved`; Grit does not assign them a
 misleading finite layer. These layers describe dependency topology under
 unlimited structural capacity. They are not dates, worker rounds, an ETA, or
 a Critical Path. `plan/v1` therefore rejects `--workers` explicitly.
+
+## Create Draft Issues
+
+Create a Draft Issue locally when authoring must continue without GitHub:
+
+```bash
+grit create --repo OWNER/REPO --title "Prepare the migration" --body "Acceptance notes"
+grit create --repo OWNER/REPO --title "Prepare the migration" --json
+```
+
+Creation returns a stable Temporary Issue ID and a key such as
+`OWNER/REPO#draft:TEMPORARY_ID`. The Draft participates provisionally in
+`ready` and `next`; that key can also be passed to `block` or `unblock` before
+GitHub assigns an Issue number. `grit reconcile` creates referenced Drafts
+before their dependent operations, stores the permanent number and node ID,
+and retains the temporary alias.
+
+Every non-idempotent create has a random, non-secret Operation marker persisted
+before the request. Grit embeds it in an invisible Markdown comment, removes it
+from normalized and user-facing data, and uses it only to recover an ambiguous
+response. Exactly one remote match is accepted; zero or multiple matches stay
+unresolved and are never retried blindly.
 
 ## Triage graph problems
 
