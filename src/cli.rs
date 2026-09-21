@@ -16,6 +16,7 @@ use crate::{
     },
     repository::{Repository, RepositoryError},
     store::{ReplicaStore, StoreError},
+    synchronization::refresh_repository,
 };
 
 const SYNC_SCHEMA_VERSION: &str = "grit.sync/v1";
@@ -131,18 +132,27 @@ fn sync(repository: &Repository, json: bool) -> Result<(), CliError> {
 }
 
 fn synchronize(repository: &Repository) -> Result<LocalReplica, CliError> {
+    let store = ReplicaStore::discover(repository)?;
+    let previous = match store.load(repository) {
+        Ok(replica) => Some(replica),
+        Err(StoreError::MissingReplica | StoreError::Decode(_) | StoreError::InvalidReplica(_)) => {
+            None
+        }
+        Err(error) => return Err(error.into()),
+    };
     let client = github_client()?;
-    let data = client.fetch_repository(repository)?;
+    let data = refresh_repository(&client, repository, previous.as_ref())?;
 
-    let replica = LocalReplica::build(
+    let replica = LocalReplica::build_with_sync(
         repository.full_name().to_owned(),
         Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        data.sync,
         data.labels,
         data.issues,
         data.dependencies,
     )?;
 
-    ReplicaStore::discover(repository)?.publish(&replica)?;
+    store.publish(&replica)?;
     Ok(replica)
 }
 
