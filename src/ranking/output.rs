@@ -177,6 +177,8 @@ pub(crate) struct CandidateResult {
     provenance: PendingProvenance,
     first_issue: IssueReference,
     #[serde(skip_serializing_if = "Option::is_none")]
+    critical_distance: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pagerank_bucket: Option<u64>,
     rollout: Rollout,
     outcome: Outcome,
@@ -338,6 +340,7 @@ pub(super) fn candidate_output(
     ranking_provenance_context: &[u64],
     reasons: Vec<Reason>,
 ) -> CandidateResult {
+    let (candidate, critical_route) = candidate.into_parts();
     let first_issue = issue_reference(working, candidate.issue);
     let provenance = working.ranking_provenance_for_issues(
         candidate
@@ -362,6 +365,7 @@ pub(super) fn candidate_output(
     CandidateResult {
         provenance: provenance.clone(),
         first_issue: first_issue.clone(),
+        critical_distance: critical_route.map(|route| route.distance().get()),
         pagerank_bucket: candidate.pagerank_bucket,
         rollout: Rollout {
             steps: candidate
@@ -370,7 +374,7 @@ pub(super) fn candidate_output(
                 .enumerate()
                 .map(|(index, step)| RolloutStep {
                     position: (index + 1) as u8,
-                    mode: step_mode(step.mode),
+                    mode: step_mode(step.selection.mode()),
                     issue: issue_reference(working, step.issue),
                 })
                 .collect(),

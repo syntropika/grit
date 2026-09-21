@@ -63,13 +63,17 @@ impl PriorityProfile {
         }
     }
 
-    fn as_array(self) -> [usize; 4] {
+    pub(super) fn as_array(self) -> [usize; 4] {
         [self.p1, self.neutral, self.p3, self.p4]
     }
 }
 
 #[derive(Clone)]
 pub(super) enum DecisiveComparison {
+    CriticalDistance {
+        left: usize,
+        right: usize,
+    },
     P0Curve {
         left: Vec<usize>,
         right: Vec<usize>,
@@ -107,6 +111,14 @@ impl DecisiveComparison {
 
     pub(super) fn descriptor(&self) -> ComparisonDescriptor {
         match self {
+            Self::CriticalDistance { left, right } => ComparisonDescriptor::new(
+                "shortest_p0_route",
+                "critical_distance",
+                json!(left),
+                json!(right),
+                "it follows the shortest feasible route to P0 work",
+                false,
+            ),
             Self::P0Curve { left, right } => ComparisonDescriptor::new(
                 "unlocks_more_p0",
                 "p0_curve",
@@ -204,9 +216,36 @@ pub(super) struct CandidateComparison {
 pub(super) fn compare(
     left: &EvaluatedCandidate<'_>,
     right: &EvaluatedCandidate<'_>,
-    mode: RankingMode,
 ) -> CandidateComparison {
-    if mode.is_p0() && left.p0_curve != right.p0_curve {
+    let p0_mode = match (left, right) {
+        (EvaluatedCandidate::Normal(_), EvaluatedCandidate::Normal(_)) => false,
+        (EvaluatedCandidate::P0Ready(_), EvaluatedCandidate::P0Ready(_)) => true,
+        (
+            EvaluatedCandidate::CriticalRoute {
+                route: left_route, ..
+            },
+            EvaluatedCandidate::CriticalRoute {
+                route: right_route, ..
+            },
+        ) => {
+            if left_route.distance() != right_route.distance() {
+                let left_distance = left_route.distance().get();
+                let right_distance = right_route.distance().get();
+                return CandidateComparison {
+                    ordering: right_distance.cmp(&left_distance),
+                    decisive: DecisiveComparison::CriticalDistance {
+                        left: left_distance,
+                        right: right_distance,
+                    },
+                };
+            }
+            true
+        }
+        _ => unreachable!("one search compares candidates from a single typed mode"),
+    };
+    let left = left.data();
+    let right = right.data();
+    if p0_mode && left.p0_curve != right.p0_curve {
         return CandidateComparison {
             ordering: left.p0_curve.cmp(&right.p0_curve),
             decisive: DecisiveComparison::P0Curve {

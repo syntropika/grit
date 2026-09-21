@@ -1,12 +1,42 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::{ExecutionScope, IssueState, OperationalGraph};
-use crate::model::{BlockerScope, Issue};
+use crate::model::{BlockerScope, Dependency, Issue};
+
+enum BlockerResolution {
+    Satisfied,
+    Internal(u64),
+    OpaqueExternal,
+}
 
 pub(crate) struct Completion {
     issue_number: u64,
     newly_ready: Vec<u64>,
     depth: usize,
+}
+
+pub(crate) struct OneStepAnalysis<'issues> {
+    executable: BTreeMap<u64, &'issues Issue>,
+    unlocks_by_blocker: BTreeMap<u64, Vec<u64>>,
+}
+
+impl<'issues> OneStepAnalysis<'issues> {
+    pub(crate) fn executable(&self) -> impl Iterator<Item = &'issues Issue> + '_ {
+        self.executable.values().copied()
+    }
+
+    pub(crate) fn unlocks(&self) -> impl ExactSizeIterator<Item = (u64, &[u64])> + '_ {
+        self.unlocks_by_blocker
+            .iter()
+            .map(|(blocker, unlocks)| (*blocker, unlocks.as_slice()))
+    }
+
+    pub(crate) fn unlocks_for(&self, blocker: u64) -> &[u64] {
+        self.unlocks_by_blocker
+            .get(&blocker)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
 }
 
 impl Completion {
@@ -15,6 +45,7 @@ impl Completion {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct RolloutState<'graph, 'issues, 'scope> {
     graph: &'graph OperationalGraph<'issues>,
     scope: ExecutionScope<'scope>,
@@ -37,17 +68,38 @@ impl<'a> OperationalGraph<'a> {
         {
             return false;
         }
-        self.dependencies_for(number)
-            .iter()
-            .all(|dependency| match dependency.blocker.scope {
-                BlockerScope::Internal => {
-                    completed.contains(&dependency.blocker.number)
-                        || self.issue_state(dependency.blocker.number) == Some(IssueState::Closed)
+        self.dependencies_for(number).iter().all(|dependency| {
+            matches!(
+                self.blocker_resolution(dependency, completed),
+                BlockerResolution::Satisfied
+            )
+        })
+    }
+
+    fn blocker_resolution(
+        &self,
+        dependency: &Dependency,
+        completed: &BTreeSet<u64>,
+    ) -> BlockerResolution {
+        match dependency.blocker.scope {
+            BlockerScope::Internal => {
+                let blocker = dependency.blocker.number;
+                if completed.contains(&blocker)
+                    || self.issue_state(blocker) == Some(IssueState::Closed)
+                {
+                    BlockerResolution::Satisfied
+                } else {
+                    BlockerResolution::Internal(blocker)
                 }
-                BlockerScope::External => {
-                    IssueState::parse(&dependency.blocker.state) == IssueState::Closed
+            }
+            BlockerScope::External => {
+                if IssueState::parse(&dependency.blocker.state) == IssueState::Closed {
+                    BlockerResolution::Satisfied
+                } else {
+                    BlockerResolution::OpaqueExternal
                 }
-            })
+            }
+        }
     }
 }
 
@@ -79,25 +131,80 @@ impl<'graph, 'issues, 'scope> RolloutState<'graph, 'issues, 'scope> {
         executable
     }
 
+    pub(crate) fn one_step_analysis(&self) -> OneStepAnalysis<'issues> {
+        let executable: BTreeMap<_, _> = self
+            .executable()
+            .into_iter()
+            .map(|issue| (issue.number, issue))
+            .collect();
+        let mut unlocks = BTreeMap::<u64, Vec<u64>>::new();
+        for dependent in &self.graph.open_numbers {
+            if self.ready.contains(dependent)
+                || self.completed.contains(dependent)
+                || self.graph.cyclic_numbers.contains(dependent)
+            {
+                continue;
+            }
+            let mut sole_blocker = None;
+            let mut feasible = true;
+            for dependency in self.graph.dependencies_for(*dependent) {
+                match self.graph.blocker_resolution(dependency, &self.completed) {
+                    BlockerResolution::Satisfied => {}
+                    BlockerResolution::OpaqueExternal => {
+                        feasible = false;
+                        break;
+                    }
+                    BlockerResolution::Internal(blocker) => match sole_blocker {
+                        None => sole_blocker = Some(blocker),
+                        Some(existing) if existing == blocker => {}
+                        Some(_) => {
+                            feasible = false;
+                            break;
+                        }
+                    },
+                }
+            }
+            if feasible
+                && let Some(blocker) = sole_blocker
+                && executable.contains_key(&blocker)
+            {
+                unlocks.entry(blocker).or_default().push(*dependent);
+            }
+        }
+        OneStepAnalysis {
+            executable,
+            unlocks_by_blocker: unlocks,
+        }
+    }
+
+    pub(crate) fn feasible_prerequisite_closure(
+        &self,
+        target: u64,
+        maximum_size: usize,
+    ) -> Option<BTreeSet<u64>> {
+        self.graph.issue(target)?;
+        if self.completed.contains(&target)
+            || self.graph.issue_state(target) != Some(IssueState::Open)
+            || self.graph.cyclic_numbers.contains(&target)
+        {
+            return None;
+        }
+
+        let mut required = BTreeSet::new();
+        self.collect_open_prerequisites(target, maximum_size, &mut required)?;
+        Some(required)
+    }
+
     pub(crate) fn graph(&self) -> &'graph OperationalGraph<'issues> {
         self.graph
     }
 
-    pub(crate) fn preview_unlocks(&self, issue_number: u64) -> Vec<&'issues Issue> {
-        if !self.is_executable(issue_number) {
-            return Vec::new();
-        }
-        let mut completed = self.completed.clone();
-        completed.insert(issue_number);
-        self.graph
-            .dependents_by_blocker
-            .get(&issue_number)
-            .into_iter()
-            .flatten()
-            .filter(|number| !self.ready.contains(number))
-            .filter(|number| self.graph.is_ready_after(**number, &completed))
-            .filter_map(|number| self.graph.issue(*number))
-            .collect()
+    pub(crate) fn is_ready(&self, issue_number: u64) -> bool {
+        self.ready.contains(&issue_number)
+    }
+
+    pub(crate) fn is_completed(&self, issue_number: u64) -> bool {
+        self.completed.contains(&issue_number)
     }
 
     pub(crate) fn complete(&mut self, issue_number: u64) -> Option<Completion> {
@@ -144,6 +251,36 @@ impl<'graph, 'issues, 'scope> RolloutState<'graph, 'issues, 'scope> {
                 .issue(issue_number)
                 .is_some_and(|issue| self.scope.contains(issue))
     }
+
+    fn collect_open_prerequisites(
+        &self,
+        issue_number: u64,
+        maximum_size: usize,
+        required: &mut BTreeSet<u64>,
+    ) -> Option<()> {
+        for dependency in self.graph.dependencies_for(issue_number) {
+            match self.graph.blocker_resolution(dependency, &self.completed) {
+                BlockerResolution::Satisfied => {}
+                BlockerResolution::OpaqueExternal => return None,
+                BlockerResolution::Internal(blocker) => {
+                    let blocker_issue = self.graph.issue(blocker)?;
+                    if self.graph.issue_state(blocker) != Some(IssueState::Open)
+                        || self.graph.cyclic_numbers.contains(&blocker)
+                        || !self.scope.contains(blocker_issue)
+                    {
+                        return None;
+                    }
+                    if required.insert(blocker) {
+                        if required.len() > maximum_size {
+                            return None;
+                        }
+                        self.collect_open_prerequisites(blocker, maximum_size, required)?;
+                    }
+                }
+            }
+        }
+        Some(())
+    }
 }
 
 #[cfg(test)]
@@ -152,18 +289,24 @@ mod tests {
     use crate::model::{BlockerIdentity, Dependency, IssueIdentity, LocalReplica, ReplicaError};
 
     #[test]
-    fn nested_and_fanout_completions_restore_each_frontier() -> Result<(), ReplicaError> {
+    fn rollouts_restore_nested_and_fanout_frontiers_in_lifo_order() -> Result<(), ReplicaError> {
         let replica = rollout_fixture()?;
         let graph = OperationalGraph::prepare(&replica);
         let mut state = graph.rollout_state(ExecutionScope::Available);
 
         assert_eq!(executable_numbers(&state), vec![1, 2]);
+        assert_eq!(state.one_step_analysis().unlocks().len(), 0);
         let first = state.complete(1).expect("Issue #1 is Executable");
         assert!(first.newly_ready().is_empty());
         assert_eq!(executable_numbers(&state), vec![2]);
+        assert_eq!(state.one_step_analysis().unlocks_for(2), [10].as_slice());
         let second = state.complete(2).expect("Issue #2 is Executable");
         assert_eq!(second.newly_ready(), &[10]);
         assert_eq!(executable_numbers(&state), vec![10]);
+        assert_eq!(
+            state.one_step_analysis().unlocks_for(10),
+            [11, 12].as_slice()
+        );
         let third = state.complete(10).expect("Issue #10 is Executable");
         assert_eq!(third.newly_ready(), &[11, 12]);
         assert_eq!(executable_numbers(&state), vec![11, 12]);
@@ -179,7 +322,7 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "rollout completions must be undone in LIFO order")]
-    fn rejects_out_of_order_rollback_tokens() {
+    fn rejects_out_of_order_completion_rollback() {
         let replica = rollout_fixture().expect("valid rollout fixture");
         let graph = OperationalGraph::prepare(&replica);
         let mut state = graph.rollout_state(ExecutionScope::Available);

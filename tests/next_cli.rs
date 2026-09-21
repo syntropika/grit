@@ -5,6 +5,83 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 #[test]
+fn offline_priority_activates_a_bounded_p0_route_and_marks_its_rollout() {
+    let repository = "acme/pending-p0-route";
+    let mut github = Server::new();
+    let state = TempDir::new().expect("temporary state directory");
+    let mocks = mock_repository(
+        &mut github,
+        repository,
+        vec![
+            issue(1, "open", &["priority:p4"], &[]),
+            issue(2, "open", &["priority:p4"], &[]),
+            issue(3, "open", &["priority:p4"], &[]),
+            issue(10, "open", &["priority:p1"], &[]),
+        ],
+        vec![
+            (1, vec![]),
+            (2, vec![internal_blocker(1, "open")]),
+            (3, vec![internal_blocker(2, "open")]),
+            (10, vec![]),
+        ],
+    );
+    let api_url = github.url();
+    let baseline = next_default_command(&state, &api_url, repository, true)
+        .output()
+        .expect("synchronize the normal graph");
+    assert_success(&baseline);
+    let baseline: Value = serde_json::from_slice(&baseline.stdout).expect("normal next JSON");
+    assert_eq!(baseline["mode"], "normal");
+    mocks.assert();
+    drop(github);
+
+    let queued = Command::new(env!("CARGO_BIN_EXE_grit"))
+        .args([
+            "update",
+            "acme/pending-p0-route#3",
+            "--priority",
+            "p0",
+            "--json",
+        ])
+        .env("GRIT_STATE_DIR", state.path())
+        .env("GRIT_GITHUB_API_URL", &api_url)
+        .env("GH_TOKEN", "test-token")
+        .env("PATH", "")
+        .output()
+        .expect("queue a blocked P0 while offline");
+    assert_success(&queued);
+    let queued: Value = serde_json::from_slice(&queued.stdout).expect("pending update JSON");
+    let operation_ids = json!([queued["operation"]["id"]]);
+    let output = next_default_command(&state, &api_url, repository, false)
+        .output()
+        .expect("rank the pending bounded P0 route");
+    assert_success(&output);
+    let output: Value = serde_json::from_slice(&output.stdout).expect("pending next JSON");
+    assert_eq!(output["mode"], "p0_route");
+    assert_eq!(output["parameters"]["horizon"], 3);
+    assert_eq!(output["search_complete"], true);
+    assert_eq!(output["global_optimum_claimed"], true);
+    assert_eq!(output["recommendation"]["critical_distance"], 2);
+    assert_eq!(rollout_numbers(&output["recommendation"]), vec![1, 2, 3]);
+    assert_eq!(output["recommendation"]["operation_ids"], operation_ids);
+    let steps = &output["recommendation"]["rollout"]["steps"];
+    assert_eq!(steps[0]["mode"], "p0_route");
+    assert_eq!(steps[1]["mode"], "p0_route");
+    assert_eq!(steps[2]["mode"], "p0_ready");
+    assert_eq!(steps[2]["issue"]["priority"]["value"], "p0");
+    assert_eq!(steps[2]["issue"]["operation_ids"], operation_ids);
+    assert_eq!(
+        output["recommendation"]["outcome"]["unlock_profile"]["p0_curve"],
+        json!([0, 1, 1])
+    );
+    assert_ne!(output["input_hash"], baseline["input_hash"]);
+    assert_eq!(
+        output["replica_snapshot_hash"],
+        baseline["replica_snapshot_hash"]
+    );
+}
+
+#[test]
 fn next_evaluates_the_complete_frontier_with_and_unlocks_and_deduplication() {
     let mut github = Server::new();
     let state = TempDir::new().expect("temporary state directory");
@@ -402,7 +479,7 @@ fn normal_rollouts_compare_and_pad_the_step_priority_sequence() {
 }
 
 #[test]
-fn state_budget_restriction_is_reported_without_a_global_optimum_claim() {
+fn beam_restriction_is_reported_without_a_global_optimum_claim() {
     let mut github = Server::new();
     let state = TempDir::new().expect("temporary state directory");
     let issues = (1..=30)
@@ -426,7 +503,7 @@ fn state_budget_restriction_is_reported_without_a_global_optimum_claim() {
 
     assert_eq!(output["summary"]["candidate_count"], 30);
     assert_eq!(output["search_complete"], false);
-    assert_eq!(output["truncated_by"], json!(["state_budget"]));
+    assert_eq!(output["truncated_by"], json!(["probe_pool", "beam_width"]));
     assert_eq!(output["global_optimum_claimed"], false);
     assert_eq!(output["runner_up_scope"], "explored");
     mocks.assert();
@@ -438,7 +515,7 @@ fn state_budget_restriction_is_reported_without_a_global_optimum_claim() {
     assert_success(&human);
     let stderr = String::from_utf8_lossy(&human.stderr);
     assert!(
-        stderr.contains("restricted by state_budget"),
+        stderr.contains("restricted by probe_pool, beam_width"),
         "stderr: {stderr}"
     );
     assert!(
@@ -448,7 +525,157 @@ fn state_budget_restriction_is_reported_without_a_global_optimum_claim() {
 }
 
 #[test]
-fn deferred_multistep_p0_routes_do_not_make_an_unsupported_optimum_claim() {
+fn delayed_cascade_survives_one_hundred_twenty_nine_better_immediate_results() {
+    let mut github = Server::new();
+    let state = TempDir::new().expect("temporary state directory");
+    let mut issues = (1..=130)
+        .map(|number| issue(number, "open", &[], &[]))
+        .collect::<Vec<_>>();
+    let mut dependencies = (1..=130)
+        .map(|number| (number, Vec::new()))
+        .collect::<Vec<_>>();
+    issues.push(issue(1_000, "open", &[], &[]));
+    dependencies.push((1_000, vec![internal_blocker(1, "open")]));
+    for number in 1_001..=1_100 {
+        issues.push(issue(number, "open", &[], &[]));
+        dependencies.push((number, vec![internal_blocker(1_000, "open")]));
+    }
+    let mut next_number = 2_000;
+    for root in 2..=130 {
+        for _ in 0..2 {
+            issues.push(issue(next_number, "open", &[], &[]));
+            dependencies.push((next_number, vec![internal_blocker(root, "open")]));
+            next_number += 1;
+        }
+    }
+    let mocks = mock_repository(&mut github, "acme/delayed-cascade", issues, dependencies);
+
+    let output =
+        next_command_with_horizon(&state, &github.url(), "acme/delayed-cascade", true, Some(2))
+            .output()
+            .expect("run delayed-cascade search");
+    assert_success(&output);
+    let output: Value = serde_json::from_slice(&output.stdout).expect("next JSON");
+
+    assert_eq!(output["recommendation"]["first_issue"]["number"], 1);
+    assert_eq!(rollout_numbers(&output["recommendation"]), vec![1, 1_000]);
+    assert_eq!(
+        output["recommendation"]["outcome"]["unlock_profile"]["count"],
+        101
+    );
+    assert_eq!(
+        output["truncated_by"],
+        json!([
+            "first_step_shortlist",
+            "potential_budget",
+            "probe_pool",
+            "branch_width",
+            "beam_width"
+        ])
+    );
+    assert_eq!(output["summary"]["candidate_count"], 96);
+    let api_url = github.url();
+    mocks.assert();
+    drop(github);
+
+    let queued = Command::new(env!("CARGO_BIN_EXE_grit"))
+        .args([
+            "update",
+            "acme/delayed-cascade#1000",
+            "--priority",
+            "p1",
+            "--json",
+        ])
+        .env("GRIT_STATE_DIR", state.path())
+        .env("GRIT_GITHUB_API_URL", &api_url)
+        .env("GH_TOKEN", "test-token")
+        .env("PATH", "")
+        .output()
+        .expect("queue the delayed cascade priority");
+    assert_success(&queued);
+    let queued: Value = serde_json::from_slice(&queued.stdout).expect("pending update JSON");
+    let pending =
+        next_command_with_horizon(&state, &api_url, "acme/delayed-cascade", false, Some(2))
+            .output()
+            .expect("rank the pending delayed cascade");
+    assert_success(&pending);
+    let pending: Value = serde_json::from_slice(&pending.stdout).expect("pending next JSON");
+    assert_eq!(rollout_numbers(&pending["recommendation"]), vec![1, 1_000]);
+    assert_eq!(
+        pending["recommendation"]["outcome"]["unlock_profile"]["count"],
+        101
+    );
+    assert_eq!(
+        pending["recommendation"]["outcome"]["unlock_profile"]["priority_profile"]["p1"],
+        1
+    );
+    assert_eq!(
+        pending["recommendation"]["rollout"]["steps"][1]["issue"]["priority"]["value"],
+        "p1"
+    );
+    assert_eq!(
+        pending["recommendation"]["operation_ids"],
+        json!([queued["operation"]["id"]])
+    );
+    assert_eq!(pending["comparison_to_runner_up"]["pending"], true);
+    assert_eq!(pending["search_complete"], false);
+    assert_eq!(pending["global_optimum_claimed"], false);
+    assert_ne!(pending["input_hash"], output["input_hash"]);
+    assert_eq!(
+        pending["replica_snapshot_hash"],
+        output["replica_snapshot_hash"]
+    );
+}
+
+#[test]
+fn feasible_cascade_survives_sixty_four_incompatible_and_upper_bounds() {
+    let mut github = Server::new();
+    let state = TempDir::new().expect("temporary state directory");
+    let mut issues = (1..=68)
+        .map(|number| issue(number, "open", &[], &[]))
+        .collect::<Vec<_>>();
+    let mut dependencies = (1..=68)
+        .map(|number| (number, Vec::new()))
+        .collect::<Vec<_>>();
+    issues.push(issue(100, "open", &[], &[]));
+    dependencies.push((100, vec![internal_blocker(1, "open")]));
+    for number in 101..=170 {
+        issues.push(issue(number, "open", &[], &[]));
+        dependencies.push((number, vec![internal_blocker(100, "open")]));
+    }
+    let mut outcome = 1_000;
+    for decoy in 2..=65 {
+        for co_blocker in 66..=68 {
+            issues.push(issue(outcome, "open", &[], &[]));
+            dependencies.push((
+                outcome,
+                vec![
+                    internal_blocker(decoy, "open"),
+                    internal_blocker(co_blocker, "open"),
+                ],
+            ));
+            outcome += 1;
+        }
+    }
+    let mocks = mock_repository(&mut github, "acme/and-decoys", issues, dependencies);
+
+    let output = next_command_with_horizon(&state, &github.url(), "acme/and-decoys", true, Some(2))
+        .output()
+        .expect("run AND-decoy search");
+    assert_success(&output);
+    let output: Value = serde_json::from_slice(&output.stdout).expect("next JSON");
+
+    assert_eq!(output["recommendation"]["first_issue"]["number"], 1);
+    assert_eq!(rollout_numbers(&output["recommendation"]), vec![1, 100]);
+    assert_eq!(
+        output["recommendation"]["outcome"]["unlock_profile"]["count"],
+        71
+    );
+    mocks.assert();
+}
+
+#[test]
+fn multistep_p0_routes_are_followed_and_recalculated_until_p0_is_executable() {
     let mut github = Server::new();
     let state = TempDir::new().expect("temporary state directory");
     let issues = vec![
@@ -469,11 +696,329 @@ fn deferred_multistep_p0_routes_do_not_make_an_unsupported_optimum_claim() {
     assert_success(&output);
     let output: Value = serde_json::from_slice(&output.stdout).expect("next JSON");
 
-    assert_eq!(output["search_complete"], false);
-    assert_eq!(output["truncated_by"], json!(["p0_frontier"]));
-    assert_eq!(output["global_optimum_claimed"], false);
-    assert_eq!(output["runner_up_scope"], "explored");
+    assert_eq!(output["mode"], "p0_route");
+    assert_eq!(output["search_complete"], true);
+    assert_eq!(output["truncated_by"], json!([]));
+    assert_eq!(output["global_optimum_claimed"], true);
+    assert_eq!(output["runner_up_scope"], "global");
+    assert_eq!(output["recommendation"]["critical_distance"], 2);
+    assert_eq!(rollout_numbers(&output["recommendation"]), vec![1, 2, 3]);
+    assert_eq!(
+        output["recommendation"]["rollout"]["steps"]
+            .as_array()
+            .expect("rollout steps")
+            .iter()
+            .map(|step| step["mode"].as_str().expect("step mode"))
+            .collect::<Vec<_>>(),
+        vec!["p0_route", "p0_route", "p0_ready"]
+    );
+    assert_eq!(
+        output["recommendation"]["outcome"]["unlock_profile"]["p0_curve"],
+        json!([0, 1, 1])
+    );
+    assert!(reason_codes(&output).contains(&"shortest_p0_route"));
+    assert!(reason_codes(&output).contains(&"p0_gate_continues"));
     mocks.assert();
+}
+
+#[test]
+fn critical_distance_uses_the_realized_rollout_when_the_gate_switches_routes() {
+    let mut github = Server::new();
+    let state = TempDir::new().expect("temporary state directory");
+    let issues = vec![
+        issue(1, "open", &["priority:p4"], &[]),
+        issue(2, "open", &["priority:p4"], &[]),
+        issue(4, "open", &["priority:p4"], &[]),
+        issue(5, "open", &["priority:p4"], &[]),
+        issue(10, "open", &["priority:p0"], &[]),
+        issue(20, "open", &["priority:p0"], &[]),
+    ];
+    let dependencies = vec![
+        (1, vec![]),
+        (2, vec![]),
+        (4, vec![internal_blocker(2, "open")]),
+        (5, vec![internal_blocker(2, "open")]),
+        (10, vec![internal_blocker(1, "open")]),
+        (
+            20,
+            vec![internal_blocker(4, "open"), internal_blocker(5, "open")],
+        ),
+    ];
+    let mocks = mock_repository(&mut github, "acme/p0-distance", issues, dependencies);
+
+    let output = next_default_command(&state, &github.url(), "acme/p0-distance", true)
+        .output()
+        .expect("run competing P0 routes");
+    assert_success(&output);
+    let output: Value = serde_json::from_slice(&output.stdout).expect("next JSON");
+
+    assert_eq!(output["mode"], "p0_route");
+    assert_eq!(output["recommendation"]["first_issue"]["number"], 1);
+    assert_eq!(output["recommendation"]["critical_distance"], 1);
+    assert_eq!(output["alternatives"][0]["first_issue"]["number"], 2);
+    assert_eq!(output["alternatives"][0]["critical_distance"], 2);
+    assert_eq!(rollout_numbers(&output["alternatives"][0]), vec![2, 1, 10]);
+    assert_eq!(
+        output["comparison_to_runner_up"]["reason_code"],
+        "shortest_p0_route"
+    );
+    assert_eq!(
+        output["comparison_to_runner_up"]["component"],
+        "critical_distance"
+    );
+    assert_eq!(output["comparison_to_runner_up"]["winner_value"], 1);
+    assert_eq!(output["comparison_to_runner_up"]["runner_up_value"], 2);
+    mocks.assert();
+}
+
+#[test]
+fn critical_distance_counts_distinct_shared_and_prerequisites() {
+    let mut github = Server::new();
+    let state = TempDir::new().expect("temporary state directory");
+    let issues = vec![
+        issue(2, "open", &["priority:p4"], &[]),
+        issue(4, "open", &["priority:p4"], &[]),
+        issue(5, "open", &["priority:p4"], &[]),
+        issue(20, "open", &["priority:p0"], &[]),
+    ];
+    let dependencies = vec![
+        (2, vec![]),
+        (4, vec![internal_blocker(2, "open")]),
+        (5, vec![internal_blocker(2, "open")]),
+        (
+            20,
+            vec![internal_blocker(4, "open"), internal_blocker(5, "open")],
+        ),
+    ];
+    let mocks = mock_repository(&mut github, "acme/p0-and-distance", issues, dependencies);
+
+    let output = next_default_command(&state, &github.url(), "acme/p0-and-distance", true)
+        .output()
+        .expect("run shared AND-prerequisite route");
+    assert_success(&output);
+    let output: Value = serde_json::from_slice(&output.stdout).expect("next JSON");
+
+    assert_eq!(output["mode"], "p0_route");
+    assert_eq!(output["recommendation"]["critical_distance"], 3);
+    assert_eq!(rollout_numbers(&output["recommendation"]), vec![2, 4, 5]);
+    assert_eq!(
+        output["recommendation"]["outcome"]["unlock_profile"]["p0_curve"],
+        json!([0, 0, 1])
+    );
+    mocks.assert();
+}
+
+#[test]
+fn equal_distance_p0_routes_compare_the_p0_unlock_curve() {
+    let mut github = Server::new();
+    let state = TempDir::new().expect("temporary state directory");
+    let issues = vec![
+        issue(1, "open", &["priority:p4"], &[]),
+        issue(2, "open", &["priority:p4"], &[]),
+        issue(10, "open", &["priority:p0"], &[]),
+        issue(20, "open", &["priority:p0"], &[]),
+        issue(21, "open", &["priority:p0"], &[]),
+    ];
+    let dependencies = vec![
+        (1, vec![]),
+        (2, vec![]),
+        (10, vec![internal_blocker(1, "open")]),
+        (20, vec![internal_blocker(2, "open")]),
+        (21, vec![internal_blocker(2, "open")]),
+    ];
+    let mocks = mock_repository(&mut github, "acme/p0-curve", issues, dependencies);
+
+    let output = next_command(&state, &github.url(), "acme/p0-curve", true)
+        .output()
+        .expect("run equal-distance P0 routes");
+    assert_success(&output);
+    let output: Value = serde_json::from_slice(&output.stdout).expect("next JSON");
+
+    assert_eq!(output["recommendation"]["first_issue"]["number"], 2);
+    assert_eq!(output["recommendation"]["critical_distance"], 1);
+    assert_eq!(
+        output["comparison_to_runner_up"]["reason_code"],
+        "unlocks_more_p0"
+    );
+    assert!(reason_codes(&output).contains(&"shared_p0_prerequisite"));
+    mocks.assert();
+}
+
+#[test]
+fn equal_p0_routes_fall_through_to_the_complete_normal_key() {
+    let mut github = Server::new();
+    let state = TempDir::new().expect("temporary state directory");
+    let issues = vec![
+        issue(1, "open", &["priority:p4"], &[]),
+        issue(2, "open", &["priority:p4"], &[]),
+        issue(10, "open", &["priority:p0"], &[]),
+        issue(20, "open", &["priority:p0"], &[]),
+        issue(30, "open", &["priority:p1"], &[]),
+        issue(31, "open", &["priority:p1"], &[]),
+    ];
+    let dependencies = vec![
+        (1, vec![]),
+        (2, vec![]),
+        (10, vec![internal_blocker(1, "open")]),
+        (20, vec![internal_blocker(2, "open")]),
+        (30, vec![internal_blocker(1, "open")]),
+        (31, vec![internal_blocker(1, "open")]),
+    ];
+    let mocks = mock_repository(&mut github, "acme/p0-normal-key", issues, dependencies);
+
+    let output = next_command(&state, &github.url(), "acme/p0-normal-key", true)
+        .output()
+        .expect("run P0 routes tied before the normal key");
+    assert_success(&output);
+    let output: Value = serde_json::from_slice(&output.stdout).expect("next JSON");
+
+    assert_eq!(output["recommendation"]["first_issue"]["number"], 1);
+    assert_eq!(output["recommendation"]["critical_distance"], 1);
+    assert_eq!(output["alternatives"][0]["critical_distance"], 1);
+    assert_eq!(
+        output["recommendation"]["outcome"]["unlock_profile"]["p0_curve"],
+        output["alternatives"][0]["outcome"]["unlock_profile"]["p0_curve"]
+    );
+    assert_eq!(
+        output["comparison_to_runner_up"]["reason_code"],
+        "unlocks_more_work"
+    );
+    mocks.assert();
+}
+
+#[test]
+fn separate_p0_routes_are_not_explained_as_a_shared_prerequisite() {
+    let mut github = Server::new();
+    let state = TempDir::new().expect("temporary state directory");
+    let issues = vec![
+        issue(1, "open", &["priority:p4"], &[]),
+        issue(2, "open", &["priority:p4"], &[]),
+        issue(10, "open", &["priority:p0"], &[]),
+        issue(20, "open", &["priority:p0"], &[]),
+    ];
+    let dependencies = vec![
+        (1, vec![]),
+        (2, vec![]),
+        (10, vec![internal_blocker(1, "open")]),
+        (20, vec![internal_blocker(2, "open")]),
+    ];
+    let mocks = mock_repository(&mut github, "acme/separate-p0", issues, dependencies);
+
+    let output = next_default_command(&state, &github.url(), "acme/separate-p0", true)
+        .output()
+        .expect("run separate P0 routes");
+    assert_success(&output);
+    let output: Value = serde_json::from_slice(&output.stdout).expect("next JSON");
+
+    assert_eq!(
+        output["recommendation"]["outcome"]["unlock_profile"]["p0_curve"],
+        json!([1, 1, 2])
+    );
+    assert!(!reason_codes(&output).contains(&"shared_p0_prerequisite"));
+    mocks.assert();
+}
+
+#[test]
+fn an_assigned_p0_outcome_still_gives_its_available_prerequisite_precedence() {
+    let mut github = Server::new();
+    let state = TempDir::new().expect("temporary state directory");
+    let issues = vec![
+        issue(1, "open", &["priority:p4"], &[]),
+        issue(10, "open", &["priority:p0"], &["alice"]),
+    ];
+    let dependencies = vec![(1, vec![]), (10, vec![internal_blocker(1, "open")])];
+    let mocks = mock_repository(&mut github, "acme/assigned-p0", issues, dependencies);
+
+    let output = next_command(&state, &github.url(), "acme/assigned-p0", true)
+        .output()
+        .expect("run assigned P0 outcome");
+    assert_success(&output);
+    let output: Value = serde_json::from_slice(&output.stdout).expect("next JSON");
+
+    assert_eq!(output["mode"], "p0_route");
+    assert_eq!(output["recommendation"]["first_issue"]["number"], 1);
+    assert_eq!(output["recommendation"]["critical_distance"], 1);
+    assert_eq!(
+        output["recommendation"]["outcome"]["unlock_availability"],
+        json!({"available": 0, "assigned": 1})
+    );
+    mocks.assert();
+}
+
+#[test]
+fn a_p0_behind_an_unknown_external_blocker_has_no_hard_precedence() {
+    assert_infeasible_p0_route(
+        "acme/p0-external",
+        vec![
+            issue(1, "open", &["priority:p1"], &[]),
+            issue(10, "open", &["priority:p0"], &[]),
+        ],
+        vec![
+            (1, vec![]),
+            (
+                10,
+                vec![
+                    internal_blocker(1, "open"),
+                    external_blocker("partners/api", 90, "unknown"),
+                ],
+            ),
+        ],
+    );
+}
+
+#[test]
+fn a_p0_requiring_an_assigned_prerequisite_has_no_hard_precedence() {
+    assert_infeasible_p0_route(
+        "acme/p0-assigned-step",
+        vec![
+            issue(1, "open", &["priority:p1"], &[]),
+            issue(6, "open", &["priority:p4"], &["alice"]),
+            issue(10, "open", &["priority:p0"], &[]),
+        ],
+        vec![
+            (1, vec![]),
+            (6, vec![internal_blocker(1, "open")]),
+            (10, vec![internal_blocker(6, "open")]),
+        ],
+    );
+}
+
+#[test]
+fn a_p0_outside_the_horizon_has_no_hard_precedence() {
+    assert_infeasible_p0_route(
+        "acme/p0-distant",
+        vec![
+            issue(1, "open", &["priority:p1"], &[]),
+            issue(2, "open", &["priority:p1"], &[]),
+            issue(3, "open", &["priority:p1"], &[]),
+            issue(4, "open", &["priority:p1"], &[]),
+            issue(10, "open", &["priority:p0"], &[]),
+        ],
+        vec![
+            (1, vec![]),
+            (2, vec![internal_blocker(1, "open")]),
+            (3, vec![internal_blocker(2, "open")]),
+            (4, vec![internal_blocker(3, "open")]),
+            (10, vec![internal_blocker(4, "open")]),
+        ],
+    );
+}
+
+#[test]
+fn a_p0_in_a_cycle_has_no_hard_precedence() {
+    assert_infeasible_p0_route(
+        "acme/p0-cycle",
+        vec![
+            issue(1, "open", &["priority:p1"], &[]),
+            issue(10, "open", &["priority:p0"], &[]),
+            issue(11, "open", &["priority:p4"], &[]),
+        ],
+        vec![
+            (1, vec![]),
+            (10, vec![internal_blocker(11, "open")]),
+            (11, vec![internal_blocker(10, "open")]),
+        ],
+    );
 }
 
 #[test]
@@ -759,6 +1304,33 @@ fn empty_graph_omits_pagerank_globally_and_out_of_range_horizon_is_rejected() {
 
 fn next_command(state: &TempDir, api_url: &str, repository: &str, online: bool) -> Command {
     next_command_with_horizon(state, api_url, repository, online, Some(1))
+}
+
+fn assert_infeasible_p0_route(
+    repository: &str,
+    issues: Vec<Value>,
+    dependencies: Vec<(u64, Vec<Value>)>,
+) {
+    let mut github = Server::new();
+    let state = TempDir::new().expect("temporary state directory");
+    let mocks = mock_repository(&mut github, repository, issues, dependencies);
+
+    let output = next_default_command(&state, &github.url(), repository, true)
+        .output()
+        .expect("run infeasible P0 route");
+    assert_success(&output);
+    let output: Value = serde_json::from_slice(&output.stdout).expect("next JSON");
+
+    assert_eq!(output["mode"], "normal", "fixture: {repository}");
+    assert!(
+        output["recommendation"]["critical_distance"].is_null(),
+        "fixture: {repository}"
+    );
+    assert!(
+        !reason_codes(&output).contains(&"shortest_p0_route"),
+        "fixture: {repository}"
+    );
+    mocks.assert();
 }
 
 fn next_default_command(state: &TempDir, api_url: &str, repository: &str, online: bool) -> Command {

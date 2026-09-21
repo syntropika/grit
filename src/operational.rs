@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
 
 use crate::model::{BlockerScope, Dependency, Issue, LocalReplica};
-pub(crate) use rollout::RolloutState;
+pub(crate) use rollout::{OneStepAnalysis, RolloutState};
 use scc::{cyclic_issue_numbers, strongly_connected_components};
 
 #[derive(Clone, Copy)]
@@ -85,11 +85,12 @@ impl<'a> OperationalGraph<'a> {
             .iter()
             .map(|(number, issue)| (*number, IssueState::parse(&issue.state)))
             .collect();
-        let open_numbers: Vec<_> = issue_states
+        let mut open_numbers: Vec<_> = issue_states
             .iter()
             .filter(|(_, state)| **state == IssueState::Open)
             .map(|(number, _)| *number)
             .collect();
+        open_numbers.sort_by_key(|number| issues[number].stable_node_key());
         let open_set: BTreeSet<_> = open_numbers.iter().copied().collect();
         let mut dependencies_by_blocked = BTreeMap::<u64, Vec<&Dependency>>::new();
         let mut internal_open_edges = BTreeSet::new();
@@ -130,6 +131,9 @@ impl<'a> OperationalGraph<'a> {
                 .or_default()
                 .push(*blocked);
         }
+        for dependents in dependents_by_blocker.values_mut() {
+            dependents.sort_by_key(|number| issues[number].stable_node_key());
+        }
         Self {
             issues,
             issue_states,
@@ -150,8 +154,19 @@ impl<'a> OperationalGraph<'a> {
         self.issue_states.get(&number).copied()
     }
 
+    pub(crate) fn open_numbers(&self) -> &[u64] {
+        &self.open_numbers
+    }
+
     pub(crate) fn dependencies_for(&self, number: u64) -> &[&'a Dependency] {
         self.dependencies_by_blocked
+            .get(&number)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    pub(crate) fn dependents_for(&self, number: u64) -> &[u64] {
+        self.dependents_by_blocker
             .get(&number)
             .map(Vec::as_slice)
             .unwrap_or(&[])
