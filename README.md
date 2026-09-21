@@ -37,13 +37,13 @@ binary (Google Chrome by default):
 ```bash
 GRIT_BROWSER=google-chrome cargo test --test graph_cli \
   generated_site_is_a_keyboard_accessible_offline_graph_explorer -- --ignored --exact
-
-GRIT_BROWSER=google-chrome cargo test --release \
-  graph::benchmark::dense_graph_browser_benchmark -- --ignored --exact --nocapture
 GRIT_BROWSER=google-chrome cargo test --test public_graph_cli \
   sealed_public_bundle_executes_no_user_markup_or_external_request -- --ignored --exact
 GRIT_BROWSER=google-chrome cargo test --test public_graph_cli \
   browser_network_audit_detects_an_external_request_attempt -- --ignored --exact
+
+GRIT_BROWSER=google-chrome cargo test --release \
+  graph::benchmark::dense_graph_browser_benchmark -- --ignored --exact --nocapture
 ```
 
 The test launches an ephemeral headless profile with background networking
@@ -402,7 +402,12 @@ or PageRank buckets; node color can display readiness, state, or Declared
 priority. The browser only presents values produced by the binary and never
 recalculates ranking or PageRank.
 
-The browser explorer searches by Issue number or title, renders the precomputed
+Private graphs project Pending priorities, Dependencies, Draft Issues, field edits,
+and comment provenance from the same Working input as `next` and `plan`. Drafts
+use stable `OWNER/REPO#draft:TEMPORARY_ID` keys and acquire GitHub links only after
+reconciliation assigns a canonical identity. Bodies and comment text remain excluded.
+
+The browser explorer searches by Issue number, Draft key, or title, renders the precomputed
 dependency layers, and keeps graph selection synchronized with an accessible
 Issue table. Its detail panel shows readiness, blockers, dependents, and the
 canonical GitHub link. Labels appear only on hover, focus, or selection, and
@@ -431,8 +436,7 @@ browser does not run layout or ranking. See the reproducible measurements and
 environment in [`docs/benchmarks/graph-browser.md`](docs/benchmarks/graph-browser.md).
 
 Generation validates the closed artifact model in a staging directory before
-replacing the target. Regenerating from the same effective Local replica is
-byte-stable. `synced_at` is the only time field and changes only when the input
+replacing the target. Regenerating from the same Working input is byte-stable. `synced_at` is the only time field and changes only when the input
 replica itself has a different synchronization timestamp.
 
 ### Generate an allowlisted public graph
