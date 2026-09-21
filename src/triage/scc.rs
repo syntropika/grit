@@ -169,6 +169,7 @@ mod tests {
             synced_at: "2026-08-07T00:00:00Z".to_owned(),
             input_hash: "unused-by-operational-analysis".to_owned(),
             repository_labels: Some(Vec::<Label>::new()),
+            sync: Default::default(),
             issues,
             dependencies,
         }
