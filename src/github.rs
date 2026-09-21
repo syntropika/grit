@@ -52,6 +52,14 @@ impl<'a> CreateLabelRequest<'a> {
     }
 }
 
+#[derive(Clone, Deserialize)]
+pub(crate) struct RepositoryMetadata {
+    pub(crate) full_name: String,
+    pub(crate) html_url: String,
+    pub(crate) visibility: String,
+    pub(crate) private: bool,
+}
+
 impl GitHubClient {
     pub(crate) fn new(base_url: Url, token: &AuthToken) -> Result<Self, GitHubError> {
         let mut authorization = HeaderValue::from_str(&format!("Bearer {}", token.expose()))
@@ -184,6 +192,23 @@ impl GitHubClient {
         }
         let _: GitHubLabel = response.json().map_err(GitHubError::Decode)?;
         Ok(LabelCreation::Created)
+    }
+
+    pub(crate) fn fetch_repository_metadata(
+        &self,
+        repository: &Repository,
+    ) -> Result<RepositoryMetadata, GitHubError> {
+        let url = self.endpoint(&format!(
+            "repos/{}/{}",
+            repository.owner(),
+            repository.name()
+        ))?;
+        let response = self.client.get(url).send().map_err(GitHubError::Request)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(api_status_error(status, response.headers()));
+        }
+        response.json().map_err(GitHubError::DecodeMetadata)
     }
 
     fn paginate<T>(
@@ -571,6 +596,8 @@ pub(crate) enum GitHubError {
     },
     #[error("GitHub returned invalid JSON: {0}")]
     Decode(reqwest::Error),
+    #[error("GitHub returned invalid Repository metadata: {0}")]
+    DecodeMetadata(reqwest::Error),
     #[error("GitHub returned an invalid pagination Link header")]
     InvalidLink,
     #[error("GitHub pagination attempted to revisit a page")]

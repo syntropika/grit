@@ -9,7 +9,7 @@ use url::Url;
 use crate::{
     auth::{AuthError, AuthToken},
     github::{CreateLabelRequest, GitHubClient, GitHubError, LabelCreation},
-    graph::{ARTIFACT_SCHEMA_VERSION, GraphError, publish_site},
+    graph::{GraphError, PublicGraphOptions, confirm_public_repository, publish_site},
     model::{LocalReplica, ReplicaError},
     operational::{ExecutionScope, PreparedRepository, analyze_ready},
     plan::{DependencyLayers, PlanIssue},
@@ -53,6 +53,15 @@ enum Command {
         /// Emit versioned machine-readable output.
         #[arg(long)]
         json: bool,
+        /// Generate a fail-closed artifact safe for deliberate public publication.
+        #[arg(long)]
+        public: bool,
+        /// Publish labels in this explicitly allowed category prefix. Repeatable.
+        #[arg(long, requires = "public")]
+        public_label_prefix: Vec<String>,
+        /// Publish GitHub assignee logins in the public artifact.
+        #[arg(long, requires = "public")]
+        public_include_assignees: bool,
     },
     /// Recommend the best executable first step under next/v1.
     Next {
@@ -128,12 +137,19 @@ pub(crate) fn execute() -> Result<(), CliError> {
             assignee,
             horizon,
             json,
+            public,
+            public_label_prefix,
+            public_include_assignees,
         } => graph(
             &Repository::parse(&repo)?,
             &output,
             assignee.as_deref(),
             horizon,
             json,
+            public.then_some(PublicGraphOptions {
+                label_prefixes: public_label_prefix,
+                include_assignees: public_include_assignees,
+            }),
         ),
         Command::Next {
             repo,
@@ -175,15 +191,27 @@ fn graph(
     assignee: Option<&str>,
     horizon: u8,
     json: bool,
+    public_options: Option<PublicGraphOptions>,
 ) -> Result<(), CliError> {
     if !(ranking::MIN_HORIZON..=ranking::MAX_HORIZON).contains(&horizon) {
         return Err(CliError::UnsupportedNextHorizon(horizon));
     }
-    let (replica, source) = refresh_or_local(repository)?;
-    let scope = assignee
-        .map(ExecutionScope::Assignee)
-        .unwrap_or(ExecutionScope::Available);
-    let site = publish_site(&replica, scope, horizon, output)?;
+    let (replica, source, site) = if let Some(public_options) = public_options {
+        let client = github_client()?;
+        let metadata = client.fetch_repository_metadata(repository)?;
+        let confirmed = confirm_public_repository(repository.full_name(), metadata)?;
+        let (replica, source) = refresh_or_local_with_client(repository, &client)?;
+        let site =
+            crate::graph::publish_public_site(&replica, &confirmed, &public_options, output)?;
+        (replica, source, site)
+    } else {
+        let (replica, source) = refresh_or_local(repository)?;
+        let scope = assignee
+            .map(ExecutionScope::Assignee)
+            .unwrap_or(ExecutionScope::Available);
+        let site = publish_site(&replica, scope, horizon, output)?;
+        (replica, source, site)
+    };
     let output_path = output.display().to_string();
     let result = GraphOutput {
         schema_version: GRAPH_SCHEMA_VERSION,
@@ -191,10 +219,10 @@ fn graph(
         repository: &replica.repository,
         source,
         synced_at: &replica.synced_at,
-        input_hash: &replica.input_hash,
+        input_hash: &site.input_hash,
         output: &output_path,
         artifact: GraphArtifactSummary {
-            schema_version: ARTIFACT_SCHEMA_VERSION,
+            schema_version: site.schema_version,
             node_count: site.node_count,
             edge_count: site.edge_count,
             artifact_hash: &site.artifact_hash,
@@ -391,6 +419,13 @@ fn next(
 
 fn synchronize(repository: &Repository) -> Result<LocalReplica, CliError> {
     let client = github_client()?;
+    synchronize_with_client(repository, &client)
+}
+
+fn synchronize_with_client(
+    repository: &Repository,
+    client: &GitHubClient,
+) -> Result<LocalReplica, CliError> {
     let data = client.fetch_repository(repository)?;
 
     let replica = LocalReplica::build(
@@ -517,7 +552,23 @@ fn ready(repository: &Repository, assignee: Option<&str>, json: bool) -> Result<
 }
 
 fn refresh_or_local(repository: &Repository) -> Result<(LocalReplica, ReplicaSource), CliError> {
-    match synchronize(repository) {
+    let refresh = github_client().and_then(|client| synchronize_with_client(repository, &client));
+    refresh_or_local_after(repository, refresh)
+}
+
+fn refresh_or_local_with_client(
+    repository: &Repository,
+    client: &GitHubClient,
+) -> Result<(LocalReplica, ReplicaSource), CliError> {
+    let refresh = synchronize_with_client(repository, client);
+    refresh_or_local_after(repository, refresh)
+}
+
+fn refresh_or_local_after(
+    repository: &Repository,
+    refresh: Result<LocalReplica, CliError>,
+) -> Result<(LocalReplica, ReplicaSource), CliError> {
+    match refresh {
         Ok(replica) => Ok((replica, ReplicaSource::Live)),
         Err(refresh_error) => {
             let store = ReplicaStore::discover(repository)?;

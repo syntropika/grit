@@ -373,11 +373,11 @@ function exerciseHostileText(harness) {
 }
 
 function exerciseWhenReady() {
-  const mainReady = frame.contentDocument?.documentElement.dataset.gritTimeToInteractiveMs;
+  const mainReady = frame.contentDocument?.documentElement?.dataset.gritTimeToInteractiveMs;
   const constrainedReady = constrainedFrame.contentDocument
-    ?.documentElement.dataset.gritTimeToInteractiveMs;
+    ?.documentElement?.dataset.gritTimeToInteractiveMs;
   const projectReady = projectFrame.contentDocument
-    ?.documentElement.dataset.gritTimeToInteractiveMs;
+    ?.documentElement?.dataset.gritTimeToInteractiveMs;
   if (mainReady && constrainedReady && projectReady) {
     setTimeout(exercise, 0);
     return;

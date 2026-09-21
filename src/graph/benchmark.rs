@@ -33,7 +33,7 @@ fn dense_graph_browser_benchmark() {
 
         let mut positioned_nodes = artifact.nodes.clone();
         let layout_started = Instant::now();
-        layout::assign_dependency_layers(&mut positioned_nodes, &artifact.edges)
+        layout::assign_artifact_dependency_layers(&mut positioned_nodes, &artifact.edges)
             .expect("synthetic graph layout");
         let layout = layout_started.elapsed();
 

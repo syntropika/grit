@@ -8,6 +8,14 @@ use std::{
 use super::GraphError;
 
 pub(super) fn publish(output: &Path, files: &[(&str, Vec<u8>)]) -> Result<(), GraphError> {
+    publish_validated(output, files, |_| Ok(()))
+}
+
+pub(super) fn publish_validated(
+    output: &Path,
+    files: &[(&str, Vec<u8>)],
+    validate: impl FnOnce(&Path) -> Result<(), GraphError>,
+) -> Result<(), GraphError> {
     validate_output_path(output)?;
     let parent = usable_parent(output);
     fs::create_dir_all(parent).map_err(GraphError::CreateParent)?;
@@ -16,6 +24,7 @@ pub(super) fn publish(output: &Path, files: &[(&str, Vec<u8>)]) -> Result<(), Gr
         for (name, bytes) in files {
             write_synced(&staging.join(name), bytes)?;
         }
+        validate(&staging)?;
         sync_directory(&staging).map_err(GraphError::WriteArtifact)?;
         replace_target(parent, output, &staging)
     })();

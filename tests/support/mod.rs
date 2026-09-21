@@ -215,3 +215,4 @@ pub fn assert_success(output: &std::process::Output) {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+pub(crate) mod browser;

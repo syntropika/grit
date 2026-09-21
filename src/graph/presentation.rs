@@ -2,7 +2,10 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde::Serialize;
 
-use super::artifact::{ArtifactNode, GraphArtifact, IssueNodeStatus, NodeKey};
+use super::{
+    artifact::{ArtifactNode, GraphArtifact, IssueNodeStatus},
+    model::NodeKey,
+};
 
 pub(super) const FULL_NETWORK_MAX_NODES: usize = 5_000;
 pub(super) const FULL_NETWORK_MAX_EDGES: usize = 20_000;

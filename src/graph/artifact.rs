@@ -1,13 +1,14 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fmt,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 use schemars::JsonSchema;
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::GraphError;
+use super::{
+    GraphError,
+    model::{NodeKey, Position, unresolved_position},
+    text::sort_and_deduplicate,
+};
 use crate::{
     model::{BlockerScope, LocalReplica, strip_operation_markers},
     operational::{ExecutionScope, PreparedRepository},
@@ -315,14 +316,6 @@ impl ExternalNodeStatus {
     }
 }
 
-#[derive(Clone, Deserialize, JsonSchema, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct Position {
-    pub(super) layer: Option<u32>,
-    pub(super) x: i64,
-    pub(super) y: i64,
-}
-
 #[derive(Clone, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(deny_unknown_fields)]
 #[schemars(rename = "edge")]
@@ -339,59 +332,6 @@ pub(super) struct ArtifactEdge {
 #[serde(rename_all = "snake_case")]
 enum EdgeKind {
     BlockedBy,
-}
-
-#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
-pub(super) struct NodeKey {
-    repository: String,
-    number: u64,
-}
-
-impl NodeKey {
-    fn new(repository: &str, number: u64) -> Self {
-        Self {
-            repository: repository.to_owned(),
-            number,
-        }
-    }
-
-    fn parse(value: &str) -> Result<Self, String> {
-        let (repository, number) = value
-            .rsplit_once('#')
-            .ok_or_else(|| format!("invalid Stable node key {value}"))?;
-        let number: u64 = number
-            .parse()
-            .map_err(|_| format!("invalid Stable node key {value}"))?;
-        if repository.is_empty() || number == 0 {
-            return Err(format!("invalid Stable node key {value}"));
-        }
-        Ok(Self::new(repository, number))
-    }
-}
-
-impl fmt::Display for NodeKey {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}#{}", self.repository, self.number)
-    }
-}
-
-impl Serialize for NodeKey {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&self.to_string())
-    }
-}
-
-impl<'de> Deserialize<'de> for NodeKey {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Self::parse(&value).map_err(de::Error::custom)
-    }
 }
 
 pub(super) fn build(
@@ -537,8 +477,8 @@ pub(super) fn build(
         }
         nodes.push(ArtifactNode::ExternalBlocker {
             common: NodeCommon {
-                repository: key.repository.clone(),
-                number: key.number,
+                repository: key.repository().to_owned(),
+                number: key.number(),
                 key: key.clone(),
                 position: unresolved_position(),
                 provenance: ElementProvenance::synchronized(),
@@ -554,7 +494,7 @@ pub(super) fn build(
 
     nodes.sort_by(|left, right| left.key().cmp(right.key()));
     let edges: Vec<_> = edges.into_iter().collect();
-    super::layout::assign_dependency_layers(&mut nodes, &edges)?;
+    super::layout::assign_artifact_dependency_layers(&mut nodes, &edges)?;
     let provenance = ArtifactProvenance {
         base: ProvenanceState::Synchronized,
         state: ProvenanceState::Synchronized,
@@ -657,7 +597,7 @@ fn validate(artifact: &GraphArtifact) -> Result<(), GraphError> {
     }
     let key_set: BTreeSet<_> = artifact.nodes.iter().map(ArtifactNode::key).collect();
     for node in &artifact.nodes {
-        if node.number() != node.key().number || node.repository() != node.key().repository {
+        if node.number() != node.key().number() || node.repository() != node.key().repository() {
             return Err(GraphError::InvalidStableKey(node.key().to_string()));
         }
         match node {
@@ -767,19 +707,6 @@ fn normalized_state(value: &str) -> &'static str {
     } else {
         "unknown"
     }
-}
-
-fn unresolved_position() -> Position {
-    Position {
-        layer: None,
-        x: 0,
-        y: 0,
-    }
-}
-
-fn sort_and_deduplicate(values: &mut Vec<String>) {
-    values.sort_by_key(|value| value.to_ascii_lowercase());
-    values.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
 }
 
 #[cfg(test)]
