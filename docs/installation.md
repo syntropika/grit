@@ -8,12 +8,12 @@ embedded, so the released binary does not need a separate web server or Node.js.
 Choose the archive for your operating system and CPU from
 [GitHub Releases](https://github.com/syntropika/grit/releases/latest).
 
-| Platform | v0.1.0 archive | System requirement |
+| Platform | v0.1.1 archive | System requirement |
 | --- | --- | --- |
-| Linux x86_64 | [x86_64-unknown-linux-gnu](https://github.com/syntropika/grit/releases/download/v0.1.0/grit-v0.1.0-x86_64-unknown-linux-gnu.tar.gz) | glibc 2.35 or newer |
-| Linux ARM64 | [aarch64-unknown-linux-gnu](https://github.com/syntropika/grit/releases/download/v0.1.0/grit-v0.1.0-aarch64-unknown-linux-gnu.tar.gz) | glibc 2.35 or newer |
-| macOS Apple silicon | [aarch64-apple-darwin](https://github.com/syntropika/grit/releases/download/v0.1.0/grit-v0.1.0-aarch64-apple-darwin.tar.gz) | macOS 13 or newer |
-| macOS Intel | [x86_64-apple-darwin](https://github.com/syntropika/grit/releases/download/v0.1.0/grit-v0.1.0-x86_64-apple-darwin.tar.gz) | macOS 13 or newer |
+| Linux x86_64 | [x86_64-unknown-linux-gnu](https://github.com/syntropika/grit/releases/download/v0.1.1/grit-v0.1.1-x86_64-unknown-linux-gnu.tar.gz) | glibc 2.35 or newer |
+| Linux ARM64 | [aarch64-unknown-linux-gnu](https://github.com/syntropika/grit/releases/download/v0.1.1/grit-v0.1.1-aarch64-unknown-linux-gnu.tar.gz) | glibc 2.35 or newer |
+| macOS Apple silicon | [aarch64-apple-darwin](https://github.com/syntropika/grit/releases/download/v0.1.1/grit-v0.1.1-aarch64-apple-darwin.tar.gz) | macOS 13 or newer |
+| macOS Intel | [x86_64-apple-darwin](https://github.com/syntropika/grit/releases/download/v0.1.1/grit-v0.1.1-x86_64-apple-darwin.tar.gz) | macOS 13 or newer |
 
 Use `uname -m` to check your CPU. On Linux, `aarch64` means ARM64; on macOS,
 `arm64` means Apple silicon. Windows binaries are not provided in this release.
@@ -23,10 +23,10 @@ download with `sha256sum`; on macOS use `shasum -a 256`:
 
 ```bash
 # Linux example; run from the directory containing both downloaded files.
-grep 'grit-v0.1.0-x86_64-unknown-linux-gnu.tar.gz$' SHA256SUMS | sha256sum --check -
-tar -xzf grit-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
+grep 'grit-v0.1.1-x86_64-unknown-linux-gnu.tar.gz$' SHA256SUMS | sha256sum --check -
+tar -xzf grit-v0.1.1-x86_64-unknown-linux-gnu.tar.gz
 mkdir -p "$HOME/.local/bin"
-install -m 755 grit-v0.1.0-x86_64-unknown-linux-gnu/grit "$HOME/.local/bin/grit"
+install -m 755 grit-v0.1.1-x86_64-unknown-linux-gnu/grit "$HOME/.local/bin/grit"
 "$HOME/.local/bin/grit" --version
 ```
 
@@ -42,7 +42,7 @@ requires notarization, use a local source build instead.
 With Rust 1.94.0 installed:
 
 ```bash
-cargo +1.94.0 install --locked --git https://github.com/syntropika/grit --tag v0.1.0
+cargo +1.94.0 install --locked --git https://github.com/syntropika/grit --tag v0.1.1
 grit --version
 ```
 
@@ -57,7 +57,7 @@ to authenticate.
 ### Sign in with a browser
 
 ```bash
-grit auth login --client-id YOUR_PUBLIC_OAUTH_CLIENT_ID
+grit auth login
 grit auth status
 ```
 
@@ -66,17 +66,23 @@ Grit validates the resulting token and saves it in the operating system's
 secure credential store: macOS Keychain or a Linux Secret Service session.
 It never falls back to a plaintext credential file.
 
-Browser login requires a registered GitHub OAuth App with Device Flow enabled.
-This release does not embed an official Grit Client ID. Supply your app's
-public ID with `--client-id` or `GRIT_GITHUB_CLIENT_ID`; no Client Secret is
-required. The app is registered once by its maintainer, and each user
-authorizes it. An organization that restricts OAuth apps may require its
-owner's approval before organization repositories can be accessed. See
-[GitHub's registration guide](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/creating-an-oauth-app).
+On GitHub.com, Grit uses its official OAuth App by default. Each user
+authorizes that app; users do not need to register their own. An organization
+that restricts OAuth apps may require its owner's approval before organization
+repositories can be accessed.
 
-If GitHub issues an expiring token, Grit records its expiration and asks you
-to log in again after it expires. This release does not refresh OAuth tokens
-automatically.
+To use a custom app, pass its public ID with `--client-id` or set
+`GRIT_GITHUB_CLIENT_ID`. The command-line flag takes precedence over the
+environment variable, which takes precedence over the official GitHub.com
+default. An invalid or empty override is rejected. No Client Secret is needed.
+
+Grit reuses its saved login on later commands. The official app is configured
+to issue tokens without a scheduled expiration. You may need to sign in again
+if access is revoked or GitHub invalidates the token.
+
+If a custom app issues an expiring token, Grit records its expiration and asks
+you to log in again after it expires. This release does not refresh OAuth
+tokens automatically.
 
 ### Save an existing token
 
@@ -104,7 +110,12 @@ source without exposing the token. `grit auth logout` removes only Grit's
 saved credential; it does not revoke the token on GitHub or modify `GH_TOKEN`.
 
 For GitHub Enterprise, pass `--hostname github.example.com` to auth commands
-and set `GRIT_GITHUB_HOST=github.example.com` for repository commands.
+and set both `GRIT_GITHUB_HOST=github.example.com` and
+`GRIT_GITHUB_API_URL=https://github.example.com/api/v3/` for repository commands.
+Browser login on an Enterprise host requires a Client ID from an OAuth App
+registered on that instance with Device Flow enabled; Grit's GitHub.com app
+is not used on other hosts. See
+[GitHub's registration guide](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/creating-an-oauth-app).
 Credentials are stored separately for each host. Set `GRIT_NO_KEYRING=1`
 to disable secure-store discovery in headless sessions or isolated tests;
 `GH_TOKEN` remains available.

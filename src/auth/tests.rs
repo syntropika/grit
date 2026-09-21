@@ -107,6 +107,80 @@ fn github() -> Host {
 }
 
 #[test]
+fn official_oauth_app_is_the_default_only_for_github_com() {
+    for hostname in ["github.com", "GitHub.COM."] {
+        let host = Host::parse(hostname).unwrap();
+        assert_eq!(
+            configured_client_id(&host, None, None).unwrap(),
+            "Ov23lie2fyBwnR4nRGgA"
+        );
+    }
+    for hostname in [
+        "github.example.com",
+        "api.github.com",
+        "github.com.example.com",
+        "example.github.com",
+    ] {
+        let host = Host::parse(hostname).unwrap();
+        assert!(matches!(
+            configured_client_id(&host, None, None),
+            Err(AuthError::MissingClientId)
+        ));
+    }
+}
+
+#[test]
+fn oauth_client_id_overrides_apply_in_order_on_public_and_enterprise_hosts() {
+    for hostname in ["github.com", "github.example.com"] {
+        let host = Host::parse(hostname).unwrap();
+        assert_eq!(
+            configured_client_id(&host, None, Some("environment-app".to_owned())).unwrap(),
+            "environment-app"
+        );
+        assert_eq!(
+            configured_client_id(
+                &host,
+                Some("flag-app".to_owned()),
+                Some("environment-app".to_owned()),
+            )
+            .unwrap(),
+            "flag-app"
+        );
+        assert_eq!(
+            configured_client_id(&host, Some("flag-app".to_owned()), Some(String::new())).unwrap(),
+            "flag-app"
+        );
+    }
+}
+
+#[test]
+fn invalid_explicit_oauth_client_ids_do_not_fall_back_to_another_app() {
+    for invalid in [
+        "",
+        "   ",
+        "app with spaces",
+        "app/invalid",
+        &"a".repeat(257),
+    ] {
+        for hostname in ["github.com", "github.example.com"] {
+            let host = Host::parse(hostname).unwrap();
+            assert!(matches!(
+                configured_client_id(
+                    &host,
+                    Some(invalid.to_owned()),
+                    Some("environment-app".to_owned()),
+                ),
+                Err(AuthError::InvalidClientId)
+            ));
+            assert!(matches!(
+                configured_client_id(&host, None, Some(invalid.to_owned())),
+                Err(AuthError::InvalidClientId)
+            ));
+        }
+    }
+}
+
+#[test]
 fn explicit_environment_token_wins_without_opening_the_store() {
     let result = discover_with(Some(" environment-token \n".to_owned()), || {
         panic!("must not access keychain")

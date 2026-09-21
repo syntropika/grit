@@ -24,23 +24,26 @@ so work with another unresolved blocker stays blocked.
 Download a Linux or macOS binary for x86_64 or ARM64 from
 [GitHub Releases](https://github.com/syntropika/grit/releases/latest). See the
 [installation guide](docs/installation.md) for system requirements and checksum
-verification. With Rust 1.94.0 installed, you can also build v0.1.0 from source:
+verification. With Rust 1.94.0 installed, you can also build v0.1.1 from source:
 
 ```bash
-cargo +1.94.0 install --locked --git https://github.com/syntropika/grit --tag v0.1.0
+cargo +1.94.0 install --locked --git https://github.com/syntropika/grit --tag v0.1.1
 ```
 
-Connect a GitHub account using [Grit's authentication commands](docs/installation.md#connect-to-github)
-or `GH_TOKEN`.
-Then replace `OWNER/REPO` with the repository you want to analyze:
+Sign in through your browser, then replace `OWNER/REPO` with the repository
+you want to analyze:
 
 ```bash
+grit auth login
 grit sync --repo OWNER/REPO
 grit next --repo OWNER/REPO
 ```
 
 Grit calls GitHub's API directly from Rust. It uses `GH_TOKEN` first, then its
 own saved login.
+If you already provide `GH_TOKEN`, skip the login command. See
+[authentication](docs/installation.md#connect-to-github) for token login and
+GitHub Enterprise configuration.
 These commands read GitHub without changing remote Issues.
 
 By default, `next` chooses from **unassigned, ready work**. To choose from ready

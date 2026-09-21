@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.1
+
+- Use Grit's official OAuth App by default for browser login on GitHub.com:
+  run `grit auth login` without supplying a Client ID.
+- Keep custom app configuration through `--client-id` and
+  `GRIT_GITHUB_CLIENT_ID`. GitHub Enterprise hosts require their own app.
+- Update the installation guide and quickstart for the configured login.
+
 ## 0.1.0
 
 First release of Grit, a CLI for choosing executable work from GitHub Issues

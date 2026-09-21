@@ -21,6 +21,9 @@ use device::{DeviceApi, SystemClock};
 use http::GitHubAuth;
 use store::{CredentialStore, OsCredentialStore};
 
+// Public identifier for Grit's official GitHub.com OAuth app, not a credential.
+const GITHUB_CLIENT_ID: &str = "Ov23lie2fyBwnR4nRGgA";
+
 pub(crate) struct AuthToken {
     value: Zeroizing<String>,
     expires_at: Option<u64>,
@@ -143,7 +146,8 @@ pub(crate) enum AuthCommand {
         /// GitHub hostname, defaulting to GRIT_GITHUB_HOST or github.com.
         #[arg(long)]
         hostname: Option<String>,
-        /// Your GitHub OAuth app's public client ID; also reads GRIT_GITHUB_CLIENT_ID.
+        /// Override the public OAuth client ID; takes precedence over GRIT_GITHUB_CLIENT_ID.
+        /// Defaults to Grit's app on github.com; other hosts require their own app.
         #[arg(long, conflicts_with = "with_token")]
         client_id: Option<String>,
         /// Read a token from piped standard input and save it in the OS credential store.
@@ -176,7 +180,11 @@ pub(crate) fn execute(command: AuthCommand) -> Result<(), AuthError> {
             let client_id = if with_token {
                 None
             } else {
-                Some(configured_client_id(client_id)?)
+                Some(configured_client_id(
+                    &host,
+                    client_id,
+                    env::var("GRIT_GITHUB_CLIENT_ID").ok(),
+                )?)
             };
             // Fail before asking for browser authorization when secure persistence is unavailable.
             OsCredentialStore.check(&host)?;
@@ -264,9 +272,14 @@ fn configured_host(hostname: Option<String>) -> Result<Host, AuthError> {
     )
 }
 
-fn configured_client_id(client_id: Option<String>) -> Result<String, AuthError> {
+fn configured_client_id(
+    host: &Host,
+    client_id: Option<String>,
+    environment: Option<String>,
+) -> Result<String, AuthError> {
     let id = client_id
-        .or_else(|| env::var("GRIT_GITHUB_CLIENT_ID").ok())
+        .or(environment)
+        .or_else(|| (host.0 == "github.com").then(|| GITHUB_CLIENT_ID.to_owned()))
         .ok_or(AuthError::MissingClientId)?;
     let id = id.trim();
     if id.is_empty()
@@ -369,7 +382,7 @@ pub(crate) enum AuthError {
     )]
     InvalidHost,
     #[error(
-        "a GitHub OAuth app client ID is required: use --client-id or GRIT_GITHUB_CLIENT_ID with device flow enabled; alternatively use grit auth login --with-token or GH_TOKEN"
+        "this hostname requires its own GitHub OAuth app client ID: use --client-id or GRIT_GITHUB_CLIENT_ID with device flow enabled; alternatively use grit auth login --with-token or GH_TOKEN"
     )]
     MissingClientId,
     #[error("the GitHub OAuth app client ID is invalid")]
