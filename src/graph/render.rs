@@ -4,7 +4,7 @@ use schemars::schema_for;
 
 use super::{
     GraphError,
-    artifact::{ArtifactNode, GraphArtifact},
+    artifact::{ArtifactNode, GraphArtifact, IssueNodeStatus, IssueResolution},
     presentation::GraphPresentation,
     serialization::pretty_json,
     text::escape_html,
@@ -36,6 +36,12 @@ pub(super) fn html(
     }
 
     let mut rows = String::new();
+    let mut completion_rows = String::new();
+    let mut issue_count = 0;
+    let mut open_count = 0;
+    let mut completed_count = 0;
+    let mut not_planned_count = 0;
+    let mut other_closed_count = 0;
     for node in &artifact.nodes {
         let key = node.key().to_string();
         let escaped_key = escape_html(&key);
@@ -63,11 +69,42 @@ pub(super) fn html(
             }
         };
         let title = escape_html(title);
-        let layer = node
-            .position()
-            .layer
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "unresolved / SCC".to_owned());
+        let state_label = if let ArtifactNode::Issue {
+            status, resolution, ..
+        } = node
+        {
+            issue_count += 1;
+            match status {
+                IssueNodeStatus::Ready | IssueNodeStatus::Blocked => open_count += 1,
+                IssueNodeStatus::Closed => match resolution {
+                    Some(IssueResolution::Completed) => {
+                        completed_count += 1;
+                        if completed_count <= 3 {
+                            completion_rows.push_str(&format!(
+                                "<li><button type=\"button\" class=\"completion-issue\" data-node-key=\"{escaped_key}\" aria-pressed=\"false\"><span class=\"completion-mark\" aria-hidden=\"true\"></span><span class=\"completion-title\">{title}</span><span class=\"completion-number\">#{}</span></button></li>",
+                                node.key().number().map(|number| number.to_string()).unwrap_or_else(|| "Draft".to_owned())
+                            ));
+                        }
+                    }
+                    Some(IssueResolution::NotPlanned) => not_planned_count += 1,
+                    Some(IssueResolution::Other) | None => other_closed_count += 1,
+                },
+                IssueNodeStatus::Unknown => {}
+            }
+            resolution
+                .map(IssueResolution::label)
+                .unwrap_or(node.lifecycle())
+        } else {
+            node.lifecycle()
+        };
+        let layer = if node.lifecycle() == "closed" {
+            "History".to_owned()
+        } else {
+            node.position()
+                .layer
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unresolved / SCC".to_owned())
+        };
         let github_link = url
             .filter(|url| !url.is_empty())
             .map(|url| {
@@ -88,7 +125,7 @@ pub(super) fn html(
         };
         rows.push_str(&format!(
             "<tr data-node-key=\"{escaped_key}\"><td><button type=\"button\" class=\"table-node\" data-node-key=\"{escaped_key}\" aria-pressed=\"false\">{escaped_key}</button>{github_link}</td><td>{title}</td><td>{state}</td><td>{readiness}</td><td>{priority}</td><td>{unlock_count}</td><td>{pagerank}</td><td>{layer}</td><td>{assignees}</td><td>{labels}</td>{project_cell}<td class=\"blockers-cell\">{blockers}</td><td class=\"dependents-cell\">{dependents}</td><td class=\"relationship-cell\">—</td></tr>",
-            state = escape_html(node.lifecycle()),
+            state = escape_html(state_label),
             readiness = node.status(),
             priority = priority,
             unlock_count = unlock_count.unwrap_or_else(|| "—".to_owned()),
@@ -111,6 +148,24 @@ pub(super) fn html(
             ("repository", escape_html(&artifact.repository)),
             ("synced_at", escape_html(&artifact.synced_at)),
             ("artifact_hash", escape_html(&artifact.artifact_hash)),
+            (
+                "snapshot_date",
+                escape_html(artifact.synced_at.get(..10).unwrap_or(&artifact.synced_at)),
+            ),
+            ("issue_count", issue_count.to_string()),
+            ("open_count", open_count.to_string()),
+            ("completed_count", completed_count.to_string()),
+            ("not_planned_count", not_planned_count.to_string()),
+            ("other_closed_count", other_closed_count.to_string()),
+            ("completion_rows", completion_rows),
+            (
+                "completion_empty_hidden",
+                if completed_count > 0 {
+                    "hidden".to_owned()
+                } else {
+                    String::new()
+                },
+            ),
             ("graph_data", graph_data),
             ("presentation_data", presentation_data),
             (

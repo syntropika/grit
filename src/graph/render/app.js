@@ -53,6 +53,7 @@
     pathTarget: document.querySelector("#path-target")
   };
   const view = {
+    outcome: "all",
     isolatedKeys: null,
     highlightedNodes: new Map(),
     highlightedEdges: new Map(),
@@ -93,6 +94,8 @@
       "viewBox",
       `0 0 ${Math.max(520, width + 260)} ${Math.max(380, height + 150)}`
     );
+    canvas.setAttribute("width", String(Math.max(520, width + 260)));
+    canvas.setAttribute("height", String(Math.max(380, height + 150)));
 
     for (const edge of graph.edges) {
       if (!keys.has(edge.blocker) || !keys.has(edge.blocked)) continue;
@@ -116,14 +119,16 @@
       const labelKey = query.layerKey(node);
       if (!labels.has(labelKey)) {
         labels.set(labelKey, {
-          text: node.position.layer === null ? "Unresolved / SCC" : `Layer ${node.position.layer}`,
-          x: node.position.x - minX + marginX
+          text: node.state === "closed" ? "Closed history" : node.position.layer === null ? "Unresolved / SCC" : `Layer ${node.position.layer}`,
+          x: node.position.x - minX + marginX,
+          y: node.position.y - minY + marginY - 36
         });
       }
 
       const group = svgElement("g");
       group.classList.add("graph-node", node.readiness);
-      if (node.position.layer === null) group.classList.add("unresolved");
+      if (node.resolution) group.classList.add(`resolution-${node.resolution}`);
+      if (node.position.layer === null && node.state !== "closed") group.classList.add("unresolved");
       group.dataset.nodeKey = node.key;
       group.dataset.sourceX = String(node.position.x);
       group.dataset.sourceY = String(node.position.y);
@@ -146,6 +151,15 @@
       text.setAttribute("y", "4");
       text.textContent = node.title || node.key;
       group.append(title, circle, text);
+      if (renderedNodes.length <= 120) {
+        const summary = svgElement("text");
+        summary.classList.add("node-summary");
+        summary.setAttribute("x", "17");
+        summary.setAttribute("y", "4");
+        const shortTitle = (node.title || "External blocker").slice(0, 31);
+        summary.textContent = `${node.number == null ? "Draft" : `#${node.number}`} ${shortTitle}${(node.title || "").length > 31 ? "…" : ""}`;
+        group.append(summary);
+      }
       group.addEventListener("click", () => selectNode(node.key));
       group.addEventListener("keydown", (event) => {
         if (event.key === "Enter" || event.key === " ") {
@@ -162,7 +176,7 @@
       text.classList.add("layer-label");
       text.dataset.layerKey = key;
       text.setAttribute("x", label.x - 18);
-      text.setAttribute("y", "24");
+      text.setAttribute("y", String(label.y));
       text.textContent = label.text;
       layerLabels.append(text);
     }
@@ -258,6 +272,18 @@
   }
 
   function bindControls() {
+    for (const button of document.querySelectorAll("[data-work-view]")) {
+      button.addEventListener("click", () => showOutcome(button.dataset.workView));
+    }
+    document.querySelector("#show-completed").addEventListener("click", () => showOutcome("completed"));
+    document.querySelector("#reset-filters").addEventListener("click", clearView);
+    document.querySelector("#completion-list").addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-node-key]");
+      if (!button) return;
+      showOutcome("all");
+      selectNode(button.dataset.nodeKey);
+      detailPanel.scrollIntoView({ block: "nearest" });
+    });
     search.addEventListener("input", applyView);
     search.addEventListener("keydown", (event) => {
       if (event.key !== "Enter") return;
@@ -353,6 +379,7 @@
   function selectRecommendation() {
     const recommendation = analysis.next.recommendation;
     if (!recommendation) return;
+    showOutcome("all");
     view.recommendationSelected = true;
     selectNode(recommendation.first_issue.key);
     applyRecommendationHighlights();
@@ -400,6 +427,19 @@
       }
       element.classList.add(colorClass(node, colorMetric.value));
     }
+    const legends = {
+      readiness: [["ready", "Ready"], ["blocked", "Blocked"], ["completed", "Completed"], ["closed", "Other closed"], ["unknown", "Unresolved / cycle"]],
+      state: [["open", "Open"], ["closed", "Closed"], ["unknown", "Unknown"]],
+      priority: [["p0", "P0"], ["p1", "P1"], ["p2", "P2"], ["p3", "P3"], ["p4", "P4"], ["none", "Unspecified"], ["unknown", "Conflict"]]
+    };
+    document.querySelector(".graph-legend").replaceChildren(
+      ...legends[colorMetric.value].map(([state, label]) => {
+        const item = document.createElement("span");
+        item.className = `legend-${state}`;
+        item.textContent = label;
+        return item;
+      })
+    );
   }
 
   function colorClass(node, metric) {
@@ -420,6 +460,7 @@
     for (const node of graph.nodes) {
       const matches = query.matchesSearch(node, searchQuery, numberQuery)
         && query.matchesFilters(node, filterValues)
+        && matchesOutcome(node)
         && (view.isolatedKeys === null || view.isolatedKeys.has(node.key));
       const graphNode = graphElement(node.key);
       const row = tableRow(node.key);
@@ -445,6 +486,40 @@
       ? `; ${visibleNetworkCount} in the current network view`
       : "";
     searchStatus.textContent = `${visibleKeys.size} of ${graph.nodes.length} nodes visible${networkSuffix}`;
+    document.querySelector("#graph-empty").hidden = visibleKeys.size !== 0;
+    for (const button of document.querySelectorAll("[data-work-view]")) {
+      button.setAttribute("aria-pressed", String(button.dataset.workView === view.outcome));
+    }
+    if (detailPanel.dataset.selectedKey && !visibleKeys.has(detailPanel.dataset.selectedKey)) {
+      clearSelection();
+    }
+  }
+
+  function matchesOutcome(node) {
+    if (view.outcome === "all") return true;
+    if (node.kind !== "issue") return false;
+    if (view.outcome === "open") return node.state === "open";
+    return node.state === "closed" && (node.resolution || "other") === view.outcome;
+  }
+
+  function showOutcome(outcome) {
+    clearView();
+    view.outcome = outcome;
+    if (presentation.mode === "constrained"
+      && !graph.nodes.some((node) => networkView.contains(node.key) && matchesOutcome(node))) {
+      const first = graph.nodes.find(matchesOutcome);
+      if (first) renderGraph(networkView.showNeighborhood(first.key), `${outcome} Issue neighborhood`);
+    }
+    applyView();
+    const label = outcome === "not_planned" ? "not planned" : outcome === "other" ? "other closed" : outcome;
+    viewStatus.textContent = `Showing ${label} Issues. Recommendations still use open work only.`;
+  }
+
+  function stateLabel(node) {
+    if (node.state !== "closed" || node.kind !== "issue") return node.state;
+    if (node.resolution === "completed") return "Completed";
+    if (node.resolution === "not_planned") return "Not planned";
+    return "Closed · unspecified";
   }
 
   function updateTableRelationships(visibleKeys) {
@@ -481,6 +556,16 @@
       if (element.matches("button, .graph-node")) element.setAttribute("aria-pressed", String(selected));
     }
     renderDetails(node);
+    const selectedElement = graphElement(key);
+    if (selectedElement) {
+      const frame = document.querySelector(".graph-frame");
+      const nodeBounds = selectedElement.getBoundingClientRect();
+      const frameBounds = frame.getBoundingClientRect();
+      frame.scrollBy({
+        left: nodeBounds.left - frameBounds.left - frame.clientWidth / 3,
+        top: nodeBounds.top - frameBounds.top - frame.clientHeight / 2
+      });
+    }
   }
 
   function updateNetworkStatus(description) {
@@ -501,7 +586,8 @@
     heading.id = "detail-heading";
     heading.textContent = "Issue details";
     const prompt = document.createElement("p");
-    prompt.textContent = "Select a node from the graph or table.";
+    prompt.className = "detail-prompt";
+    prompt.textContent = "Select an Issue to see its status, blockers, and the work it unlocks.";
     detailPanel.append(heading, prompt);
   }
 
@@ -515,10 +601,10 @@
     key.textContent = node.key;
     const badge = document.createElement("span");
     badge.className = `readiness-badge ${node.readiness}`;
-    badge.textContent = node.readiness;
+    badge.textContent = node.state === "closed" ? stateLabel(node) : node.readiness;
     const details = document.createElement("dl");
-    appendDetail(details, "State", node.state);
-    appendDetail(details, "Layer", node.position.layer === null ? "unresolved / SCC" : String(node.position.layer));
+    appendDetail(details, "State", stateLabel(node));
+    appendDetail(details, "Layer", node.state === "closed" ? "History (not operational)" : node.position.layer === null ? "unresolved / SCC" : String(node.position.layer));
     appendDetail(details, "Assignees", (node.assignees || []).join(", ") || "—");
     appendDetail(details, "Labels", (node.labels || []).join(", ") || "—");
     appendDetail(details, "Declared priority", priorityLabel(node.priority));
@@ -647,6 +733,7 @@
   }
 
   function clearView() {
+    view.outcome = "all";
     search.value = "";
     for (const filter of query.filters) {
       filterValues.set(filter.key, filter.defaultValue);

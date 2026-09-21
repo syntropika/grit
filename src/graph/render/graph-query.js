@@ -262,6 +262,9 @@
   }
 
   function layerKey(node) {
+    if (node.state === "closed" || node.status === "closed" || node.status === "external_closed") {
+      return `history-${node.position.x}`;
+    }
     return node.position.layer === null ? "unresolved" : `layer-${node.position.layer}`;
   }
 

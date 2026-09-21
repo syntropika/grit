@@ -20,6 +20,7 @@ const exercise = () => {
         && Number(doc.documentElement.dataset.gritTimeToInteractiveMs)
           >= Number(doc.documentElement.dataset.gritLoadMs),
       ...exerciseConstrainedMode(constrainedFrame.contentDocument),
+      ...exerciseOutcomes(harness),
       ...exerciseSearchAndSelection(harness),
       ...exerciseFilters(harness),
       ...exerciseIsolation(harness),
@@ -445,5 +446,59 @@ function exerciseRecommendation({ doc, data }) {
     unlock_size_control: unlockSizeControl,
     pagerank_size_control: pagerankSizeControl,
     priority_color_control: priorityColorControl
+  };
+}
+
+
+function exerciseOutcomes({ doc, data }) {
+  const before = JSON.stringify(data.analysis);
+  const colorControl = doc.querySelector("#node-color-metric");
+  const closedCircle = doc.querySelector('.graph-node[data-node-key="acme/widgets#3"] circle');
+  colorControl.value = "priority";
+  colorControl.dispatchEvent(new Event("change", { bubbles: true }));
+  const closedPriority = doc.defaultView.getComputedStyle(closedCircle).stroke === "rgb(152, 162, 179)"
+    && doc.querySelector(".graph-legend").textContent.includes("P0");
+  colorControl.value = "state";
+  colorControl.dispatchEvent(new Event("change", { bubbles: true }));
+  const closedState = doc.defaultView.getComputedStyle(closedCircle).stroke === "rgb(102, 112, 133)";
+  colorControl.value = "readiness";
+  colorControl.dispatchEvent(new Event("change", { bubbles: true }));
+  const visibleKeys = () => [...doc.querySelectorAll("tbody tr:not([hidden])")]
+    .map((row) => row.dataset.nodeKey).sort();
+  const completed = data.nodes.filter((node) => node.kind === "issue" && node.resolution === "completed");
+  const summaryVisible = doc.querySelector("#count-completed").textContent === String(completed.length)
+    && doc.querySelector("#completion-list").textContent.includes("Historical")
+    && !doc.querySelector("#completion-empty").hidden === (completed.length === 0);
+  doc.querySelector('[data-work-view="completed"]').click();
+  const filtered = visibleKeys().join(",") === "acme/widgets#3"
+    && doc.querySelector('[data-work-view="completed"]').getAttribute("aria-pressed") === "true";
+  doc.querySelector('tbody tr[data-node-key="acme/widgets#3"] button').click();
+  const inspected = doc.querySelector("#issue-details").textContent.includes("Completed");
+  const historyNode = doc.querySelector('.graph-node[data-node-key="acme/widgets#3"]');
+  const historyReadable = !historyNode.classList.contains("unresolved")
+    && historyNode.querySelector(".node-summary").textContent.includes("#3")
+    && historyNode.querySelector("circle").getBoundingClientRect().width >= 15
+    && doc.querySelector("#issue-details").textContent.includes("History (not operational)");
+  const constrainedDoc = constrainedFrame.contentDocument;
+  constrainedDoc.querySelector('[data-work-view="completed"]').click();
+  const constrainedCompleted = [...constrainedDoc.querySelectorAll('.graph-node:not([hidden])')]
+    .some((node) => node.dataset.nodeKey === "acme/widgets#3")
+    && Number(constrainedDoc.documentElement.dataset.gritRenderedNodes) <= 500;
+  constrainedDoc.querySelector("#clear-view").click();
+  doc.querySelector('[data-work-view="not_planned"]').click();
+  const empty = visibleKeys().length === 0 && !doc.querySelector("#graph-empty").hidden;
+  doc.querySelector("#recommendation-select").click();
+  const resumed = visibleKeys().length === data.nodes.length
+    && doc.querySelector("#issue-details").dataset.selectedKey === "acme/widgets#1"
+    && JSON.stringify(readGraph(doc).analysis) === before;
+  doc.querySelector("#clear-view").click();
+  return {
+    completed_summary_visible: summaryVisible,
+    closed_nodes_honor_visual_encoding: closedPriority && closedState,
+    history_map_is_readable_and_not_unresolved: historyReadable,
+    constrained_completed_window: constrainedCompleted,
+    completed_filter_and_details: filtered && inspected,
+    closed_empty_state: empty,
+    completion_to_recommendation_preserves_analysis: resumed
   };
 }

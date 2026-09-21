@@ -96,6 +96,78 @@ fn graph_embeds_the_exact_next_and_plan_evidence_for_one_effective_input() {
 }
 
 #[test]
+fn closed_outcomes_are_visible_without_entering_operational_work() {
+    let mut github = Server::new();
+    let state = TempDir::new().expect("state directory");
+    let workspace = TempDir::new().expect("graph workspace");
+    let mut not_planned = issue(3, "Discarded proposal", "closed");
+    not_planned["state_reason"] = json!("not_planned");
+    let mut unknown_closure = issue(4, "Legacy closure", "closed");
+    unknown_closure["state_reason"] = Value::Null;
+    let mocks = mock_repository(
+        &mut github,
+        json!([
+            issue(1, "Current work", "open"),
+            issue(2, "Completed <script>unsafe()</script>", "closed"),
+            not_planned,
+            unknown_closure
+        ])
+        .to_string(),
+        vec![
+            (1, "[]".to_owned()),
+            (2, "[]".to_owned()),
+            (3, blocker_list(&[(2, "closed")])),
+            (4, blocker_list(&[(3, "closed")])),
+        ],
+    );
+    let output = graph_command(&state, &github.url(), workspace.path())
+        .output()
+        .expect("graph command");
+    assert_success(&output);
+    mocks.assert();
+    let graph: Value =
+        serde_json::from_slice(&fs::read(workspace.path().join("graph.json")).expect("graph JSON"))
+            .expect("graph artifact");
+    assert!(graph["nodes"][0].get("resolution").is_none());
+    assert_eq!(graph["nodes"][1]["resolution"], "completed");
+    assert_eq!(graph["nodes"][2]["resolution"], "not_planned");
+    assert_eq!(graph["nodes"][3]["resolution"], "other");
+    assert_eq!(
+        graph["nodes"][0]["common"]["position"],
+        json!({"layer":0,"x":0,"y":0})
+    );
+    for node in &graph["nodes"].as_array().unwrap()[1..] {
+        assert!(node["common"]["position"]["layer"].is_null());
+        assert_eq!(node["common"]["position"]["y"], 144);
+    }
+    assert_eq!(graph["nodes"][1]["common"]["position"]["x"], 0);
+    assert_eq!(graph["nodes"][2]["common"]["position"]["x"], 320);
+    assert_eq!(graph["nodes"][3]["common"]["position"]["x"], 640);
+    assert_eq!(graph["operational_counts"]["operational_issue_count"], 1);
+    assert_eq!(graph["operational_counts"]["ready_count"], 1);
+    assert_eq!(
+        graph["analysis"]["next"]["recommendation"]["first_issue"]["number"],
+        1
+    );
+    let html = fs::read_to_string(workspace.path().join("index.html")).expect("HTML");
+    assert!(html.contains("id=\"count-completed\">1</strong>"));
+    assert!(html.contains("id=\"count-not-planned\">1</strong>"));
+    assert!(html.contains("id=\"count-other\">1</strong>"));
+    assert!(html.contains("<td>History</td>"));
+    let completed_list = html
+        .split("<ul id=\"completion-list\">")
+        .nth(1)
+        .expect("completed list")
+        .split("</ul>")
+        .next()
+        .unwrap();
+    assert!(completed_list.contains("Completed &lt;script&gt;unsafe()&lt;/script&gt;"));
+    assert!(!completed_list.contains("Discarded proposal"));
+    assert!(!completed_list.contains("Legacy closure"));
+    assert!(!html.contains("<script>unsafe()</script>"));
+}
+
+#[test]
 fn graph_generates_a_deterministic_valid_offline_site_without_raw_records() {
     let mut github = Server::new();
     let state = TempDir::new().expect("temporary state directory");
@@ -432,6 +504,13 @@ fn generated_site_is_a_keyboard_accessible_offline_graph_explorer() {
     assert!(result.get("error").is_none(), "browser result: {result}");
     let checks = result["checks"].as_object().expect("browser checks");
     let expected_checks = [
+        "completed_summary_visible",
+        "closed_nodes_honor_visual_encoding",
+        "history_map_is_readable_and_not_unresolved",
+        "constrained_completed_window",
+        "completed_filter_and_details",
+        "closed_empty_state",
+        "completion_to_recommendation_preserves_analysis",
         "title_search",
         "number_search",
         "side_panel",
