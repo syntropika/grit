@@ -43,21 +43,13 @@ impl ReplicaStore {
         let mut bytes = serde_json::to_vec_pretty(replica).map_err(StoreError::Encode)?;
         bytes.push(b'\n');
 
-        let mut temporary = tempfile_in(parent)?;
-        let temporary_path = temporary.path.clone();
-        let result = (|| {
-            temporary.file.write_all(&bytes)?;
-            temporary.file.sync_all()?;
-            drop(temporary.file);
-            fs::rename(&temporary_path, &self.replica_path)?;
-            sync_directory(parent)?;
-            Ok::<(), io::Error>(())
-        })();
-
-        if result.is_err() {
-            let _ = fs::remove_file(&temporary_path);
-        }
-        result.map_err(StoreError::Publish)
+        publish_bytes_atomically(&self.replica_path, &bytes, ".replica").map_err(
+            |error| match error {
+                AtomicWriteError::CreateTemporary(error) => StoreError::CreateTemporary(error),
+                AtomicWriteError::TemporaryNameExhausted => StoreError::TemporaryNameExhausted,
+                AtomicWriteError::Publish(error) => StoreError::Publish(error),
+            },
+        )
     }
 
     pub(crate) fn load(&self, repository: &Repository) -> Result<LocalReplica, StoreError> {
@@ -71,6 +63,12 @@ impl ReplicaStore {
             .map_err(StoreError::InvalidReplica)?;
         Ok(replica)
     }
+
+    pub(crate) fn repository_directory(&self) -> &Path {
+        self.replica_path
+            .parent()
+            .expect("replica path always has a parent")
+    }
 }
 
 struct TemporaryFile {
@@ -78,9 +76,9 @@ struct TemporaryFile {
     file: File,
 }
 
-fn tempfile_in(directory: &Path) -> Result<TemporaryFile, StoreError> {
+fn tempfile_in(directory: &Path, prefix: &str) -> Result<TemporaryFile, AtomicWriteError> {
     for attempt in 0..1000_u32 {
-        let path = directory.join(format!(".replica-{}-{attempt}.tmp", std::process::id()));
+        let path = directory.join(format!("{prefix}-{}-{attempt}.tmp", std::process::id()));
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -91,10 +89,41 @@ fn tempfile_in(directory: &Path) -> Result<TemporaryFile, StoreError> {
         match options.open(&path) {
             Ok(file) => return Ok(TemporaryFile { path, file }),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(StoreError::CreateTemporary(error)),
+            Err(error) => return Err(AtomicWriteError::CreateTemporary(error)),
         }
     }
-    Err(StoreError::TemporaryNameExhausted)
+    Err(AtomicWriteError::TemporaryNameExhausted)
+}
+
+pub(crate) fn publish_bytes_atomically(
+    destination: &Path,
+    bytes: &[u8],
+    temporary_prefix: &str,
+) -> Result<(), AtomicWriteError> {
+    let parent = destination
+        .parent()
+        .expect("atomic publication destination always has a parent");
+    let mut temporary = tempfile_in(parent, temporary_prefix)?;
+    let temporary_path = temporary.path.clone();
+    let result = (|| {
+        temporary.file.write_all(bytes)?;
+        temporary.file.sync_all()?;
+        drop(temporary.file);
+        fs::rename(&temporary_path, destination)?;
+        sync_directory(parent)?;
+        Ok::<(), io::Error>(())
+    })();
+
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary_path);
+    }
+    result.map_err(AtomicWriteError::Publish)
+}
+
+pub(crate) enum AtomicWriteError {
+    CreateTemporary(io::Error),
+    TemporaryNameExhausted,
+    Publish(io::Error),
 }
 
 #[cfg(unix)]

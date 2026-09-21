@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::{BlockerResolution, ExecutionScope, IssueState, OperationalGraph};
 use crate::model::Issue;
@@ -9,17 +9,42 @@ pub(crate) struct Completion {
     depth: usize,
 }
 
+pub(crate) struct OneStepAnalysis<'issues> {
+    executable: BTreeMap<u64, &'issues Issue>,
+    unlocks_by_blocker: BTreeMap<u64, Vec<u64>>,
+}
+
+impl<'issues> OneStepAnalysis<'issues> {
+    pub(crate) fn executable(&self) -> impl Iterator<Item = &'issues Issue> + '_ {
+        self.executable.values().copied()
+    }
+
+    pub(crate) fn unlocks(&self) -> impl ExactSizeIterator<Item = (u64, &[u64])> + '_ {
+        self.unlocks_by_blocker
+            .iter()
+            .map(|(blocker, unlocks)| (*blocker, unlocks.as_slice()))
+    }
+
+    pub(crate) fn unlocks_for(&self, blocker: u64) -> &[u64] {
+        self.unlocks_by_blocker
+            .get(&blocker)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+}
+
 impl Completion {
     pub(crate) fn newly_ready(&self) -> &[u64] {
         &self.newly_ready
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct RolloutState<'graph, 'issues, 'scope> {
     graph: &'graph OperationalGraph<'issues>,
     scope: ExecutionScope<'scope>,
-    ready: BTreeSet<u64>,
-    completed: BTreeSet<u64>,
+    ready: IssueMask,
+    completed: Vec<u64>,
 }
 
 impl<'a> OperationalGraph<'a> {
@@ -30,7 +55,7 @@ impl<'a> OperationalGraph<'a> {
         RolloutState::new(self, scope)
     }
 
-    fn is_ready_after(&self, number: u64, completed: &BTreeSet<u64>) -> bool {
+    fn is_ready_after(&self, number: u64, completed: &[u64]) -> bool {
         if self.issue_state(number) != Some(IssueState::Open)
             || self.cyclic_numbers.contains(&number)
             || completed.contains(&number)
@@ -51,13 +76,13 @@ impl<'a> OperationalGraph<'a> {
 
 impl<'graph, 'issues, 'scope> RolloutState<'graph, 'issues, 'scope> {
     fn new(graph: &'graph OperationalGraph<'issues>, scope: ExecutionScope<'scope>) -> Self {
-        let completed = BTreeSet::new();
-        let ready = graph
-            .open_numbers
-            .iter()
-            .copied()
-            .filter(|number| graph.is_ready_after(*number, &completed))
-            .collect();
+        let completed = Vec::new();
+        let mut ready = IssueMask::new(graph.open_numbers.len());
+        for (index, number) in graph.open_numbers.iter().enumerate() {
+            if graph.is_ready_after(*number, &completed) {
+                ready.insert(index);
+            }
+        }
         Self {
             graph,
             scope,
@@ -67,11 +92,64 @@ impl<'graph, 'issues, 'scope> RolloutState<'graph, 'issues, 'scope> {
     }
 
     pub(crate) fn executable(&self) -> Vec<&'issues Issue> {
-        self.ready
+        self.graph
+            .open_numbers
             .iter()
-            .filter_map(|number| self.graph.issue(*number))
+            .enumerate()
+            .filter(|(index, _)| self.ready.contains(*index))
+            .filter_map(|(_, number)| self.graph.issue(*number))
             .filter(|issue| self.scope.contains(issue))
             .collect()
+    }
+
+    pub(crate) fn one_step_analysis(&self) -> OneStepAnalysis<'issues> {
+        let executable: BTreeMap<_, _> = self
+            .executable()
+            .into_iter()
+            .map(|issue| (issue.number, issue))
+            .collect();
+        let mut unlocks = BTreeMap::<u64, Vec<u64>>::new();
+        for dependent in &self.graph.open_numbers {
+            if self.is_ready(*dependent)
+                || self.completed.contains(dependent)
+                || self.graph.cyclic_numbers.contains(dependent)
+            {
+                continue;
+            }
+            let mut sole_blocker = None;
+            let mut feasible = true;
+            for dependency in self.graph.dependencies_for(*dependent) {
+                match self.graph.blocker_resolution(dependency) {
+                    BlockerResolution::Satisfied => {}
+                    BlockerResolution::InternalOpen(blocker)
+                        if self.completed.contains(&blocker) => {}
+                    BlockerResolution::ExternalOpen
+                    | BlockerResolution::ExternalUnknown
+                    | BlockerResolution::InternalUnknown => {
+                        feasible = false;
+                        break;
+                    }
+                    BlockerResolution::InternalOpen(blocker) => match sole_blocker {
+                        None => sole_blocker = Some(blocker),
+                        Some(existing) if existing == blocker => {}
+                        Some(_) => {
+                            feasible = false;
+                            break;
+                        }
+                    },
+                }
+            }
+            if feasible
+                && let Some(blocker) = sole_blocker
+                && executable.contains_key(&blocker)
+            {
+                unlocks.entry(blocker).or_default().push(*dependent);
+            }
+        }
+        OneStepAnalysis {
+            executable,
+            unlocks_by_blocker: unlocks,
+        }
     }
 
     pub(crate) fn feasible_prerequisite_closure(
@@ -96,12 +174,26 @@ impl<'graph, 'issues, 'scope> RolloutState<'graph, 'issues, 'scope> {
         self.graph
     }
 
+    pub(crate) fn is_ready(&self, issue_number: u64) -> bool {
+        self.graph
+            .open_index(issue_number)
+            .is_some_and(|index| self.ready.contains(index))
+    }
+
+    pub(crate) fn is_completed(&self, issue_number: u64) -> bool {
+        self.completed.contains(&issue_number)
+    }
+
     pub(crate) fn complete(&mut self, issue_number: u64) -> Option<Completion> {
         if !self.is_executable(issue_number) {
             return None;
         }
-        self.ready.remove(&issue_number);
-        self.completed.insert(issue_number);
+        let ready_index = self
+            .graph
+            .open_index(issue_number)
+            .expect("Executable Issue is open");
+        assert!(self.ready.remove(ready_index));
+        self.completed.push(issue_number);
         let newly_ready: Vec<_> = self
             .graph
             .dependents_by_blocker
@@ -109,10 +201,16 @@ impl<'graph, 'issues, 'scope> RolloutState<'graph, 'issues, 'scope> {
             .into_iter()
             .flatten()
             .copied()
-            .filter(|number| !self.ready.contains(number))
+            .filter(|number| !self.is_ready(*number))
             .filter(|number| self.graph.is_ready_after(*number, &self.completed))
             .collect();
-        self.ready.extend(newly_ready.iter().copied());
+        for number in &newly_ready {
+            let index = self
+                .graph
+                .open_index(*number)
+                .expect("newly Ready Issue is open");
+            self.ready.insert(index);
+        }
         Some(Completion {
             issue_number,
             newly_ready,
@@ -127,14 +225,22 @@ impl<'graph, 'issues, 'scope> RolloutState<'graph, 'issues, 'scope> {
             "rollout completions must be undone in LIFO order"
         );
         for number in completion.newly_ready {
-            self.ready.remove(&number);
+            let index = self
+                .graph
+                .open_index(number)
+                .expect("newly Ready Issue is open");
+            assert!(self.ready.remove(index));
         }
-        self.completed.remove(&completion.issue_number);
-        self.ready.insert(completion.issue_number);
+        assert_eq!(self.completed.pop(), Some(completion.issue_number));
+        let issue_index = self
+            .graph
+            .open_index(completion.issue_number)
+            .expect("completed Issue is open");
+        self.ready.insert(issue_index);
     }
 
     fn is_executable(&self, issue_number: u64) -> bool {
-        self.ready.contains(&issue_number)
+        self.is_ready(issue_number)
             && self
                 .graph
                 .issue(issue_number)
@@ -177,6 +283,35 @@ impl<'graph, 'issues, 'scope> RolloutState<'graph, 'issues, 'scope> {
     }
 }
 
+#[derive(Clone)]
+struct IssueMask {
+    words: Vec<u64>,
+}
+
+impl IssueMask {
+    fn new(issue_count: usize) -> Self {
+        Self {
+            words: vec![0; issue_count.div_ceil(u64::BITS as usize)],
+        }
+    }
+
+    fn contains(&self, index: usize) -> bool {
+        self.words[index / u64::BITS as usize] & (1 << (index % u64::BITS as usize)) != 0
+    }
+
+    fn insert(&mut self, index: usize) {
+        self.words[index / u64::BITS as usize] |= 1 << (index % u64::BITS as usize);
+    }
+
+    fn remove(&mut self, index: usize) -> bool {
+        let word = &mut self.words[index / u64::BITS as usize];
+        let bit = 1 << (index % u64::BITS as usize);
+        let contained = *word & bit != 0;
+        *word &= !bit;
+        contained
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,18 +320,24 @@ mod tests {
     };
 
     #[test]
-    fn nested_and_fanout_completions_restore_each_frontier() -> Result<(), ReplicaError> {
+    fn rollouts_restore_nested_and_fanout_frontiers_in_lifo_order() -> Result<(), ReplicaError> {
         let replica = rollout_fixture()?;
         let graph = OperationalGraph::prepare(&replica);
         let mut state = graph.rollout_state(ExecutionScope::Available);
 
         assert_eq!(executable_numbers(&state), vec![1, 2]);
+        assert_eq!(state.one_step_analysis().unlocks().len(), 0);
         let first = state.complete(1).expect("Issue #1 is Executable");
         assert!(first.newly_ready().is_empty());
         assert_eq!(executable_numbers(&state), vec![2]);
+        assert_eq!(state.one_step_analysis().unlocks_for(2), [10].as_slice());
         let second = state.complete(2).expect("Issue #2 is Executable");
         assert_eq!(second.newly_ready(), &[10]);
         assert_eq!(executable_numbers(&state), vec![10]);
+        assert_eq!(
+            state.one_step_analysis().unlocks_for(10),
+            [11, 12].as_slice()
+        );
         let third = state.complete(10).expect("Issue #10 is Executable");
         assert_eq!(third.newly_ready(), &[11, 12]);
         assert_eq!(executable_numbers(&state), vec![11, 12]);
@@ -212,7 +353,7 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "rollout completions must be undone in LIFO order")]
-    fn rejects_out_of_order_rollback_tokens() {
+    fn rejects_out_of_order_completion_rollback() {
         let replica = rollout_fixture().expect("valid rollout fixture");
         let graph = OperationalGraph::prepare(&replica);
         let mut state = graph.rollout_state(ExecutionScope::Available);
