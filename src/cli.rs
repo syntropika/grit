@@ -15,7 +15,9 @@ use crate::{
     graph::{GraphError, PublicGraphOptions, confirm_public_repository, publish_site},
     issue_create::{self, PendingIssueCreateError},
     issue_field::{self, IssueField, IssueFieldUpdateError, IssueFieldValue, IssueStateValue},
-    model::{DependencyPresence, LocalReplica, ReplicaError, TemporaryIssueId},
+    metadata::{GenericLabel, MetadataError, MetadataSetTarget, PendingIssueOperand},
+    metadata_mutation::{self, MetadataMutationError, MetadataMutationOutcome, MetadataRequest},
+    model::{DependencyPresence, LocalReplica, ReplicaError, SetPresence, TemporaryIssueId},
     operational::{ExecutionScope, PreparedRepository, analyze_ready},
     outbox::{OutboxError, OutboxStore, PendingMutation},
     plan::{DependencyLayers, PlanIssue},
@@ -47,6 +49,7 @@ const PRIORITY_UPDATE_SCHEMA_VERSION: &str = "grit.priority-update/v1";
 const RESOLVE_SCHEMA_VERSION: &str = "grit.resolve/v1";
 const ISSUE_CREATE_SCHEMA_VERSION: &str = "grit.issue-create/v1";
 const ISSUE_FIELD_UPDATE_SCHEMA_VERSION: &str = "grit.issue-field-update/v1";
+const METADATA_MUTATION_SCHEMA_VERSION: &str = "grit.metadata-set/v1";
 
 #[derive(Parser)]
 #[command(name = "grit", version, about)]
@@ -148,6 +151,46 @@ enum Command {
         /// Remove every assignee.
         #[arg(long)]
         clear_assignees: bool,
+        /// Emit versioned machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add or remove one non-Priority Issue label.
+    #[command(group(
+        ArgGroup::new("label_intent")
+            .required(true)
+            .multiple(false)
+            .args(["add", "remove"])
+    ))]
+    Label {
+        /// Issue in OWNER/REPO#NUMBER or OWNER/REPO#draft:TEMPORARY_ID form.
+        issue: String,
+        /// Add this generic label.
+        #[arg(long)]
+        add: Option<String>,
+        /// Remove this generic label.
+        #[arg(long)]
+        remove: Option<String>,
+        /// Emit versioned machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add or remove a parent/sub-Issue relationship without creating a Dependency.
+    #[command(name = "sub-issue", group(
+        ArgGroup::new("sub_issue_intent")
+            .required(true)
+            .multiple(false)
+            .args(["add", "remove"])
+    ))]
+    SubIssue {
+        /// Parent Issue reference.
+        parent: String,
+        /// Add this Issue as a sub-Issue.
+        #[arg(long)]
+        add: Option<String>,
+        /// Remove this Issue as a sub-Issue.
+        #[arg(long)]
+        remove: Option<String>,
         /// Emit versioned machine-readable output.
         #[arg(long)]
         json: bool,
@@ -352,6 +395,18 @@ pub(crate) fn execute() -> Result<(), CliError> {
                 update_issue_field(&issue, field, desired, json)
             }
         }
+        Command::Label {
+            issue,
+            add,
+            remove,
+            json,
+        } => mutate_generic_label(&issue, add, remove, json),
+        Command::SubIssue {
+            parent,
+            add,
+            remove,
+            json,
+        } => mutate_parent_relationship(&parent, add, remove, json),
         Command::Block { issue, by, json } => {
             mutate_dependency(&issue, &by, DependencyIntent::Block, json)
         }
@@ -454,6 +509,148 @@ fn plan(
         }
     }
     Ok(())
+}
+
+fn mutate_generic_label(
+    issue: &str,
+    add: Option<String>,
+    remove: Option<String>,
+    json: bool,
+) -> Result<(), CliError> {
+    let issue = PendingIssueReference::parse(issue)?;
+    let (label, desired) = match (add, remove) {
+        (Some(label), None) => (GenericLabel::new(label)?, SetPresence::Present),
+        (None, Some(label)) => (GenericLabel::new(label)?, SetPresence::Absent),
+        _ => unreachable!("clap requires exactly one label intent"),
+    };
+    let client = optional_github_client()?;
+    let result = metadata_mutation::update_or_queue(
+        client.as_ref(),
+        MetadataRequest::GenericLabel {
+            issue: &issue,
+            label,
+            desired,
+        },
+    )?;
+    print_metadata_mutation(&result, json)
+}
+
+fn mutate_parent_relationship(
+    parent: &str,
+    add: Option<String>,
+    remove: Option<String>,
+    json: bool,
+) -> Result<(), CliError> {
+    let parent = PendingIssueReference::parse(parent)?;
+    let (child, desired) = match (add, remove) {
+        (Some(child), None) => (PendingIssueReference::parse(&child)?, SetPresence::Present),
+        (None, Some(child)) => (PendingIssueReference::parse(&child)?, SetPresence::Absent),
+        _ => unreachable!("clap requires exactly one sub-Issue intent"),
+    };
+    let client = optional_github_client()?;
+    let result = metadata_mutation::update_or_queue(
+        client.as_ref(),
+        MetadataRequest::ParentRelationship {
+            parent: &parent,
+            child: &child,
+            desired,
+        },
+    )?;
+    print_metadata_mutation(&result, json)
+}
+
+fn optional_github_client() -> Result<Option<GitHubClient>, CliError> {
+    match github_client() {
+        Ok(client) => Ok(Some(client)),
+        Err(CliError::Auth(_)) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn print_metadata_mutation(
+    result: &metadata_mutation::MetadataMutationResult,
+    json: bool,
+) -> Result<(), CliError> {
+    let (pending, result_name, operation, working_graph) = match &result.outcome {
+        MetadataMutationOutcome::Synchronized { change } => {
+            (false, metadata_change_name(*change), None, None)
+        }
+        MetadataMutationOutcome::Queued {
+            operation,
+            working_input_hash,
+        } => (
+            true,
+            "pending",
+            Some(MetadataOperationOutput {
+                id: operation.id(),
+                depends_on: operation.depends_on().to_vec(),
+            }),
+            Some(WorkingGraphSummary {
+                input_hash: working_input_hash,
+            }),
+        ),
+    };
+    let (label, relationship) = match &result.target {
+        MetadataSetTarget::GenericLabel { label, .. } => (Some(label.as_str()), None),
+        MetadataSetTarget::ParentRelationship { parent, child } => (
+            None,
+            Some(ParentRelationshipOutput {
+                parent: operand_key(&result.replica.repository, *parent),
+                child: operand_key(&result.replica.repository, *child),
+                kind: "parent_of",
+            }),
+        ),
+    };
+    let output = MetadataMutationOutput {
+        schema_version: METADATA_MUTATION_SCHEMA_VERSION,
+        command: if label.is_some() {
+            "label"
+        } else {
+            "sub-issue"
+        },
+        repository: &result.replica.repository,
+        result: result_name,
+        pending,
+        label,
+        relationship,
+        desired_present: result.desired.is_present(),
+        operation,
+        working_graph,
+        snapshot: snapshot_summary(&result.replica),
+    };
+    if json {
+        serde_json::to_writer(std::io::stdout().lock(), &output).map_err(CliError::EncodeOutput)?;
+        println!();
+    } else if pending {
+        println!(
+            "Queued {} as Pending mutation {}",
+            output.command,
+            output
+                .operation
+                .as_ref()
+                .expect("Pending metadata output has an operation")
+                .id
+        );
+    } else {
+        println!("{}: {}", output.command, output.result);
+    }
+    Ok(())
+}
+
+fn operand_key(repository: &str, operand: PendingIssueOperand) -> String {
+    operand
+        .temporary_id()
+        .map(|temporary_id| temporary_id.stable_node_key(repository))
+        .unwrap_or_else(|| format!("{repository}#{}", operand.number()))
+}
+
+fn metadata_change_name(change: crate::github::MetadataChange) -> &'static str {
+    match change {
+        crate::github::MetadataChange::Added => "added",
+        crate::github::MetadataChange::AlreadyPresent => "already_present",
+        crate::github::MetadataChange::Removed => "removed",
+        crate::github::MetadataChange::AlreadyAbsent => "already_absent",
+    }
 }
 
 fn create_issue(
@@ -642,7 +839,8 @@ fn print_reconciliation(
                             .unwrap_or_else(|| "missing".to_owned())
                     ),
                     reconciliation::OperationDetails::IssueCreate { .. }
-                    | reconciliation::OperationDetails::DependencyUpdate { .. } => {}
+                    | reconciliation::OperationDetails::DependencyUpdate { .. }
+                    | reconciliation::OperationDetails::MetadataSetUpdate { .. } => {}
                 }
             }
         }
@@ -1265,6 +1463,11 @@ fn ready(repository: &Repository, assignee: Option<&str>, json: bool) -> Result<
             ready: true,
             available: issue.assignees.is_empty(),
             priority: working.priority(issue),
+            labels: issue
+                .labels
+                .iter()
+                .map(|label| label.name.as_str())
+                .collect(),
             assignees: issue
                 .assignees
                 .iter()
@@ -1718,6 +1921,39 @@ struct IssueFieldOperationOutput<'a> {
     depends_on: Vec<String>,
 }
 
+#[derive(Serialize)]
+struct MetadataMutationOutput<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    repository: &'a str,
+    result: &'static str,
+    pending: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    relationship: Option<ParentRelationshipOutput>,
+    desired_present: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    operation: Option<MetadataOperationOutput<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    working_graph: Option<WorkingGraphSummary<'a>>,
+    snapshot: SnapshotSummary<'a>,
+}
+
+#[derive(Serialize)]
+struct ParentRelationshipOutput {
+    parent: String,
+    child: String,
+    kind: &'static str,
+}
+
+#[derive(Serialize)]
+struct MetadataOperationOutput<'a> {
+    id: &'a str,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    depends_on: Vec<String>,
+}
+
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum PriorityUpdateStatus {
@@ -1836,6 +2072,7 @@ struct ReadyIssue<'a> {
     ready: bool,
     available: bool,
     priority: PriorityState,
+    labels: Vec<&'a str>,
     assignees: Vec<&'a str>,
 }
 
@@ -1961,6 +2198,10 @@ pub(crate) enum CliError {
     PriorityUpdate(#[from] PriorityUpdateError),
     #[error(transparent)]
     IssueFieldUpdate(#[from] IssueFieldUpdateError),
+    #[error(transparent)]
+    Metadata(#[from] MetadataError),
+    #[error(transparent)]
+    MetadataMutation(#[from] MetadataMutationError),
     #[error(transparent)]
     Reconciliation(#[from] ReconciliationError),
     #[error(transparent)]

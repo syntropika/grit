@@ -584,12 +584,12 @@ impl From<DependencyEdgeKeyWire> for DependencyEdgeKey {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum DependencyPresence {
+pub(crate) enum SetPresence {
     Present,
     Absent,
 }
 
-impl DependencyPresence {
+impl SetPresence {
     pub(crate) fn from_present(present: bool) -> Self {
         if present { Self::Present } else { Self::Absent }
     }
@@ -598,6 +598,8 @@ impl DependencyPresence {
         matches!(self, Self::Present)
     }
 }
+
+pub(crate) type DependencyPresence = SetPresence;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct IssueIdentity {

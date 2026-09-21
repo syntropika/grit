@@ -16,7 +16,8 @@ use crate::{
     atomic_file::{self, AtomicFileError},
     draft_identity::DraftIdentity,
     issue_field::{IssueField, IssueFieldValue},
-    model::{DependencyEdgeKey, DependencyPresence, TemporaryIssueId},
+    metadata::MetadataSetTarget,
+    model::{DependencyEdgeKey, DependencyPresence, SetPresence, TemporaryIssueId},
     priority::LogicalPriority,
     repository::Repository,
     store::{StoreError, repository_state_directory},
@@ -115,6 +116,11 @@ impl PendingMutationOutbox {
                     ));
                 }
             }
+            if let Some((target, _)) = operation.metadata_set_values()
+                && target.validate().is_err()
+            {
+                return Err(OutboxError::InvalidMetadataSet(operation.id().to_owned()));
+            }
             if !operation.has_safe_write_plan() {
                 return Err(OutboxError::InvalidWritePlan(operation.id().to_owned()));
             }
@@ -160,6 +166,21 @@ impl PendingMutationOutbox {
                 operation.issue_field_update_view().is_some_and(|update| {
                     update.issue_number == issue_number && update.field == field
                 })
+            })
+            .map(PendingMutation::id)
+    }
+
+    pub(crate) fn latest_metadata_operation_for_target(
+        &self,
+        target: &MetadataSetTarget,
+    ) -> Option<&str> {
+        self.operations
+            .iter()
+            .rev()
+            .find(|operation| {
+                operation
+                    .metadata_set_values()
+                    .is_some_and(|(candidate, _)| candidate == target)
             })
             .map(PendingMutation::id)
     }
@@ -216,6 +237,12 @@ enum MutationPayload {
         #[serde(default, skip_serializing_if = "IssueFieldMutationState::is_pending")]
         state: IssueFieldMutationState,
     },
+    MetadataSetUpdate {
+        target: MetadataSetTarget,
+        desired: SetPresence,
+        #[serde(default, skip_serializing_if = "SetMutationState::is_pending")]
+        state: SetMutationState,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -224,6 +251,7 @@ pub(crate) enum MutationKind {
     PriorityUpdate,
     DependencyUpdate,
     IssueFieldUpdate,
+    MetadataSetUpdate,
 }
 
 pub(crate) struct IssueCreateView<'a> {
@@ -243,6 +271,12 @@ pub(crate) struct IssueFieldUpdateView<'a> {
     pub(crate) base: &'a IssueFieldValue,
     pub(crate) desired: &'a IssueFieldValue,
     pub(crate) state: &'a IssueFieldMutationState,
+}
+
+pub(crate) struct MetadataSetUpdateView<'a> {
+    pub(crate) target: &'a MetadataSetTarget,
+    pub(crate) desired: SetPresence,
+    pub(crate) state: &'a SetMutationState,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -391,7 +425,7 @@ impl MutationLifecycle for PriorityMutationState {
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
-pub(crate) enum DependencyMutationState {
+pub(crate) enum SetMutationState {
     #[default]
     Pending,
     Applying {
@@ -408,7 +442,7 @@ pub(crate) enum DependencyMutationState {
     },
 }
 
-impl MutationLifecycle for DependencyMutationState {
+impl MutationLifecycle for SetMutationState {
     fn phase(&self) -> MutationPhase {
         match self {
             Self::Pending => MutationPhase::Pending,
@@ -419,6 +453,8 @@ impl MutationLifecycle for DependencyMutationState {
         }
     }
 }
+
+pub(crate) type DependencyMutationState = SetMutationState;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
@@ -529,7 +565,7 @@ impl PendingMutation {
             payload: MutationPayload::DependencyUpdate {
                 edge,
                 desired,
-                state: DependencyMutationState::Pending,
+                state: SetMutationState::Pending,
             },
         }
     }
@@ -559,6 +595,25 @@ impl PendingMutation {
         }
     }
 
+    pub(crate) fn metadata_set_update(
+        repository: &Repository,
+        target: MetadataSetTarget,
+        desired: SetPresence,
+        depends_on: Vec<String>,
+    ) -> Self {
+        Self {
+            header: MutationHeader {
+                id: new_operation_id(repository, target.primary_number()),
+                depends_on,
+            },
+            payload: MutationPayload::MetadataSetUpdate {
+                target,
+                desired,
+                state: SetMutationState::Pending,
+            },
+        }
+    }
+
     pub(crate) fn id(&self) -> &str {
         &self.header.id
     }
@@ -569,6 +624,7 @@ impl PendingMutation {
             MutationPayload::PriorityUpdate { .. } => MutationKind::PriorityUpdate,
             MutationPayload::DependencyUpdate { .. } => MutationKind::DependencyUpdate,
             MutationPayload::IssueFieldUpdate { .. } => MutationKind::IssueFieldUpdate,
+            MutationPayload::MetadataSetUpdate { .. } => MutationKind::MetadataSetUpdate,
         }
     }
 
@@ -585,6 +641,7 @@ impl PendingMutation {
             MutationPayload::PriorityUpdate { issue_number, .. } => *issue_number,
             MutationPayload::DependencyUpdate { edge, .. } => edge.blocked_number(),
             MutationPayload::IssueFieldUpdate { issue_number, .. } => *issue_number,
+            MutationPayload::MetadataSetUpdate { target, .. } => target.primary_number(),
         }
     }
 
@@ -600,6 +657,7 @@ impl PendingMutation {
                 affected
             }
             MutationPayload::IssueFieldUpdate { issue_number, .. } => vec![*issue_number],
+            MutationPayload::MetadataSetUpdate { target, .. } => target.affected_issue_numbers(),
         }
     }
 
@@ -608,7 +666,8 @@ impl PendingMutation {
             MutationPayload::PriorityUpdate { base, desired, .. } => Some((base, desired)),
             MutationPayload::IssueCreate { .. }
             | MutationPayload::DependencyUpdate { .. }
-            | MutationPayload::IssueFieldUpdate { .. } => None,
+            | MutationPayload::IssueFieldUpdate { .. }
+            | MutationPayload::MetadataSetUpdate { .. } => None,
         }
     }
 
@@ -617,7 +676,8 @@ impl PendingMutation {
             MutationPayload::DependencyUpdate { edge, desired, .. } => Some((edge, *desired)),
             MutationPayload::IssueCreate { .. }
             | MutationPayload::PriorityUpdate { .. }
-            | MutationPayload::IssueFieldUpdate { .. } => None,
+            | MutationPayload::IssueFieldUpdate { .. }
+            | MutationPayload::MetadataSetUpdate { .. } => None,
         }
     }
 
@@ -630,7 +690,8 @@ impl PendingMutation {
             MutationPayload::PriorityUpdate { state, .. } => Some(state),
             MutationPayload::IssueCreate { .. }
             | MutationPayload::DependencyUpdate { .. }
-            | MutationPayload::IssueFieldUpdate { .. } => None,
+            | MutationPayload::IssueFieldUpdate { .. }
+            | MutationPayload::MetadataSetUpdate { .. } => None,
         }
     }
 
@@ -639,7 +700,8 @@ impl PendingMutation {
             MutationPayload::DependencyUpdate { state, .. } => Some(state),
             MutationPayload::IssueCreate { .. }
             | MutationPayload::PriorityUpdate { .. }
-            | MutationPayload::IssueFieldUpdate { .. } => None,
+            | MutationPayload::IssueFieldUpdate { .. }
+            | MutationPayload::MetadataSetUpdate { .. } => None,
         }
     }
 
@@ -648,7 +710,8 @@ impl PendingMutation {
             MutationPayload::IssueCreate { state, .. } => Some(state),
             MutationPayload::PriorityUpdate { .. }
             | MutationPayload::DependencyUpdate { .. }
-            | MutationPayload::IssueFieldUpdate { .. } => None,
+            | MutationPayload::IssueFieldUpdate { .. }
+            | MutationPayload::MetadataSetUpdate { .. } => None,
         }
     }
 
@@ -673,7 +736,8 @@ impl PendingMutation {
             }),
             MutationPayload::PriorityUpdate { .. }
             | MutationPayload::DependencyUpdate { .. }
-            | MutationPayload::IssueFieldUpdate { .. } => None,
+            | MutationPayload::IssueFieldUpdate { .. }
+            | MutationPayload::MetadataSetUpdate { .. } => None,
         }
     }
 
@@ -696,8 +760,32 @@ impl PendingMutation {
             }),
             MutationPayload::IssueCreate { .. }
             | MutationPayload::PriorityUpdate { .. }
-            | MutationPayload::DependencyUpdate { .. } => None,
+            | MutationPayload::DependencyUpdate { .. }
+            | MutationPayload::MetadataSetUpdate { .. } => None,
         }
+    }
+
+    pub(crate) fn metadata_set_update_view(&self) -> Option<MetadataSetUpdateView<'_>> {
+        match &self.payload {
+            MutationPayload::MetadataSetUpdate {
+                target,
+                desired,
+                state,
+            } => Some(MetadataSetUpdateView {
+                target,
+                desired: *desired,
+                state,
+            }),
+            MutationPayload::IssueCreate { .. }
+            | MutationPayload::PriorityUpdate { .. }
+            | MutationPayload::DependencyUpdate { .. }
+            | MutationPayload::IssueFieldUpdate { .. } => None,
+        }
+    }
+
+    pub(crate) fn metadata_set_values(&self) -> Option<(&MetadataSetTarget, SetPresence)> {
+        self.metadata_set_update_view()
+            .map(|update| (update.target, update.desired))
     }
 
     pub(crate) fn permits_dependents(&self) -> bool {
@@ -706,6 +794,7 @@ impl PendingMutation {
             MutationPayload::PriorityUpdate { state, .. } => state.is_successfully_terminal(),
             MutationPayload::DependencyUpdate { state, .. } => state.is_successfully_terminal(),
             MutationPayload::IssueFieldUpdate { state, .. } => state.is_successfully_terminal(),
+            MutationPayload::MetadataSetUpdate { state, .. } => state.is_successfully_terminal(),
         }
     }
 
@@ -725,7 +814,8 @@ impl PendingMutation {
             },
             MutationPayload::IssueCreate { .. }
             | MutationPayload::DependencyUpdate { .. }
-            | MutationPayload::IssueFieldUpdate { .. } => None,
+            | MutationPayload::IssueFieldUpdate { .. }
+            | MutationPayload::MetadataSetUpdate { .. } => None,
         }
     }
 
@@ -765,6 +855,7 @@ impl PendingMutation {
             }
             MutationPayload::DependencyUpdate { .. } => true,
             MutationPayload::IssueFieldUpdate { .. } => true,
+            MutationPayload::MetadataSetUpdate { .. } => true,
         }
     }
 
@@ -790,6 +881,7 @@ impl PendingMutation {
             }
             MutationPayload::DependencyUpdate { .. } => Err(()),
             MutationPayload::IssueFieldUpdate { .. } => Err(()),
+            MutationPayload::MetadataSetUpdate { .. } => Err(()),
         }
     }
 }
@@ -871,6 +963,7 @@ pub(crate) enum MutationStateUpdate {
     Priority(PriorityMutationState),
     Dependency(DependencyMutationState),
     IssueField(IssueFieldMutationState),
+    MetadataSet(SetMutationState),
 }
 
 impl OutboxTransaction<'_> {
@@ -911,7 +1004,8 @@ impl OutboxTransaction<'_> {
             }
             MutationPayload::IssueCreate { .. }
             | MutationPayload::DependencyUpdate { .. }
-            | MutationPayload::IssueFieldUpdate { .. } => {
+            | MutationPayload::IssueFieldUpdate { .. }
+            | MutationPayload::MetadataSetUpdate { .. } => {
                 Err(OutboxError::InvalidMutationKind(id.to_owned()))
             }
         }
@@ -955,6 +1049,9 @@ impl OutboxTransaction<'_> {
             {
                 *issue_number = identity.issue_number;
             }
+            if let MutationPayload::MetadataSetUpdate { target, .. } = &mut operation.payload {
+                target.resolve(identity.temporary_id, identity.issue_number);
+            }
         }
         self.publish(repository)
     }
@@ -971,7 +1068,8 @@ impl OutboxTransaction<'_> {
             }
             MutationPayload::PriorityUpdate { .. }
             | MutationPayload::DependencyUpdate { .. }
-            | MutationPayload::IssueFieldUpdate { .. } => {
+            | MutationPayload::IssueFieldUpdate { .. }
+            | MutationPayload::MetadataSetUpdate { .. } => {
                 Err(OutboxError::InvalidMutationKind(id.to_owned()))
             }
         }
@@ -990,7 +1088,7 @@ impl OutboxTransaction<'_> {
     pub(crate) fn stage_dependency_state(
         &mut self,
         id: &str,
-        state: DependencyMutationState,
+        state: SetMutationState,
     ) -> Result<(), OutboxError> {
         match &mut self.operation_mut(id)?.payload {
             MutationPayload::DependencyUpdate { state: current, .. } => {
@@ -999,7 +1097,8 @@ impl OutboxTransaction<'_> {
             }
             MutationPayload::IssueCreate { .. }
             | MutationPayload::PriorityUpdate { .. }
-            | MutationPayload::IssueFieldUpdate { .. } => {
+            | MutationPayload::IssueFieldUpdate { .. }
+            | MutationPayload::MetadataSetUpdate { .. } => {
                 Err(OutboxError::InvalidMutationKind(id.to_owned()))
             }
         }
@@ -1009,9 +1108,33 @@ impl OutboxTransaction<'_> {
         &mut self,
         repository: &Repository,
         id: &str,
-        state: DependencyMutationState,
+        state: SetMutationState,
     ) -> Result<(), OutboxError> {
         self.stage_dependency_state(id, state)?;
+        self.publish(repository)
+    }
+
+    pub(crate) fn stage_metadata_state(
+        &mut self,
+        id: &str,
+        state: SetMutationState,
+    ) -> Result<(), OutboxError> {
+        match &mut self.operation_mut(id)?.payload {
+            MutationPayload::MetadataSetUpdate { state: current, .. } => {
+                *current = state;
+                Ok(())
+            }
+            _ => Err(OutboxError::InvalidMutationKind(id.to_owned())),
+        }
+    }
+
+    pub(crate) fn checkpoint_metadata_state(
+        &mut self,
+        repository: &Repository,
+        id: &str,
+        state: SetMutationState,
+    ) -> Result<(), OutboxError> {
+        self.stage_metadata_state(id, state)?;
         self.publish(repository)
     }
 
@@ -1027,7 +1150,8 @@ impl OutboxTransaction<'_> {
             }
             MutationPayload::IssueCreate { .. }
             | MutationPayload::PriorityUpdate { .. }
-            | MutationPayload::DependencyUpdate { .. } => {
+            | MutationPayload::DependencyUpdate { .. }
+            | MutationPayload::MetadataSetUpdate { .. } => {
                 Err(OutboxError::InvalidMutationKind(id.to_owned()))
             }
         }
@@ -1060,7 +1184,8 @@ impl OutboxTransaction<'_> {
             }
             MutationPayload::IssueCreate { .. }
             | MutationPayload::PriorityUpdate { .. }
-            | MutationPayload::DependencyUpdate { .. } => {
+            | MutationPayload::DependencyUpdate { .. }
+            | MutationPayload::MetadataSetUpdate { .. } => {
                 return Err(OutboxError::InvalidMutationKind(id.to_owned()));
             }
         }
@@ -1121,6 +1246,9 @@ impl OutboxTransaction<'_> {
                 }
                 MutationStateUpdate::IssueField(state) => {
                     self.stage_issue_field_state(&operation_id, state)?;
+                }
+                MutationStateUpdate::MetadataSet(state) => {
+                    self.stage_metadata_state(&operation_id, state)?;
                 }
             }
         }
@@ -1209,6 +1337,8 @@ pub(crate) enum OutboxError {
     InvalidDraftIssue(String),
     #[error("Pending mutation operation {0:?} contains an invalid Issue-field update")]
     InvalidIssueFieldUpdate(String),
+    #[error("Pending mutation operation {0:?} contains an invalid metadata set update")]
+    InvalidMetadataSet(String),
     #[error("Pending mutation operation {0:?} does not exist")]
     UnknownOperation(String),
     #[error("Pending mutation operation {0:?} is not a Priority update")]

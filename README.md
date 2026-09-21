@@ -15,6 +15,7 @@ Public exports use a separate allowlisted model after a live Repository visibili
 Unavailable Priority and Dependency updates are queued durably and projected into analysis with explicit Pending provenance.
 Grit also creates recoverable Draft Issues with stable temporary identities and marker-based reconciliation.
 Title, body, state, and assignment edits use field-aware Pending mutations.
+Generic labels and parent/sub-Issue relationships use idempotent set mutations.
 Structural plans share the cached Working-graph analysis used by next-work recommendations.
 
 ## Build and test
@@ -267,6 +268,32 @@ still matches its base, treats the desired remote value as already satisfied,
 and exposes incompatible base/local/remote values as a conflict. Resolve a
 conflict explicitly with `grit resolve OPERATION --repo OWNER/REPO --local` or
 `--remote`; resolution always performs a fresh GitHub read before any write.
+
+## Change generic labels and parent relationships
+
+Generic labels use independent add/remove set semantics:
+
+```bash
+grit label OWNER/REPO#42 --add area:backend
+grit label OWNER/REPO#42 --remove risk:high
+```
+
+Canonical `priority:p0` through `priority:p4` labels are rejected here; change
+them only through `grit update ISSUE --priority`. Both generic-label commands
+accept Draft keys and project Pending changes without editing the Local
+replica.
+
+Parent relationships use a separate sub-Issue command:
+
+```bash
+grit sub-issue OWNER/REPO#10 --add OWNER/REPO#42
+grit sub-issue OWNER/REPO#10 --remove OWNER/REPO#42
+```
+
+The first reference is the parent. Grit queues unresolved Draft identities and
+replays the relationship after GitHub assigns their Issue IDs. Parent/sub-Issue
+relationships are decomposition metadata: they are never projected as
+Dependencies and do not affect readiness or ranking topology.
 
 ## Triage graph problems
 

@@ -6,6 +6,7 @@ use thiserror::Error;
 mod dependency;
 mod field;
 mod issue_create;
+mod metadata_set;
 mod priority;
 
 use crate::{
@@ -14,7 +15,7 @@ use crate::{
     },
     github::{DependencyIntent, GitHubClient, GitHubError},
     issue_field::{IssueField, IssueFieldValue},
-    model::{DependencyEdgeKey, DependencyPresence, Issue, LocalReplica},
+    model::{DependencyEdgeKey, DependencyPresence, Issue, LocalReplica, SetPresence},
     outbox::{
         DependencyMutationState, IssueCreateState, IssueFieldMutationState, MutationKind,
         MutationStateUpdate, OutboxError, OutboxStore, PendingMutation, PriorityMutationState,
@@ -111,6 +112,12 @@ pub(crate) enum OperationDetails {
         local: IssueFieldValue,
         #[serde(skip_serializing_if = "Option::is_none")]
         remote: Option<IssueFieldValue>,
+    },
+    MetadataSetUpdate {
+        target: crate::metadata::MetadataSetTarget,
+        desired_present: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        remote_present: Option<bool>,
     },
 }
 
@@ -237,6 +244,8 @@ pub(crate) fn reconcile(
         remote: priority::remote_priorities(&preflight),
         remote_dependencies: dependency::remote_dependencies(&preflight),
         remote_issues,
+        metadata_presence: BTreeMap::new(),
+        remote_sub_issues: BTreeMap::new(),
         identity_transaction: &mut identity_transaction,
         marker_matches,
         results: Vec::new(),
@@ -255,7 +264,13 @@ pub(crate) fn reconcile(
         .publish(&final_replica)
         .map_err(ReconciliationError::FinalPublication)?;
 
-    retire_verified_operations(repository, &mut transaction, &final_replica, &mut results)?;
+    retire_verified_operations(
+        client,
+        repository,
+        &mut transaction,
+        &final_replica,
+        &mut results,
+    )?;
     let remaining = transaction.operations().len();
     let summary = ReconciliationSummary::from_operations(&results, remaining);
 
@@ -274,6 +289,8 @@ struct ReconciliationPass<'client, 'transaction, 'store, 'identity> {
     remote: BTreeMap<u64, RemotePriority>,
     remote_dependencies: BTreeSet<DependencyEdgeKey>,
     remote_issues: BTreeMap<u64, Issue>,
+    metadata_presence: BTreeMap<crate::metadata::MetadataSetTarget, bool>,
+    remote_sub_issues: BTreeMap<u64, BTreeSet<u64>>,
     identity_transaction: &'identity mut DraftIdentityTransaction<'identity>,
     marker_matches: BTreeMap<String, Vec<crate::github::CreatedIssueIdentity>>,
     results: Vec<OperationResult>,
@@ -321,6 +338,9 @@ impl ReconciliationPass<'_, '_, '_, '_> {
             MutationKind::IssueFieldUpdate => {
                 self.reconcile_issue_field_operation(&operation, blocked_by)
             }
+            MutationKind::MetadataSetUpdate => {
+                self.reconcile_metadata_set_operation(&operation, blocked_by)
+            }
         }
     }
 
@@ -343,6 +363,7 @@ struct PassResult {
 }
 
 fn retire_verified_operations(
+    client: &GitHubClient,
     repository: &Repository,
     transaction: &mut crate::outbox::OutboxTransaction<'_>,
     final_replica: &LocalReplica,
@@ -360,6 +381,7 @@ fn retire_verified_operations(
     let superseded = superseded_terminal_ids(transaction.operations(), &terminal_set);
     let mut retired = BTreeSet::new();
     let mut state_updates = BTreeMap::new();
+    let mut final_sub_issues = BTreeMap::new();
     for operation_id in terminal_ids.into_iter().rev() {
         let operation = transaction
             .operation(&operation_id)
@@ -396,6 +418,15 @@ fn retire_verified_operations(
             MutationKind::IssueFieldUpdate => {
                 field::verify_terminal(&operation, final_replica, results, &mut state_updates)
             }
+            MutationKind::MetadataSetUpdate => metadata_set::verify_terminal(
+                client,
+                repository,
+                &operation,
+                final_replica,
+                results,
+                &mut state_updates,
+                &mut final_sub_issues,
+            )?,
         };
         if verified {
             retired.insert(operation_id);
@@ -433,6 +464,7 @@ enum MutationTarget {
     Priority(u64),
     Dependency(DependencyEdgeKey),
     IssueField(u64, IssueField),
+    MetadataSet(crate::metadata::MetadataSetTarget),
 }
 
 fn mutation_target(operation: &PendingMutation) -> MutationTarget {
@@ -457,6 +489,13 @@ fn mutation_target(operation: &PendingMutation) -> MutationTarget {
                 .expect("Issue-field kind has Issue-field values");
             MutationTarget::IssueField(update.issue_number, update.field)
         }
+        MutationKind::MetadataSetUpdate => MutationTarget::MetadataSet(
+            operation
+                .metadata_set_update_view()
+                .expect("metadata kind has metadata values")
+                .target
+                .clone(),
+        ),
     }
 }
 
@@ -559,6 +598,8 @@ pub(crate) enum ReconciliationError {
     OperationNotConflicting(String),
     #[error("Pending mutation operation {0:?} is not a Priority conflict")]
     PriorityReplacementForIssueField(String),
+    #[error("GitHub Issue #{0} is missing during metadata reconciliation")]
+    MissingMetadataIssue(u64),
 }
 
 #[cfg(test)]

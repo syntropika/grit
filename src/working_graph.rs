@@ -11,7 +11,7 @@ use thiserror::Error;
 use crate::{
     model::{
         BlockerIdentity, BlockerScope, Dependency, DependencyEdgeKey, DependencyPresence, Issue,
-        IssueIdentity, LocalReplica,
+        IssueIdentity, Label, LocalReplica, SetPresence,
     },
     outbox::{IssueCreateState, PendingMutation, PendingMutationOutbox},
     priority::{LogicalPriority, PriorityState},
@@ -36,6 +36,7 @@ impl<'a> WorkingGraph<'a> {
         let mut priority_overrides = BTreeMap::new();
         let mut dependency_intents = Vec::new();
         let mut field_updates = Vec::new();
+        let mut label_updates = Vec::new();
         let mut operation_ids = Vec::with_capacity(outbox.operations().len());
         let mut operation_ids_by_issue = BTreeMap::<u64, Vec<(usize, String)>>::new();
         let mut topology_operation_ids = Vec::new();
@@ -49,6 +50,13 @@ impl<'a> WorkingGraph<'a> {
             }
             if let Some((issue_number, field, value)) = operation.effective_field_update() {
                 field_updates.push((issue_number, field, value.clone()));
+            }
+            if let Some((
+                crate::metadata::MetadataSetTarget::GenericLabel { issue, label },
+                desired,
+            )) = operation.metadata_set_values()
+            {
+                label_updates.push((issue.number(), label.clone(), desired));
             }
             if !operation.is_pending_intent() {
                 continue;
@@ -82,6 +90,9 @@ impl<'a> WorkingGraph<'a> {
         }
         if !field_updates.is_empty() {
             apply_field_updates(&mut effective_replica.to_mut().issues, field_updates)?;
+        }
+        if !label_updates.is_empty() {
+            apply_label_updates(&mut effective_replica.to_mut().issues, label_updates)?;
         }
         if !dependency_intents.is_empty() {
             project_dependency_intents(effective_replica.to_mut(), dependency_intents)?;
@@ -162,6 +173,47 @@ impl<'a> WorkingGraph<'a> {
         indexed_operation_ids.extend(self.topology_operation_ids.iter().cloned());
         PendingProvenance::from_indexed(indexed_operation_ids)
     }
+}
+
+fn apply_label_updates(
+    issues: &mut [Issue],
+    updates: Vec<(u64, crate::metadata::GenericLabel, SetPresence)>,
+) -> Result<(), WorkingGraphError> {
+    let issue_indices: BTreeMap<_, _> = issues
+        .iter()
+        .enumerate()
+        .map(|(index, issue)| (issue.number, index))
+        .collect();
+    for (issue_number, label, desired) in updates {
+        let index = issue_indices
+            .get(&issue_number)
+            .copied()
+            .ok_or(WorkingGraphError::MissingIssue(issue_number))?;
+        let labels = &mut issues[index].labels;
+        let existing = labels
+            .iter()
+            .position(|candidate| label.matches(&candidate.name));
+        match (desired, existing) {
+            (SetPresence::Present, None) => labels.push(Label {
+                id: None,
+                node_id: None,
+                name: label.as_str().to_owned(),
+                color: None,
+                description: None,
+            }),
+            (SetPresence::Absent, Some(index)) => {
+                labels.remove(index);
+            }
+            (SetPresence::Present, Some(_)) | (SetPresence::Absent, None) => {}
+        }
+        labels.sort_by(|left, right| {
+            left.name
+                .to_ascii_lowercase()
+                .cmp(&right.name.to_ascii_lowercase())
+                .then_with(|| left.name.cmp(&right.name))
+        });
+    }
+    Ok(())
 }
 
 fn apply_field_updates(
