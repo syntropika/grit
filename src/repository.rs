@@ -6,6 +6,41 @@ pub(crate) struct Repository {
     full_name: String,
 }
 
+pub(crate) struct IssueReference {
+    repository: Repository,
+    number: u64,
+}
+
+impl IssueReference {
+    pub(crate) fn parse(value: &str) -> Result<Self, IssueReferenceError> {
+        let Some((repository, number)) = value.split_once('#') else {
+            return Err(IssueReferenceError);
+        };
+        if number.contains('#') {
+            return Err(IssueReferenceError);
+        }
+        let repository = Repository::parse(repository).map_err(|_| IssueReferenceError)?;
+        let number = number
+            .parse::<u64>()
+            .ok()
+            .filter(|number| *number > 0)
+            .ok_or(IssueReferenceError)?;
+        Ok(Self { repository, number })
+    }
+
+    pub(crate) fn repository(&self) -> &Repository {
+        &self.repository
+    }
+
+    pub(crate) fn number(&self) -> u64 {
+        self.number
+    }
+
+    pub(crate) fn stable_key(&self) -> String {
+        format!("{}#{}", self.repository.full_name(), self.number)
+    }
+}
+
 impl Repository {
     pub(crate) fn parse(value: &str) -> Result<Self, RepositoryError> {
         let Some((owner, name)) = value.split_once('/') else {
@@ -47,3 +82,7 @@ fn valid_part(value: &str) -> bool {
 #[derive(Debug, Error)]
 #[error("repository must use a safe OWNER/REPO form")]
 pub(crate) struct RepositoryError;
+
+#[derive(Debug, Error)]
+#[error("Issue reference must use a safe OWNER/REPO#NUMBER form with NUMBER greater than zero")]
+pub(crate) struct IssueReferenceError;
