@@ -195,9 +195,10 @@ mod tests {
     }
 
     fn rollout_fixture() -> Result<LocalReplica, ReplicaError> {
-        LocalReplica::build(
+        LocalReplica::build_with_sync(
             "acme/widgets".to_owned(),
             "2026-08-07T00:00:00Z".to_owned(),
+            Default::default(),
             Vec::new(),
             [1, 2, 10, 11, 12].into_iter().map(issue).collect(),
             vec![
