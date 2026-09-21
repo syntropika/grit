@@ -5,7 +5,7 @@ use reqwest::{
     blocking::{Client, Response},
     header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, LINK, USER_AGENT},
 };
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, de::DeserializeOwned};
 use thiserror::Error;
 use url::Url;
 
@@ -489,12 +489,4 @@ pub(crate) enum GitHubError {
     InvalidUrl { source: url::ParseError },
     #[error("a dependency contained an invalid repository URL")]
     InvalidRepositoryUrl,
-}
-
-#[derive(Serialize)]
-pub(crate) struct HashInput<'a> {
-    pub(crate) schema_version: &'static str,
-    pub(crate) repository: &'a str,
-    pub(crate) issues: &'a [Issue],
-    pub(crate) dependencies: &'a [Dependency],
 }

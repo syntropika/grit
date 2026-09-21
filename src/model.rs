@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use thiserror::Error;
 
 pub(crate) const REPLICA_SCHEMA_VERSION: &str = "grit.local-replica/v1";
 
@@ -10,6 +12,82 @@ pub(crate) struct LocalReplica {
     pub(crate) input_hash: String,
     pub(crate) issues: Vec<Issue>,
     pub(crate) dependencies: Vec<Dependency>,
+}
+
+impl LocalReplica {
+    pub(crate) fn build(
+        repository: String,
+        synced_at: String,
+        issues: Vec<Issue>,
+        dependencies: Vec<Dependency>,
+    ) -> Result<Self, ReplicaError> {
+        let input_hash = calculate_input_hash(&repository, &issues, &dependencies)?;
+        Ok(Self {
+            schema_version: REPLICA_SCHEMA_VERSION.to_owned(),
+            repository,
+            synced_at,
+            input_hash,
+            issues,
+            dependencies,
+        })
+    }
+
+    pub(crate) fn validate(&self, expected_repository: &str) -> Result<(), ReplicaError> {
+        if self.schema_version != REPLICA_SCHEMA_VERSION {
+            return Err(ReplicaError::UnsupportedSchema(self.schema_version.clone()));
+        }
+        if !self.repository.eq_ignore_ascii_case(expected_repository) {
+            return Err(ReplicaError::RepositoryMismatch {
+                expected: expected_repository.to_owned(),
+                actual: self.repository.clone(),
+            });
+        }
+        chrono::DateTime::parse_from_rfc3339(&self.synced_at)
+            .map_err(|_| ReplicaError::InvalidSyncedAt)?;
+        let expected_hash =
+            calculate_input_hash(&self.repository, &self.issues, &self.dependencies)?;
+        if self.input_hash != expected_hash {
+            return Err(ReplicaError::HashMismatch);
+        }
+        Ok(())
+    }
+}
+
+fn calculate_input_hash(
+    repository: &str,
+    issues: &[Issue],
+    dependencies: &[Dependency],
+) -> Result<String, ReplicaError> {
+    let input = HashInput {
+        schema_version: REPLICA_SCHEMA_VERSION,
+        repository,
+        issues,
+        dependencies,
+    };
+    let canonical = serde_json::to_vec(&input).map_err(ReplicaError::EncodeHashInput)?;
+    Ok(hex::encode(Sha256::digest(canonical)))
+}
+
+#[derive(Serialize)]
+struct HashInput<'a> {
+    schema_version: &'static str,
+    repository: &'a str,
+    issues: &'a [Issue],
+    dependencies: &'a [Dependency],
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum ReplicaError {
+    #[error("could not encode normalized input for hashing: {0}")]
+    EncodeHashInput(serde_json::Error),
+    #[error("unsupported Local replica schema {0:?}")]
+    UnsupportedSchema(String),
+    #[error("Local replica belongs to {actual}, not {expected}")]
+    RepositoryMismatch { expected: String, actual: String },
+    #[error("Local replica has an invalid synced_at timestamp")]
+    InvalidSyncedAt,
+    #[error("Local replica input_hash does not match its normalized contents")]
+    HashMismatch,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

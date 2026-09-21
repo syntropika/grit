@@ -7,7 +7,10 @@ use std::{
 use directories::ProjectDirs;
 use thiserror::Error;
 
-use crate::{model::LocalReplica, repository::Repository};
+use crate::{
+    model::{LocalReplica, ReplicaError},
+    repository::Repository,
+};
 
 pub(crate) struct ReplicaStore {
     replica_path: PathBuf,
@@ -55,6 +58,18 @@ impl ReplicaStore {
             let _ = fs::remove_file(&temporary_path);
         }
         result.map_err(StoreError::Publish)
+    }
+
+    pub(crate) fn load(&self, repository: &Repository) -> Result<LocalReplica, StoreError> {
+        let file = File::open(&self.replica_path).map_err(|error| match error.kind() {
+            io::ErrorKind::NotFound => StoreError::MissingReplica,
+            _ => StoreError::Read(error),
+        })?;
+        let replica: LocalReplica = serde_json::from_reader(file).map_err(StoreError::Decode)?;
+        replica
+            .validate(repository.full_name())
+            .map_err(StoreError::InvalidReplica)?;
+        Ok(replica)
     }
 }
 
@@ -106,4 +121,12 @@ pub(crate) enum StoreError {
     Encode(serde_json::Error),
     #[error("could not atomically publish the Local replica: {0}")]
     Publish(io::Error),
+    #[error("no Local replica exists for this Repository")]
+    MissingReplica,
+    #[error("could not read the Local replica: {0}")]
+    Read(io::Error),
+    #[error("could not decode the Local replica: {0}")]
+    Decode(serde_json::Error),
+    #[error("Local replica is invalid: {0}")]
+    InvalidReplica(ReplicaError),
 }
