@@ -2,6 +2,7 @@ mod atomic_file;
 mod auth;
 mod cli;
 mod dependency_events;
+mod dependency_update;
 mod github;
 mod graph;
 mod model;

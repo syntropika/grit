@@ -435,7 +435,7 @@ pub(super) fn candidate_output(
 ) -> CandidateResult {
     let (candidate, critical_route) = candidate.into_parts();
     let first_issue = issue_reference(working, candidate.issue);
-    let provenance = working.provenance_for_issues(
+    let provenance = working.ranking_provenance_for_issues(
         candidate
             .steps
             .iter()

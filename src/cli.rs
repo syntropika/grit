@@ -7,12 +7,13 @@ use url::Url;
 
 use crate::{
     auth::{AuthError, AuthToken},
+    dependency_update::{self, PendingDependencyUpdateError},
     github::{
         CreateLabelRequest, DependencyChange, DependencyIntent, GitHubClient, GitHubError,
         LabelCreation,
     },
     graph::{GraphError, PublicGraphOptions, confirm_public_repository, publish_site},
-    model::{LocalReplica, ReplicaError},
+    model::{DependencyPresence, LocalReplica, ReplicaError},
     operational::{ExecutionScope, PreparedRepository, analyze_ready},
     outbox::{OutboxError, OutboxStore, PendingMutation},
     plan::{DependencyLayers, PlanIssue},
@@ -387,14 +388,21 @@ fn print_reconciliation(
         );
         for operation in &result.operations {
             if operation.classification == reconciliation::Classification::Conflicting {
+                let reconciliation::OperationDetails::PriorityUpdate {
+                    base,
+                    local,
+                    remote,
+                } = &operation.details
+                else {
+                    continue;
+                };
                 println!(
                     "{} Issue #{} conflict: base {}, local {}, remote {}",
                     operation.id,
                     operation.issue_number,
-                    operation.base.to_state().display_name(),
-                    operation.local.to_state().display_name(),
-                    operation
-                        .remote
+                    base.to_state().display_name(),
+                    local.to_state().display_name(),
+                    remote
                         .as_ref()
                         .map(LogicalPriority::to_state)
                         .map(|priority| priority.display_name())
@@ -838,14 +846,23 @@ fn mutate_dependency(
 ) -> Result<(), CliError> {
     let blocked = IssueReference::parse(blocked)?;
     let blocker = IssueReference::parse(blocker)?;
-    let client = github_client()?;
-    let result = client.mutate_dependency(&blocked, &blocker, intent)?;
-
-    let replica = replica_sync::fetch(&client, blocked.repository()).map_err(|source| {
-        CliError::MutationSynchronization {
-            source: Box::new(source.into()),
+    let client = match github_client() {
+        Ok(client) => client,
+        Err(CliError::Auth(source)) => {
+            return queue_dependency_update(&blocked, &blocker, intent, source.to_string(), json);
         }
-    })?;
+        Err(error) => return Err(error),
+    };
+    let result = match client.mutate_dependency(&blocked, &blocker, intent) {
+        Ok(result) => result,
+        Err(source) if source.permits_offline_queue() => {
+            return queue_dependency_update(&blocked, &blocker, intent, source.to_string(), json);
+        }
+        Err(source) => return Err(source.into()),
+    };
+
+    let replica = replica_sync::fetch(&client, blocked.repository())
+        .map_err(|source| CliError::MutationSynchronization { source })?;
     if replica.has_dependency(&blocked, &blocker) != intent.desired_present() {
         return Err(CliError::MutationReadbackMismatch {
             blocked: blocked.stable_key(),
@@ -863,12 +880,15 @@ fn mutate_dependency(
         schema_version: DEPENDENCY_MUTATION_SCHEMA_VERSION,
         command: dependency_command_name(intent),
         repository: blocked.repository().full_name(),
-        result,
+        result: dependency_result_name(result),
+        pending: false,
         edge: DependencyEdgeOutput {
             blocked: blocked.stable_key(),
             blocker: blocker.stable_key(),
             kind: "blocked_by",
         },
+        operation: None,
+        working_graph: None,
         snapshot,
     };
     if json {
@@ -876,6 +896,56 @@ fn mutate_dependency(
         println!();
     } else {
         println!("{}", dependency_human_message(&output.edge, result));
+    }
+    Ok(())
+}
+
+fn queue_dependency_update(
+    blocked: &IssueReference,
+    blocker: &IssueReference,
+    intent: DependencyIntent,
+    online_failure: String,
+    json: bool,
+) -> Result<(), CliError> {
+    let result = dependency_update::queue(
+        blocked,
+        blocker,
+        DependencyPresence::from_present(intent.desired_present()),
+    )
+    .map_err(|queue| CliError::OnlineDependencyUpdateAndQueueFailed {
+        online: online_failure,
+        queue,
+    })?;
+    let output = DependencyMutationOutput {
+        schema_version: DEPENDENCY_MUTATION_SCHEMA_VERSION,
+        command: dependency_command_name(intent),
+        repository: &result.replica.repository,
+        result: "pending",
+        pending: true,
+        edge: DependencyEdgeOutput {
+            blocked: blocked.stable_key(),
+            blocker: blocker.stable_key(),
+            kind: "blocked_by",
+        },
+        operation: Some(PendingDependencyOperationOutput::from(&result.operation)),
+        working_graph: Some(WorkingGraphSummary {
+            input_hash: &result.working_input_hash,
+        }),
+        snapshot: snapshot_summary(&result.replica),
+    };
+    if json {
+        serde_json::to_writer(std::io::stdout().lock(), &output).map_err(CliError::EncodeOutput)?;
+        println!();
+    } else {
+        println!(
+            "Queued {} as Pending mutation {}",
+            dependency_human_pending_message(&output.edge, intent),
+            output
+                .operation
+                .as_ref()
+                .expect("Pending output includes an operation")
+                .id
+        );
     }
     Ok(())
 }
@@ -927,7 +997,7 @@ fn ready(repository: &Repository, assignee: Option<&str>, json: bool) -> Result<
     let scope = assignee
         .map(ExecutionScope::Assignee)
         .unwrap_or(ExecutionScope::Available);
-    let analysis = analyze_ready(&replica, scope);
+    let analysis = analyze_ready(working.replica(), scope);
     let warnings = analysis_warnings(&working, source);
     let issues: Vec<_> = analysis
         .executable
@@ -1135,6 +1205,44 @@ struct SyncOutput<'a> {
 }
 
 #[derive(Serialize)]
+struct DependencyMutationOutput<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    repository: &'a str,
+    result: &'static str,
+    pending: bool,
+    edge: DependencyEdgeOutput,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    operation: Option<PendingDependencyOperationOutput<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    working_graph: Option<WorkingGraphSummary<'a>>,
+    snapshot: SnapshotSummary<'a>,
+}
+
+#[derive(Serialize)]
+struct PendingDependencyOperationOutput<'a> {
+    id: &'a str,
+    kind: &'static str,
+    desired_present: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    depends_on: Vec<String>,
+}
+
+impl<'a> From<&'a PendingMutation> for PendingDependencyOperationOutput<'a> {
+    fn from(operation: &'a PendingMutation) -> Self {
+        let (_, desired) = operation
+            .dependency_values()
+            .expect("Dependency output is built from a Dependency mutation");
+        Self {
+            id: operation.id(),
+            kind: "dependency_update",
+            desired_present: desired.is_present(),
+            depends_on: operation.depends_on().to_vec(),
+        }
+    }
+}
+
+#[derive(Serialize)]
 struct ReconcileOutput<'a> {
     schema_version: &'static str,
     command: &'static str,
@@ -1179,16 +1287,6 @@ struct GraphArtifactSummary<'a> {
     node_count: usize,
     edge_count: usize,
     artifact_hash: &'a str,
-}
-
-#[derive(Serialize)]
-struct DependencyMutationOutput<'a> {
-    schema_version: &'static str,
-    command: &'static str,
-    repository: &'a str,
-    result: DependencyChange,
-    edge: DependencyEdgeOutput,
-    snapshot: SnapshotSummary<'a>,
 }
 
 #[derive(Serialize)]
@@ -1347,11 +1445,14 @@ struct PendingOperationOutput<'a> {
 
 impl<'a> From<&'a PendingMutation> for PendingOperationOutput<'a> {
     fn from(operation: &'a PendingMutation) -> Self {
+        let (base, desired) = operation
+            .priority_values()
+            .expect("Priority output is built from a Priority mutation");
         Self {
             id: operation.id(),
             kind: "priority_update",
-            base: operation.base(),
-            desired: operation.desired(),
+            base,
+            desired,
             depends_on: operation.depends_on().to_vec(),
         }
     }
@@ -1450,6 +1551,27 @@ fn dependency_command_name(intent: DependencyIntent) -> &'static str {
     }
 }
 
+fn dependency_result_name(result: DependencyChange) -> &'static str {
+    match result {
+        DependencyChange::Created => "created",
+        DependencyChange::AlreadyPresent => "already_present",
+        DependencyChange::Removed => "removed",
+        DependencyChange::AlreadyAbsent => "already_absent",
+    }
+}
+
+fn dependency_human_pending_message(
+    edge: &DependencyEdgeOutput,
+    intent: DependencyIntent,
+) -> String {
+    match intent {
+        DependencyIntent::Block => format!("{} blocked by {}", edge.blocked, edge.blocker),
+        DependencyIntent::Unblock => {
+            format!("{} no longer blocked by {}", edge.blocked, edge.blocker)
+        }
+    }
+}
+
 fn dependency_expected_relationship(intent: DependencyIntent) -> &'static str {
     if intent.desired_present() {
         "present"
@@ -1525,6 +1647,13 @@ pub(crate) enum CliError {
         online: String,
         queue: PendingPriorityUpdateError,
     },
+    #[error(
+        "online Dependency update was unavailable ({online}); the Pending mutation could not be queued: {queue}"
+    )]
+    OnlineDependencyUpdateAndQueueFailed {
+        online: String,
+        queue: PendingDependencyUpdateError,
+    },
     #[error(transparent)]
     Graph(#[from] GraphError),
     #[error("could not encode command JSON output: {0}")]
@@ -1540,7 +1669,7 @@ pub(crate) enum CliError {
     )]
     MutationSynchronization {
         #[source]
-        source: Box<CliError>,
+        source: ReplicaSyncError,
     },
     #[error(
         "GitHub dependency operation completed and readback was verified, but Local replica publication failed: {source}"

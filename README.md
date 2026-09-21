@@ -12,7 +12,7 @@ next-work recommendations with an exact horizon-one option. Its offline browser 
 Issue graph with synchronized network and accessible table selection,
 composable filters, Dependency relationship isolation, and a bounded view for dense graphs.
 Public exports use a separate allowlisted model after a live Repository visibility check.
-Unavailable Priority updates are queued durably and projected into analysis with explicit Pending provenance.
+Unavailable Priority and Dependency updates are queued durably and projected into analysis with explicit Pending provenance.
 Structural plans share the same Working graph and cached decision as next.
 
 ## Build and test
@@ -254,8 +254,26 @@ The first command means “Issue #42 is blocked by Issue #7.” Grit writes the
 native GitHub `blocked_by` relationship, then performs a complete synchronized
 readback before atomically replacing the Local replica. Repeating either
 operation uses set semantics: an existing edge can be added again and an absent
-edge can be removed again without error. If the write outcome or readback is
-uncertain, the previous Local replica remains unchanged.
+edge can be removed again without error. If GitHub is unavailable or the write
+outcome is ambiguous and a valid Local replica exists, Grit queues the intent,
+leaves that replica unchanged, and immediately projects the edge into offline
+readiness and ranking. A blocker from another Repository is preserved as an
+opaque External blocker with unknown state until GitHub can synchronize it.
+
+Apply queued work explicitly after connectivity returns:
+
+```bash
+grit reconcile --repo OWNER/REPO
+grit reconcile --repo OWNER/REPO --json
+```
+
+Reconciliation refreshes GitHub first, applies each independent mutation
+branch, checkpoints attempted writes, and finishes with a complete synchronized
+readback before publishing the Local replica. Dependency changes use idempotent
+set semantics, so a retry after an ambiguous response observes the desired edge
+instead of duplicating or conflicting with it. A failed operation blocks only
+mutations that declare it as a prerequisite.
+
 
 ## Generate a static graph artifact
 

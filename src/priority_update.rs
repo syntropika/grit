@@ -141,7 +141,7 @@ pub(crate) fn queue(
     let desired = LogicalPriority::from_selection(selection);
     let depends_on = transaction
         .outbox()
-        .latest_operation_for_issue(issue.number())
+        .latest_priority_operation_for_issue(issue.number())
         .map(|operation| vec![operation.to_owned()])
         .unwrap_or_default();
     let operation = PendingMutation::priority_update(
