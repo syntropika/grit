@@ -7,6 +7,7 @@ use url::Url;
 
 use crate::{
     auth::{AuthError, AuthToken},
+    comment_create::{self, PendingCommentCreateError},
     dependency_update::{self, PendingDependencyUpdateError},
     github::{
         CreateLabelRequest, DependencyChange, DependencyIntent, GitHubClient, GitHubError,
@@ -48,6 +49,7 @@ const PLAN_SCHEMA_VERSION: &str = "grit.plan/v1";
 const PRIORITY_UPDATE_SCHEMA_VERSION: &str = "grit.priority-update/v1";
 const RESOLVE_SCHEMA_VERSION: &str = "grit.resolve/v1";
 const ISSUE_CREATE_SCHEMA_VERSION: &str = "grit.issue-create/v1";
+const COMMENT_CREATE_SCHEMA_VERSION: &str = "grit.comment-create/v1";
 const ISSUE_FIELD_UPDATE_SCHEMA_VERSION: &str = "grit.issue-field-update/v1";
 const METADATA_MUTATION_SCHEMA_VERSION: &str = "grit.metadata-set/v1";
 
@@ -70,6 +72,17 @@ enum Command {
         title: String,
         /// Draft Issue body in Markdown.
         #[arg(long, default_value = "")]
+        body: String,
+        /// Emit versioned machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add a recoverable comment to an Issue or Draft Issue.
+    Comment {
+        /// Issue in OWNER/REPO#NUMBER or OWNER/REPO#draft:TEMPORARY_ID form.
+        issue: String,
+        /// Comment body in Markdown.
+        #[arg(long)]
         body: String,
         /// Emit versioned machine-readable output.
         #[arg(long)]
@@ -329,6 +342,7 @@ pub(crate) fn execute() -> Result<(), CliError> {
             body,
             json,
         } => create_issue(&Repository::parse(&repo)?, title, body, json),
+        Command::Comment { issue, body, json } => create_comment(&issue, body, json),
         Command::Graph {
             repo,
             output,
@@ -691,6 +705,108 @@ fn create_issue(
     Ok(())
 }
 
+fn create_comment(issue: &str, body: String, json: bool) -> Result<(), CliError> {
+    let reference = PendingIssueReference::parse(issue)?;
+    let queued = comment_create::queue(&reference, body)?;
+    let operation_id = queued.operation.id().to_owned();
+    let mut replica = queued.replica;
+    let mut pending = true;
+    let mut result_name = "pending";
+    let mut remote = None;
+    let mut warning = None;
+    let mut working_input_hash = Some(queued.working_input_hash);
+
+    if let Some(client) = optional_github_client()? {
+        match reconciliation::reconcile(&client, reference.repository()) {
+            Ok(reconciled) => {
+                let operation = reconciled
+                    .operations
+                    .iter()
+                    .find(|operation| operation.id == operation_id)
+                    .expect("the queued comment participates in its immediate reconciliation");
+                if let reconciliation::OperationDetails::CommentCreate { remote: created } =
+                    &operation.details
+                {
+                    remote = created.clone();
+                }
+                match operation.outcome {
+                    reconciliation::Outcome::Applied => {
+                        pending = false;
+                        result_name = "created";
+                    }
+                    reconciliation::Outcome::AlreadySatisfied => {
+                        pending = false;
+                        result_name = "recovered";
+                    }
+                    reconciliation::Outcome::Checkpointed => {
+                        pending = false;
+                        result_name = "created";
+                    }
+                    reconciliation::Outcome::Failed
+                    | reconciliation::Outcome::Conflicting
+                    | reconciliation::Outcome::TransitivelyBlocked
+                    | reconciliation::Outcome::ResolvedRemote => {
+                        warning.clone_from(&operation.error);
+                    }
+                }
+                replica = reconciled.replica;
+                if pending {
+                    let outbox = OutboxStore::discover(reference.repository())?
+                        .load(reference.repository())?;
+                    working_input_hash = Some(
+                        WorkingGraph::project(&replica, &outbox)?
+                            .input_hash()
+                            .to_owned(),
+                    );
+                } else {
+                    working_input_hash = None;
+                }
+            }
+            Err(error) => {
+                warning = Some(format!(
+                    "GitHub reconciliation was unavailable; comment remains Pending: {error}"
+                ));
+            }
+        }
+    }
+
+    let output = CommentCreateOutput {
+        schema_version: COMMENT_CREATE_SCHEMA_VERSION,
+        command: "comment",
+        repository: &replica.repository,
+        issue: &queued.issue_key,
+        body: &queued.body,
+        result: result_name,
+        pending,
+        operation: CommentCreateOperationOutput {
+            id: &operation_id,
+            kind: "comment_create",
+            depends_on: queued.operation.depends_on(),
+        },
+        remote,
+        working_graph: working_input_hash
+            .as_deref()
+            .map(|input_hash| WorkingGraphSummary { input_hash }),
+        snapshot: snapshot_summary(&replica),
+        warning,
+    };
+    if json {
+        serde_json::to_writer(std::io::stdout().lock(), &output).map_err(CliError::EncodeOutput)?;
+        println!();
+    } else if output.pending {
+        println!(
+            "Queued comment on {} as Pending mutation {}",
+            output.issue, output.operation.id
+        );
+        if let Some(warning) = &output.warning {
+            eprintln!("warning: {warning}");
+        }
+    } else {
+        println!("Created comment on {}", output.issue);
+    }
+    Ok(())
+}
+
 fn issue_field_request(
     title: Option<String>,
     body: Option<String>,
@@ -839,6 +955,7 @@ fn print_reconciliation(
                             .unwrap_or_else(|| "missing".to_owned())
                     ),
                     reconciliation::OperationDetails::IssueCreate { .. }
+                    | reconciliation::OperationDetails::CommentCreate { .. }
                     | reconciliation::OperationDetails::DependencyUpdate { .. }
                     | reconciliation::OperationDetails::MetadataSetUpdate { .. } => {}
                 }
@@ -2017,6 +2134,33 @@ struct DraftCreateOperationOutput<'a> {
 }
 
 #[derive(Serialize)]
+struct CommentCreateOutput<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    repository: &'a str,
+    issue: &'a str,
+    body: &'a str,
+    result: &'static str,
+    pending: bool,
+    operation: CommentCreateOperationOutput<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote: Option<crate::model::CommentIdentity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    working_graph: Option<WorkingGraphSummary<'a>>,
+    snapshot: SnapshotSummary<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    warning: Option<String>,
+}
+
+#[derive(Serialize)]
+struct CommentCreateOperationOutput<'a> {
+    id: &'a str,
+    kind: &'static str,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    depends_on: &'a [String],
+}
+
+#[derive(Serialize)]
 struct PriorityIssueOutput<'a> {
     key: &'a str,
     number: u64,
@@ -2180,6 +2324,8 @@ pub(crate) enum CliError {
     PendingIssueReference(#[from] PendingIssueReferenceError),
     #[error(transparent)]
     PendingIssueCreate(#[from] PendingIssueCreateError),
+    #[error(transparent)]
+    PendingCommentCreate(#[from] PendingCommentCreateError),
     #[error("GRIT_GITHUB_API_URL is invalid: {0}")]
     ParseApiBase(url::ParseError),
     #[error("GRIT_GITHUB_API_URL must be a safe absolute HTTP(S) base URL")]

@@ -16,8 +16,10 @@ use crate::{
     atomic_file::{self, AtomicFileError},
     draft_identity::DraftIdentity,
     issue_field::{IssueField, IssueFieldValue},
-    metadata::MetadataSetTarget,
-    model::{DependencyEdgeKey, DependencyPresence, SetPresence, TemporaryIssueId},
+    metadata::{MetadataSetTarget, PendingIssueOperand},
+    model::{
+        CommentIdentity, DependencyEdgeKey, DependencyPresence, SetPresence, TemporaryIssueId,
+    },
     priority::LogicalPriority,
     repository::Repository,
     store::{StoreError, repository_state_directory},
@@ -93,6 +95,20 @@ impl PendingMutationOutbox {
                 return Err(OutboxError::InvalidIssueFieldUpdate(
                     operation.id().to_owned(),
                 ));
+            }
+            if let Some(comment) = operation.comment_create_view()
+                && (!comment.issue.is_valid()
+                    || comment.body.trim().is_empty()
+                    || uuid::Uuid::parse_str(comment.marker)
+                        .map_or(true, |marker| marker.to_string() != comment.marker)
+                    || comment.state.remote_identity().is_some_and(|remote| {
+                        remote.id == 0
+                            || remote.node_id.is_empty()
+                            || remote.url.is_empty()
+                            || remote.issue_number != comment.issue.number()
+                    }))
+            {
+                return Err(OutboxError::InvalidCommentCreate(operation.id().to_owned()));
             }
             if operation
                 .priority_values()
@@ -214,6 +230,14 @@ enum MutationPayload {
         #[serde(default, skip_serializing_if = "IssueCreateState::is_pending")]
         state: IssueCreateState,
     },
+    CommentCreate {
+        issue: PendingIssueOperand,
+        body: String,
+        created_at: String,
+        marker: String,
+        #[serde(default, skip_serializing_if = "CommentCreateState::is_pending")]
+        state: CommentCreateState,
+    },
     PriorityUpdate {
         issue_number: u64,
         base: LogicalPriority,
@@ -245,13 +269,142 @@ enum MutationPayload {
     },
 }
 
+struct MutationSummary {
+    kind: MutationKind,
+    primary_issue_number: u64,
+    affected_issue_numbers: Vec<u64>,
+    permits_dependents: bool,
+    has_safe_write_plan: bool,
+}
+
+impl MutationPayload {
+    fn summary(&self) -> MutationSummary {
+        match self {
+            Self::IssueCreate {
+                synthetic_number,
+                state,
+                ..
+            } => {
+                let primary_issue_number = match state {
+                    IssueCreateState::Mapped { issue_number, .. } => *issue_number,
+                    _ => *synthetic_number,
+                };
+                MutationSummary {
+                    kind: MutationKind::IssueCreate,
+                    primary_issue_number,
+                    affected_issue_numbers: vec![primary_issue_number],
+                    permits_dependents: state.permits_dependents(),
+                    has_safe_write_plan: true,
+                }
+            }
+            Self::CommentCreate { issue, state, .. } => MutationSummary {
+                kind: MutationKind::CommentCreate,
+                primary_issue_number: issue.number(),
+                affected_issue_numbers: vec![issue.number()],
+                permits_dependents: state.permits_dependents(),
+                has_safe_write_plan: true,
+            },
+            Self::PriorityUpdate {
+                issue_number,
+                desired,
+                state,
+                ..
+            } => {
+                let has_safe_write_plan = match state {
+                    PriorityMutationState::Applying {
+                        expected_labels,
+                        remaining_writes,
+                        ..
+                    } => {
+                        !remaining_writes.is_empty()
+                            && PriorityWrite::canonical_plan(expected_labels, desired)
+                                .is_some_and(|canonical| canonical == *remaining_writes)
+                    }
+                    _ => true,
+                };
+                MutationSummary {
+                    kind: MutationKind::PriorityUpdate,
+                    primary_issue_number: *issue_number,
+                    affected_issue_numbers: vec![*issue_number],
+                    permits_dependents: state.is_successfully_terminal(),
+                    has_safe_write_plan,
+                }
+            }
+            Self::DependencyUpdate { edge, state, .. } => {
+                let mut affected_issue_numbers = vec![edge.blocked_number()];
+                if edge.is_internal() {
+                    affected_issue_numbers.push(edge.blocker_number());
+                }
+                MutationSummary {
+                    kind: MutationKind::DependencyUpdate,
+                    primary_issue_number: edge.blocked_number(),
+                    affected_issue_numbers,
+                    permits_dependents: state.is_successfully_terminal(),
+                    has_safe_write_plan: true,
+                }
+            }
+            Self::IssueFieldUpdate {
+                issue_number,
+                state,
+                ..
+            } => MutationSummary {
+                kind: MutationKind::IssueFieldUpdate,
+                primary_issue_number: *issue_number,
+                affected_issue_numbers: vec![*issue_number],
+                permits_dependents: state.is_successfully_terminal(),
+                has_safe_write_plan: true,
+            },
+            Self::MetadataSetUpdate { target, state, .. } => MutationSummary {
+                kind: MutationKind::MetadataSetUpdate,
+                primary_issue_number: target.primary_number(),
+                affected_issue_numbers: target.affected_issue_numbers(),
+                permits_dependents: state.is_successfully_terminal(),
+                has_safe_write_plan: true,
+            },
+        }
+    }
+
+    fn resolve_draft_identity(&mut self, identity: &DraftIdentity) {
+        match self {
+            Self::CommentCreate { issue, .. } => {
+                issue.resolve(identity.temporary_id, identity.issue_number);
+            }
+            Self::DependencyUpdate { edge, .. } => {
+                edge.resolve_temporary_id(identity.temporary_id, identity.issue_number);
+            }
+            Self::IssueFieldUpdate {
+                issue_number,
+                temporary_id,
+                ..
+            } if *temporary_id == Some(identity.temporary_id) => {
+                *issue_number = identity.issue_number;
+            }
+            Self::MetadataSetUpdate { target, .. } => {
+                target.resolve(identity.temporary_id, identity.issue_number);
+            }
+            Self::IssueCreate { .. }
+            | Self::PriorityUpdate { .. }
+            | Self::IssueFieldUpdate { .. } => {}
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MutationKind {
     IssueCreate,
+    CommentCreate,
     PriorityUpdate,
     DependencyUpdate,
     IssueFieldUpdate,
     MetadataSetUpdate,
+}
+
+pub(crate) struct CommentCreateView<'a> {
+    pub(crate) issue: PendingIssueOperand,
+    pub(crate) body: &'a str,
+    pub(crate) created_at: &'a str,
+    pub(crate) marker: &'a str,
+    pub(crate) state: &'a CommentCreateState,
 }
 
 pub(crate) struct IssueCreateView<'a> {
@@ -324,6 +477,46 @@ impl IssueCreateState {
 
     fn permits_dependents(&self) -> bool {
         matches!(self, Self::Mapped { .. })
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub(crate) enum CommentCreateState {
+    #[default]
+    Pending,
+    AwaitingMarker {
+        error: String,
+    },
+    Created {
+        remote: CommentIdentity,
+    },
+}
+
+impl CommentCreateState {
+    fn is_pending(&self) -> bool {
+        matches!(self, Self::Pending)
+    }
+
+    fn permits_dependents(&self) -> bool {
+        matches!(self, Self::Created { .. })
+    }
+
+    fn remote_identity(&self) -> Option<&CommentIdentity> {
+        match self {
+            Self::Created { remote } => Some(remote),
+            Self::Pending | Self::AwaitingMarker { .. } => None,
+        }
+    }
+}
+
+impl MutationLifecycle for CommentCreateState {
+    fn phase(&self) -> MutationPhase {
+        match self {
+            Self::Pending => MutationPhase::Pending,
+            Self::AwaitingMarker { .. } => MutationPhase::Failed,
+            Self::Created { .. } => MutationPhase::Succeeded,
+        }
     }
 }
 
@@ -530,6 +723,27 @@ impl PendingMutation {
         }
     }
 
+    pub(crate) fn comment_create(
+        repository: &Repository,
+        issue: PendingIssueOperand,
+        body: String,
+        depends_on: Vec<String>,
+    ) -> Self {
+        Self {
+            header: MutationHeader {
+                id: new_operation_id(repository, issue.number()),
+                depends_on,
+            },
+            payload: MutationPayload::CommentCreate {
+                issue,
+                body,
+                created_at: chrono::Utc::now().to_rfc3339(),
+                marker: uuid::Uuid::new_v4().to_string(),
+                state: CommentCreateState::Pending,
+            },
+        }
+    }
+
     pub(crate) fn priority_update(
         repository: &Repository,
         issue_number: u64,
@@ -619,52 +833,22 @@ impl PendingMutation {
     }
 
     pub(crate) fn kind(&self) -> MutationKind {
-        match self.payload {
-            MutationPayload::IssueCreate { .. } => MutationKind::IssueCreate,
-            MutationPayload::PriorityUpdate { .. } => MutationKind::PriorityUpdate,
-            MutationPayload::DependencyUpdate { .. } => MutationKind::DependencyUpdate,
-            MutationPayload::IssueFieldUpdate { .. } => MutationKind::IssueFieldUpdate,
-            MutationPayload::MetadataSetUpdate { .. } => MutationKind::MetadataSetUpdate,
-        }
+        self.payload.summary().kind
     }
 
     pub(crate) fn issue_number(&self) -> u64 {
-        match &self.payload {
-            MutationPayload::IssueCreate {
-                synthetic_number,
-                state,
-                ..
-            } => match state {
-                IssueCreateState::Mapped { issue_number, .. } => *issue_number,
-                _ => *synthetic_number,
-            },
-            MutationPayload::PriorityUpdate { issue_number, .. } => *issue_number,
-            MutationPayload::DependencyUpdate { edge, .. } => edge.blocked_number(),
-            MutationPayload::IssueFieldUpdate { issue_number, .. } => *issue_number,
-            MutationPayload::MetadataSetUpdate { target, .. } => target.primary_number(),
-        }
+        self.payload.summary().primary_issue_number
     }
 
     pub(crate) fn affected_issue_numbers(&self) -> Vec<u64> {
-        match &self.payload {
-            MutationPayload::IssueCreate { .. } => vec![self.issue_number()],
-            MutationPayload::PriorityUpdate { issue_number, .. } => vec![*issue_number],
-            MutationPayload::DependencyUpdate { edge, .. } => {
-                let mut affected = vec![edge.blocked_number()];
-                if edge.is_internal() {
-                    affected.push(edge.blocker_number());
-                }
-                affected
-            }
-            MutationPayload::IssueFieldUpdate { issue_number, .. } => vec![*issue_number],
-            MutationPayload::MetadataSetUpdate { target, .. } => target.affected_issue_numbers(),
-        }
+        self.payload.summary().affected_issue_numbers
     }
 
     pub(crate) fn priority_values(&self) -> Option<(&LogicalPriority, &LogicalPriority)> {
         match &self.payload {
             MutationPayload::PriorityUpdate { base, desired, .. } => Some((base, desired)),
             MutationPayload::IssueCreate { .. }
+            | MutationPayload::CommentCreate { .. }
             | MutationPayload::DependencyUpdate { .. }
             | MutationPayload::IssueFieldUpdate { .. }
             | MutationPayload::MetadataSetUpdate { .. } => None,
@@ -675,6 +859,7 @@ impl PendingMutation {
         match &self.payload {
             MutationPayload::DependencyUpdate { edge, desired, .. } => Some((edge, *desired)),
             MutationPayload::IssueCreate { .. }
+            | MutationPayload::CommentCreate { .. }
             | MutationPayload::PriorityUpdate { .. }
             | MutationPayload::IssueFieldUpdate { .. }
             | MutationPayload::MetadataSetUpdate { .. } => None,
@@ -689,6 +874,7 @@ impl PendingMutation {
         match &self.payload {
             MutationPayload::PriorityUpdate { state, .. } => Some(state),
             MutationPayload::IssueCreate { .. }
+            | MutationPayload::CommentCreate { .. }
             | MutationPayload::DependencyUpdate { .. }
             | MutationPayload::IssueFieldUpdate { .. }
             | MutationPayload::MetadataSetUpdate { .. } => None,
@@ -699,6 +885,7 @@ impl PendingMutation {
         match &self.payload {
             MutationPayload::DependencyUpdate { state, .. } => Some(state),
             MutationPayload::IssueCreate { .. }
+            | MutationPayload::CommentCreate { .. }
             | MutationPayload::PriorityUpdate { .. }
             | MutationPayload::IssueFieldUpdate { .. }
             | MutationPayload::MetadataSetUpdate { .. } => None,
@@ -708,7 +895,8 @@ impl PendingMutation {
     pub(crate) fn issue_create_state(&self) -> Option<&IssueCreateState> {
         match &self.payload {
             MutationPayload::IssueCreate { state, .. } => Some(state),
-            MutationPayload::PriorityUpdate { .. }
+            MutationPayload::CommentCreate { .. }
+            | MutationPayload::PriorityUpdate { .. }
             | MutationPayload::DependencyUpdate { .. }
             | MutationPayload::IssueFieldUpdate { .. }
             | MutationPayload::MetadataSetUpdate { .. } => None,
@@ -734,7 +922,31 @@ impl PendingMutation {
                 marker,
                 state,
             }),
-            MutationPayload::PriorityUpdate { .. }
+            MutationPayload::CommentCreate { .. }
+            | MutationPayload::PriorityUpdate { .. }
+            | MutationPayload::DependencyUpdate { .. }
+            | MutationPayload::IssueFieldUpdate { .. }
+            | MutationPayload::MetadataSetUpdate { .. } => None,
+        }
+    }
+
+    pub(crate) fn comment_create_view(&self) -> Option<CommentCreateView<'_>> {
+        match &self.payload {
+            MutationPayload::CommentCreate {
+                issue,
+                body,
+                created_at,
+                marker,
+                state,
+            } => Some(CommentCreateView {
+                issue: *issue,
+                body,
+                created_at,
+                marker,
+                state,
+            }),
+            MutationPayload::IssueCreate { .. }
+            | MutationPayload::PriorityUpdate { .. }
             | MutationPayload::DependencyUpdate { .. }
             | MutationPayload::IssueFieldUpdate { .. }
             | MutationPayload::MetadataSetUpdate { .. } => None,
@@ -759,6 +971,7 @@ impl PendingMutation {
                 state,
             }),
             MutationPayload::IssueCreate { .. }
+            | MutationPayload::CommentCreate { .. }
             | MutationPayload::PriorityUpdate { .. }
             | MutationPayload::DependencyUpdate { .. }
             | MutationPayload::MetadataSetUpdate { .. } => None,
@@ -777,6 +990,7 @@ impl PendingMutation {
                 state,
             }),
             MutationPayload::IssueCreate { .. }
+            | MutationPayload::CommentCreate { .. }
             | MutationPayload::PriorityUpdate { .. }
             | MutationPayload::DependencyUpdate { .. }
             | MutationPayload::IssueFieldUpdate { .. } => None,
@@ -789,13 +1003,7 @@ impl PendingMutation {
     }
 
     pub(crate) fn permits_dependents(&self) -> bool {
-        match &self.payload {
-            MutationPayload::IssueCreate { state, .. } => state.permits_dependents(),
-            MutationPayload::PriorityUpdate { state, .. } => state.is_successfully_terminal(),
-            MutationPayload::DependencyUpdate { state, .. } => state.is_successfully_terminal(),
-            MutationPayload::IssueFieldUpdate { state, .. } => state.is_successfully_terminal(),
-            MutationPayload::MetadataSetUpdate { state, .. } => state.is_successfully_terminal(),
-        }
+        self.payload.summary().permits_dependents
     }
 
     pub(crate) fn is_successfully_terminal(&self) -> bool {
@@ -813,6 +1021,7 @@ impl PendingMutation {
                 _ => Some(desired),
             },
             MutationPayload::IssueCreate { .. }
+            | MutationPayload::CommentCreate { .. }
             | MutationPayload::DependencyUpdate { .. }
             | MutationPayload::IssueFieldUpdate { .. }
             | MutationPayload::MetadataSetUpdate { .. } => None,
@@ -838,25 +1047,7 @@ impl PendingMutation {
     }
 
     fn has_safe_write_plan(&self) -> bool {
-        match &self.payload {
-            MutationPayload::IssueCreate { .. } => true,
-            MutationPayload::PriorityUpdate { desired, state, .. } => {
-                let PriorityMutationState::Applying {
-                    expected_labels,
-                    remaining_writes,
-                    ..
-                } = state
-                else {
-                    return true;
-                };
-                !remaining_writes.is_empty()
-                    && PriorityWrite::canonical_plan(expected_labels, desired)
-                        .is_some_and(|canonical| canonical == *remaining_writes)
-            }
-            MutationPayload::DependencyUpdate { .. } => true,
-            MutationPayload::IssueFieldUpdate { .. } => true,
-            MutationPayload::MetadataSetUpdate { .. } => true,
-        }
+        self.payload.summary().has_safe_write_plan
     }
 
     fn rebase_priority(
@@ -866,6 +1057,7 @@ impl PendingMutation {
     ) -> Result<(), ()> {
         match &mut self.payload {
             MutationPayload::IssueCreate { .. } => Err(()),
+            MutationPayload::CommentCreate { .. } => Err(()),
             MutationPayload::PriorityUpdate {
                 base: current_base,
                 desired: current_desired,
@@ -960,6 +1152,7 @@ pub(crate) struct OutboxTransaction<'a> {
 }
 
 pub(crate) enum MutationStateUpdate {
+    CommentCreate(CommentCreateState),
     Priority(PriorityMutationState),
     Dependency(DependencyMutationState),
     IssueField(IssueFieldMutationState),
@@ -1003,6 +1196,7 @@ impl OutboxTransaction<'_> {
                 Ok(())
             }
             MutationPayload::IssueCreate { .. }
+            | MutationPayload::CommentCreate { .. }
             | MutationPayload::DependencyUpdate { .. }
             | MutationPayload::IssueFieldUpdate { .. }
             | MutationPayload::MetadataSetUpdate { .. } => {
@@ -1037,23 +1231,33 @@ impl OutboxTransaction<'_> {
             },
         )?;
         for operation in &mut self.outbox.operations {
-            if let MutationPayload::DependencyUpdate { edge, .. } = &mut operation.payload {
-                edge.resolve_temporary_id(identity.temporary_id, identity.issue_number);
-            }
-            if let MutationPayload::IssueFieldUpdate {
-                issue_number,
-                temporary_id,
-                ..
-            } = &mut operation.payload
-                && *temporary_id == Some(identity.temporary_id)
-            {
-                *issue_number = identity.issue_number;
-            }
-            if let MutationPayload::MetadataSetUpdate { target, .. } = &mut operation.payload {
-                target.resolve(identity.temporary_id, identity.issue_number);
-            }
+            operation.payload.resolve_draft_identity(identity);
         }
         self.publish(repository)
+    }
+
+    pub(crate) fn checkpoint_comment_create_state(
+        &mut self,
+        repository: &Repository,
+        id: &str,
+        state: CommentCreateState,
+    ) -> Result<(), OutboxError> {
+        self.stage_comment_create_state(id, state)?;
+        self.publish(repository)
+    }
+
+    fn stage_comment_create_state(
+        &mut self,
+        id: &str,
+        state: CommentCreateState,
+    ) -> Result<(), OutboxError> {
+        match &mut self.operation_mut(id)?.payload {
+            MutationPayload::CommentCreate { state: current, .. } => {
+                *current = state;
+                Ok(())
+            }
+            _ => Err(OutboxError::InvalidMutationKind(id.to_owned())),
+        }
     }
 
     fn stage_issue_create_state(
@@ -1067,6 +1271,7 @@ impl OutboxTransaction<'_> {
                 Ok(())
             }
             MutationPayload::PriorityUpdate { .. }
+            | MutationPayload::CommentCreate { .. }
             | MutationPayload::DependencyUpdate { .. }
             | MutationPayload::IssueFieldUpdate { .. }
             | MutationPayload::MetadataSetUpdate { .. } => {
@@ -1096,6 +1301,7 @@ impl OutboxTransaction<'_> {
                 Ok(())
             }
             MutationPayload::IssueCreate { .. }
+            | MutationPayload::CommentCreate { .. }
             | MutationPayload::PriorityUpdate { .. }
             | MutationPayload::IssueFieldUpdate { .. }
             | MutationPayload::MetadataSetUpdate { .. } => {
@@ -1149,6 +1355,7 @@ impl OutboxTransaction<'_> {
                 Ok(())
             }
             MutationPayload::IssueCreate { .. }
+            | MutationPayload::CommentCreate { .. }
             | MutationPayload::PriorityUpdate { .. }
             | MutationPayload::DependencyUpdate { .. }
             | MutationPayload::MetadataSetUpdate { .. } => {
@@ -1183,6 +1390,7 @@ impl OutboxTransaction<'_> {
                 *state = IssueFieldMutationState::Pending;
             }
             MutationPayload::IssueCreate { .. }
+            | MutationPayload::CommentCreate { .. }
             | MutationPayload::PriorityUpdate { .. }
             | MutationPayload::DependencyUpdate { .. }
             | MutationPayload::MetadataSetUpdate { .. } => {
@@ -1238,6 +1446,9 @@ impl OutboxTransaction<'_> {
     ) -> Result<(), OutboxError> {
         for (operation_id, state) in state_updates {
             match state {
+                MutationStateUpdate::CommentCreate(state) => {
+                    self.stage_comment_create_state(&operation_id, state)?;
+                }
                 MutationStateUpdate::Priority(state) => {
                     self.stage_priority_state(&operation_id, state)?;
                 }
@@ -1335,6 +1546,8 @@ pub(crate) enum OutboxError {
     InvalidDependencyEdge(String),
     #[error("Pending mutation operation {0:?} contains an invalid Draft Issue")]
     InvalidDraftIssue(String),
+    #[error("Pending mutation operation {0:?} contains an invalid comment create")]
+    InvalidCommentCreate(String),
     #[error("Pending mutation operation {0:?} contains an invalid Issue-field update")]
     InvalidIssueFieldUpdate(String),
     #[error("Pending mutation operation {0:?} contains an invalid metadata set update")]

@@ -17,6 +17,7 @@ Grit also creates recoverable Draft Issues with stable temporary identities and 
 Title, body, state, and assignment edits use field-aware Pending mutations.
 Generic labels and parent/sub-Issue relationships use idempotent set mutations.
 Structural plans share the cached Working-graph analysis used by next-work recommendations.
+Online and offline comments use durable Operation markers for safe recovery.
 
 ## Build and test
 
@@ -245,6 +246,25 @@ before the request. Grit embeds it in an invisible Markdown comment, removes it
 from normalized and user-facing data, and uses it only to recover an ambiguous
 response. Exactly one remote match is accepted; zero or multiple matches stay
 unresolved and are never retried blindly.
+
+## Comment online or offline
+
+Add Markdown comments to a synchronized Issue or a Draft Issue:
+
+```bash
+grit comment OWNER/REPO#42 --body "Deployment note"
+grit comment OWNER/REPO#draft:TEMPORARY_ID --body "Offline finding" --json
+```
+
+Grit persists the comment intent and a random Operation marker before making
+the GitHub request. With connectivity it immediately reconciles and publishes
+only verified readback; without connectivity it leaves a Pending comment in
+the Working graph. A comment on an unresolved Draft waits for that Draft's
+GitHub identity. If a response is lost after GitHub accepts the comment, the
+next reconciliation searches for the marker: exactly one match is recovered,
+while zero or multiple matches remain unresolved without a blind retry.
+Operation markers are omitted from human and JSON output and stripped from all
+normalized comment data consumed by graph and public serializers.
 
 ## Edit Issue fields
 

@@ -10,8 +10,8 @@ use thiserror::Error;
 
 use crate::{
     model::{
-        BlockerIdentity, BlockerScope, Dependency, DependencyEdgeKey, DependencyPresence, Issue,
-        IssueIdentity, Label, LocalReplica, SetPresence,
+        BlockerIdentity, BlockerScope, Comment, Dependency, DependencyEdgeKey, DependencyPresence,
+        Issue, IssueIdentity, Label, LocalReplica, SetPresence,
     },
     outbox::{IssueCreateState, PendingMutation, PendingMutationOutbox},
     priority::{LogicalPriority, PriorityState},
@@ -37,6 +37,7 @@ impl<'a> WorkingGraph<'a> {
         let mut dependency_intents = Vec::new();
         let mut field_updates = Vec::new();
         let mut label_updates = Vec::new();
+        let mut comment_creates = Vec::new();
         let mut operation_ids = Vec::with_capacity(outbox.operations().len());
         let mut operation_ids_by_issue = BTreeMap::<u64, Vec<(usize, String)>>::new();
         let mut topology_operation_ids = Vec::new();
@@ -57,6 +58,16 @@ impl<'a> WorkingGraph<'a> {
             )) = operation.metadata_set_values()
             {
                 label_updates.push((issue.number(), label.clone(), desired));
+            }
+            if let Some(comment) = operation.comment_create_view()
+                && operation.is_pending_intent()
+            {
+                comment_creates.push((
+                    comment.issue.number(),
+                    operation.id().to_owned(),
+                    comment.body.to_owned(),
+                    comment.created_at.to_owned(),
+                ));
             }
             if !operation.is_pending_intent() {
                 continue;
@@ -93,6 +104,9 @@ impl<'a> WorkingGraph<'a> {
         }
         if !label_updates.is_empty() {
             apply_label_updates(&mut effective_replica.to_mut().issues, label_updates)?;
+        }
+        if !comment_creates.is_empty() {
+            apply_comment_creates(&mut effective_replica.to_mut().issues, comment_creates)?;
         }
         if !dependency_intents.is_empty() {
             project_dependency_intents(effective_replica.to_mut(), dependency_intents)?;
@@ -173,6 +187,34 @@ impl<'a> WorkingGraph<'a> {
         indexed_operation_ids.extend(self.topology_operation_ids.iter().cloned());
         PendingProvenance::from_indexed(indexed_operation_ids)
     }
+}
+
+fn apply_comment_creates(
+    issues: &mut [Issue],
+    comments: Vec<(u64, String, String, String)>,
+) -> Result<(), WorkingGraphError> {
+    let issue_indices: BTreeMap<_, _> = issues
+        .iter()
+        .enumerate()
+        .map(|(index, issue)| (issue.number, index))
+        .collect();
+    for (issue_number, operation_id, body, created_at) in comments {
+        let index = issue_indices
+            .get(&issue_number)
+            .copied()
+            .ok_or(WorkingGraphError::MissingIssue(issue_number))?;
+        issues[index].comments.push(Comment {
+            id: 0,
+            node_id: format!("pending:{operation_id}"),
+            url: String::new(),
+            body,
+            author: None,
+            author_association: "pending".to_owned(),
+            created_at: created_at.clone(),
+            updated_at: created_at,
+        });
+    }
+    Ok(())
 }
 
 fn apply_label_updates(
