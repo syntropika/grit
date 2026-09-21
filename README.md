@@ -14,6 +14,7 @@ composable filters, Dependency relationship isolation, and a bounded view for de
 Public exports use a separate allowlisted model after a live Repository visibility check.
 Unavailable Priority and Dependency updates are queued durably and projected into analysis with explicit Pending provenance.
 Grit also creates recoverable Draft Issues with stable temporary identities and marker-based reconciliation.
+Title, body, state, and assignment edits use field-aware Pending mutations.
 Structural plans share the cached Working-graph analysis used by next-work recommendations.
 
 ## Build and test
@@ -243,6 +244,29 @@ before the request. Grit embeds it in an invisible Markdown comment, removes it
 from normalized and user-facing data, and uses it only to recover an ambiguous
 response. Exactly one remote match is accepted; zero or multiple matches stay
 unresolved and are never retried blindly.
+
+## Edit Issue fields
+
+`update` changes exactly one logical field per invocation:
+
+```bash
+grit update OWNER/REPO#42 --title "A clearer title"
+grit update OWNER/REPO#42 --body "Revised Markdown"
+grit update OWNER/REPO#42 --state closed
+grit update OWNER/REPO#42 --assignee alice --assignee bob
+grit update OWNER/REPO#42 --clear-assignees
+grit update OWNER/REPO#42 --priority p1
+```
+
+Title, body, state, and assignment also accept a Draft key such as
+`OWNER/REPO#draft:TEMPORARY_ID`. Canonical Issues are updated online when
+GitHub is available; otherwise Grit records the base and desired values in the
+outbox and projects the desired field into `ready` and `next` without changing
+the Local replica. `grit reconcile` applies a Pending field only when GitHub
+still matches its base, treats the desired remote value as already satisfied,
+and exposes incompatible base/local/remote values as a conflict. Resolve a
+conflict explicitly with `grit resolve OPERATION --repo OWNER/REPO --local` or
+`--remote`; resolution always performs a fresh GitHub read before any write.
 
 ## Triage graph problems
 

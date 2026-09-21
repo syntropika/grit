@@ -1,12 +1,5 @@
 use super::*;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum PendingClassification {
-    Applicable,
-    AlreadySatisfied,
-    Conflicting,
-}
-
 impl ReconciliationPass<'_, '_, '_, '_> {
     pub(super) fn reconcile_priority_operation(
         &mut self,
@@ -117,8 +110,8 @@ impl ReconciliationPass<'_, '_, '_, '_> {
         let (base, desired) = operation
             .priority_values()
             .expect("Priority classification receives a Priority mutation");
-        match classify_priority(base, desired, &remote.logical) {
-            PendingClassification::AlreadySatisfied => {
+        match classify_scalar(base, desired, &remote.logical) {
+            ScalarClassification::AlreadySatisfied => {
                 self.stage_priority_state(operation.id(), PriorityMutationState::AlreadySatisfied)?;
                 self.record_priority(
                     operation,
@@ -130,10 +123,10 @@ impl ReconciliationPass<'_, '_, '_, '_> {
                 );
                 Ok(())
             }
-            PendingClassification::Conflicting => {
+            ScalarClassification::Conflicting => {
                 self.record_conflict(operation, remote.logical.clone())
             }
-            PendingClassification::Applicable => {
+            ScalarClassification::Applicable => {
                 let writes = PriorityWrite::canonical_plan(&remote.canonical_labels, desired)
                     .expect("remote Priority labels and desired outbox value are valid");
                 self.checkpoint_priority_state(
@@ -323,20 +316,6 @@ impl ReconciliationPass<'_, '_, '_, '_> {
             blocked_by,
             error,
         ));
-    }
-}
-
-pub(super) fn classify_priority(
-    base: &LogicalPriority,
-    desired: &LogicalPriority,
-    remote: &LogicalPriority,
-) -> PendingClassification {
-    if remote == desired {
-        PendingClassification::AlreadySatisfied
-    } else if remote == base {
-        PendingClassification::Applicable
-    } else {
-        PendingClassification::Conflicting
     }
 }
 
