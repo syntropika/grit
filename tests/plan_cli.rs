@@ -219,6 +219,113 @@ fn pending_plan_and_next_share_cached_decisions_and_projected_structural_priorit
 }
 
 #[test]
+fn pending_dependency_chain_and_removal_rebuild_the_cached_plan_and_next_graph() {
+    let repository = "acme/pending-topology";
+    let (state, api_url) = seeded_replica(
+        repository,
+        vec![
+            issue_for(repository, 1, "open", &[], &[]),
+            issue_for(repository, 2, "open", &[], &[]),
+            issue_for(repository, 3, "open", &["priority:p0"], &[]),
+        ],
+        vec![(1, vec![]), (2, vec![]), (3, vec![])],
+    );
+    let ranked = |command| {
+        let mut invocation = grit_command_for(&state, &api_url, repository, command, None);
+        if command == "next" {
+            invocation.arg("--profile");
+        }
+        let output = invocation
+            .output()
+            .expect("analyze projected dependency graph");
+        assert_success(&output);
+        serde_json::from_slice::<Value>(&output.stdout).expect("analysis JSON")
+    };
+    let baseline = ranked("next");
+    assert_eq!(baseline["mode"], "p0_ready");
+    let directory = state.path().join("repositories/acme/pending-topology");
+    let replica_before = fs::read(directory.join("replica.json")).expect("base replica");
+    let mut operation_ids = Vec::new();
+    let mut previous_hash = baseline["input_hash"].clone();
+    for (command, blocked, blocker, expected_steps, expected_layers) in [
+        ("block", 3, 2, vec![2, 3, 1], vec![vec![1, 2], vec![3]]),
+        (
+            "block",
+            2,
+            1,
+            vec![1, 2, 3],
+            vec![vec![1], vec![2], vec![3]],
+        ),
+        ("unblock", 2, 1, vec![2, 3, 1], vec![vec![1, 2], vec![3]]),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_grit"))
+            .args([
+                command,
+                &format!("{repository}#{blocked}"),
+                "--by",
+                &format!("{repository}#{blocker}"),
+                "--json",
+            ])
+            .env("GRIT_STATE_DIR", state.path())
+            .env("GRIT_GITHUB_API_URL", &api_url)
+            .env("GH_TOKEN", "test-token")
+            .output()
+            .expect("queue Dependency mutation");
+        assert_success(&output);
+        let output: Value = serde_json::from_slice(&output.stdout).expect("pending mutation");
+        operation_ids.push(output["operation"]["id"].clone());
+        let pending_before = fs::read(directory.join("outbox.json")).expect("pending outbox");
+        let next = ranked("next");
+        let plan = ranked("plan");
+        let warm = ranked("next");
+        assert_eq!(next["performance"]["cache_hit"], false);
+        assert_eq!(warm["performance"]["cache_hit"], true);
+        assert_ne!(next["input_hash"], previous_hash);
+        previous_hash = next["input_hash"].clone();
+        assert_eq!(next["mode"], "p0_route");
+        assert_eq!(next["pending_operation_ids"], json!(operation_ids));
+        assert_eq!(
+            next["recommendation"]["operation_ids"],
+            json!(operation_ids)
+        );
+        let steps = next["recommendation"]["rollout"]["steps"]
+            .as_array()
+            .expect("rollout");
+        assert_eq!(
+            steps
+                .iter()
+                .map(|step| step["issue"]["number"].as_u64().expect("Issue number"))
+                .collect::<Vec<_>>(),
+            expected_steps
+        );
+        assert_eq!(layer_numbers(&plan), expected_layers);
+        assert_eq!(plan["parallel_now"][0]["pending"], true);
+        assert_eq!(
+            plan["parallel_now"][0]["operation_ids"],
+            json!(operation_ids)
+        );
+        for (field, value) in plan["decision"].as_object().expect("decision") {
+            if field == "parameters" {
+                for (parameter, expected) in value.as_object().expect("parameters") {
+                    assert_eq!(expected, &next[field][parameter]);
+                }
+            } else {
+                assert_eq!(value, &next[field], "shared {field}");
+                assert_eq!(value, &warm[field], "cached shared {field}");
+            }
+        }
+        assert_eq!(
+            fs::read(directory.join("outbox.json")).expect("outbox after reads"),
+            pending_before
+        );
+        assert_eq!(
+            fs::read(directory.join("replica.json")).expect("replica after reads"),
+            replica_before
+        );
+    }
+}
+
+#[test]
 fn dependency_layers_use_and_depth_and_annotate_the_full_graph_scope() {
     let repository = "acme/layers";
     let issues = vec![
