@@ -1,8 +1,12 @@
 mod artifact;
 mod layout;
+mod model;
 mod presentation;
+mod public;
 mod publication;
 mod render;
+mod serialization;
+mod text;
 
 #[cfg(test)]
 mod benchmark;
@@ -14,8 +18,11 @@ use thiserror::Error;
 use crate::model::LocalReplica;
 
 pub(crate) use artifact::ARTIFACT_SCHEMA_VERSION;
+pub(crate) use public::{ConfirmedPublicRepository, PublicGraphOptions, confirm_public_repository};
 
 pub(crate) struct SiteSummary {
+    pub(crate) schema_version: &'static str,
+    pub(crate) input_hash: String,
     pub(crate) node_count: usize,
     pub(crate) edge_count: usize,
     pub(crate) artifact_hash: String,
@@ -49,10 +56,21 @@ pub(crate) fn publish_site(
     )?;
 
     Ok(SiteSummary {
+        schema_version: ARTIFACT_SCHEMA_VERSION,
+        input_hash: replica.input_hash.clone(),
         node_count: artifact.nodes.len(),
         edge_count: artifact.edges.len(),
         artifact_hash: artifact.artifact_hash,
     })
+}
+
+pub(crate) fn publish_public_site(
+    replica: &LocalReplica,
+    repository: &ConfirmedPublicRepository,
+    options: &PublicGraphOptions,
+    output: &Path,
+) -> Result<SiteSummary, GraphError> {
+    public::publish(replica, repository, options, output)
 }
 
 #[derive(Debug, Error)]
@@ -81,6 +99,20 @@ pub(crate) enum GraphError {
     NonDeterministicEdgeOrder,
     #[error("graph artifact hash does not match its normalized contents")]
     ArtifactHashMismatch,
+    #[error(
+        "GitHub did not return a confirmed public Repository (visibility={visibility:?}, private={private})"
+    )]
+    RepositoryNotConfirmedPublic { visibility: String, private: bool },
+    #[error("GitHub returned Repository {actual}, not the requested public Repository {expected}")]
+    PublicRepositoryMismatch { expected: String, actual: String },
+    #[error("GitHub returned an invalid canonical URL for the public Repository")]
+    InvalidPublicRepositoryUrl,
+    #[error("public label prefixes must not be empty")]
+    EmptyPublicLabelPrefix,
+    #[error("Issue #{0} has an unknown state and cannot enter PublicGraphV1")]
+    InvalidPublicIssueState(u64),
+    #[error("Issue #{0} has a URL outside the confirmed public Repository")]
+    InvalidCanonicalIssueUrl(u64),
     #[error("could not encode the graph artifact: {0}")]
     EncodeArtifact(serde_json::Error),
     #[error("graph explorer HTML template contains invalid placeholder {0}")]

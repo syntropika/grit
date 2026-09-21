@@ -425,6 +425,8 @@ fn graph_command(state: &TempDir, api_url: &str, output: &std::path::Path) -> Co
 }
 
 struct RepositoryMocks {
+    labels: Mock,
+    events: Mock,
     issues: Mock,
     comments: Mock,
     dependencies: Vec<Mock>,
@@ -432,6 +434,8 @@ struct RepositoryMocks {
 
 impl RepositoryMocks {
     fn assert(self) {
+        self.labels.assert();
+        self.events.assert();
         self.issues.assert();
         self.comments.assert();
         for dependency in self.dependencies {
@@ -445,6 +449,20 @@ fn mock_repository(
     issues_body: String,
     dependencies: Vec<(u64, String)>,
 ) -> RepositoryMocks {
+    let labels = github
+        .mock("GET", "/repos/acme/widgets/labels")
+        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("[]")
+        .create();
+    let events = github
+        .mock("GET", "/repos/acme/widgets/issues/events")
+        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("[]")
+        .create();
     let issues = github
         .mock("GET", "/repos/acme/widgets/issues")
         .match_query(Matcher::AllOf(vec![
@@ -480,6 +498,8 @@ fn mock_repository(
         })
         .collect();
     RepositoryMocks {
+        labels,
+        events,
         issues,
         comments,
         dependencies,

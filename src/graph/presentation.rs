@@ -2,7 +2,10 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde::Serialize;
 
-use super::artifact::{GraphArtifact, NodeKey, NodeKind, Readiness};
+use super::{
+    artifact::{GraphArtifact, NodeKind, Readiness},
+    model::NodeKey,
+};
 
 pub(super) const FULL_NETWORK_MAX_NODES: usize = 5_000;
 pub(super) const FULL_NETWORK_MAX_EDGES: usize = 20_000;
@@ -149,9 +152,11 @@ mod tests {
 
     #[test]
     fn constrains_above_limits_and_seeds_the_view_from_ready_work() {
-        let replica = LocalReplica::build(
+        let replica = LocalReplica::build_with_sync(
             "acme/widgets".to_owned(),
             "2026-08-07T00:00:00Z".to_owned(),
+            Default::default(),
+            Vec::new(),
             (1..=4).map(|number| issue(number, "open")).collect(),
             Vec::new(),
         )
@@ -219,9 +224,11 @@ mod tests {
     }
 
     fn artifact(issues: Vec<Issue>, dependencies: Vec<Dependency>) -> GraphArtifact {
-        let replica = LocalReplica::build(
+        let replica = LocalReplica::build_with_sync(
             "acme/widgets".to_owned(),
             "2026-08-07T00:00:00Z".to_owned(),
+            Default::default(),
+            Vec::new(),
             issues,
             dependencies,
         )
