@@ -69,6 +69,7 @@ pub(super) fn html(
             .map(|value| value.to_string())
             .unwrap_or_else(|| "unresolved / SCC".to_owned());
         let github_link = url
+            .filter(|url| !url.is_empty())
             .map(|url| {
                 format!(
                     " <a class=\"canonical-link\" href=\"{}\" aria-label=\"Open {} on GitHub\">GitHub</a>",

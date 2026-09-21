@@ -36,7 +36,7 @@ pub(crate) fn update(
     issue: &IssueReference,
     selection: PrioritySelection,
 ) -> Result<PriorityUpdateResult, PriorityUpdateError> {
-    let before = client.fetch_issue(issue.repository(), issue.number())?;
+    let before = client.fetch_issue_for_update(issue.repository(), issue.number())?;
     let previous_priority = PriorityState::from_issue_labels(&before.labels);
     let desired = selection.desired();
     let mut remote_changed = false;
@@ -139,11 +139,17 @@ pub(crate) fn queue(
         .ok_or_else(|| PendingPriorityUpdateError::MissingIssue(issue.stable_key()))?;
     let previous_priority = current_working.priority(local_issue);
     let desired = LogicalPriority::from_selection(selection);
+    let depends_on = transaction
+        .outbox()
+        .latest_priority_operation_for_issue(issue.number())
+        .map(|operation| vec![operation.to_owned()])
+        .unwrap_or_default();
     let operation = PendingMutation::priority_update(
         issue.repository(),
         issue.number(),
         LogicalPriority::from_state(&previous_priority),
         desired.clone(),
+        depends_on,
     );
     let next_outbox = transaction.append(issue.repository(), operation.clone())?;
     let next_working = WorkingGraph::project(&replica, &next_outbox)?;

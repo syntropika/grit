@@ -6,7 +6,7 @@ impl<'graph, 'issues, 'scope, 'pagerank, 'working>
     pub(super) fn score_steps(
         &mut self,
         parent: &SearchState<'graph, 'issues, 'scope>,
-        frontier: Frontier<'issues>,
+        mut frontier: Frontier<'issues>,
         include_structural: bool,
         potential_visit_limit: usize,
     ) -> Vec<ScoredStep<'issues>> {
@@ -14,6 +14,9 @@ impl<'graph, 'issues, 'scope, 'pagerank, 'working>
         let mut rollout = parent.rollout.clone();
         let mut partial = parent.partial.clone();
         let mut scored = Vec::with_capacity(frontier.steps.len());
+        frontier
+            .steps
+            .sort_by_key(|step| step.issue.stable_node_key());
         for step in frontier.steps {
             let completion = rollout
                 .complete(step.issue.number)
@@ -67,7 +70,13 @@ impl<'graph, 'issues, 'scope, 'pagerank, 'working>
                     .and_then(|pagerank| pagerank.bucket(right.step.issue.number)),
             )
             .then_with(|| self.compare_immediate(left, right))
-            .then_with(|| right.step.issue.number.cmp(&left.step.issue.number))
+            .then_with(|| {
+                right
+                    .step
+                    .issue
+                    .stable_node_key()
+                    .cmp(&left.step.issue.stable_node_key())
+            })
     }
 
     pub(super) fn compare_joint(
@@ -108,7 +117,13 @@ impl<'graph, 'issues, 'scope, 'pagerank, 'working>
             .then_with(|| left.upper.p0_curve.cmp(&right.upper.p0_curve))
             .then_with(|| self.compare_immediate(left, right))
             .then_with(|| self.compare_pagerank(left, right))
-            .then_with(|| right.step.issue.number.cmp(&left.step.issue.number))
+            .then_with(|| {
+                right
+                    .step
+                    .issue
+                    .stable_node_key()
+                    .cmp(&left.step.issue.stable_node_key())
+            })
     }
 
     pub(super) fn compare_states(

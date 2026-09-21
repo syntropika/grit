@@ -10,7 +10,7 @@ use super::{
     text::sort_and_deduplicate,
 };
 use crate::{
-    model::{BlockerScope, strip_operation_markers},
+    model::{BlockerScope, DependencyEdgeKey, TemporaryIssueId, strip_operation_markers},
     operational::{ExecutionScope, PreparedRepository},
     plan::{DependencyLayers, PlanIssue},
     priority::PriorityState,
@@ -86,13 +86,6 @@ impl ElementProvenance {
             operation_ids,
         }
     }
-
-    fn synchronized() -> Self {
-        Self {
-            state: ProvenanceState::Synchronized,
-            operation_ids: Vec::new(),
-        }
-    }
 }
 
 #[derive(Clone, Deserialize, JsonSchema, Serialize)]
@@ -166,7 +159,10 @@ pub(super) struct NodeCommon {
     #[schemars(with = "String")]
     key: NodeKey,
     repository: String,
-    number: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    number: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temporary_id: Option<TemporaryIssueId>,
     position: Position,
     provenance: ElementProvenance,
 }
@@ -214,7 +210,7 @@ impl ArtifactNode {
         &self.common().repository
     }
 
-    fn number(&self) -> u64 {
+    fn number(&self) -> Option<u64> {
         self.common().number
     }
 
@@ -411,7 +407,7 @@ pub(super) fn build_working(
     let mut node_keys = BTreeSet::new();
 
     for issue in &replica.issues {
-        let key = NodeKey::new(&replica.repository, issue.number);
+        let key = NodeKey::for_issue(&replica.repository, issue);
         if !node_keys.insert(key.clone()) {
             return Err(GraphError::DuplicateNode(key.to_string()));
         }
@@ -442,7 +438,8 @@ pub(super) fn build_working(
             common: NodeCommon {
                 key,
                 repository: replica.repository.clone(),
-                number: issue.number,
+                number: (!issue.is_draft()).then_some(issue.number),
+                temporary_id: issue.temporary_id(),
                 position: unresolved_position(),
                 provenance: ElementProvenance::pending(working.provenance_for_issue(issue.number)),
             },
@@ -458,6 +455,12 @@ pub(super) fn build_working(
         });
     }
 
+    let issue_keys: BTreeMap<_, _> = replica
+        .issues
+        .iter()
+        .map(|issue| (issue.number, NodeKey::for_issue(&replica.repository, issue)))
+        .collect();
+    let mut external_provenance = BTreeMap::<NodeKey, Vec<String>>::new();
     let mut external_states = BTreeMap::new();
     let mut edges = BTreeSet::new();
     for dependency in &replica.dependencies {
@@ -470,7 +473,15 @@ pub(super) fn build_working(
                 NodeKey::new(&dependency.blocked.repository, dependency.blocked.number).to_string(),
             ));
         }
-        let blocked = NodeKey::new(&replica.repository, dependency.blocked.number);
+        let blocked = issue_keys
+            .get(&dependency.blocked.number)
+            .cloned()
+            .ok_or_else(|| {
+                GraphError::DanglingInternalEndpoint(format!(
+                    "{}#{}",
+                    replica.repository, dependency.blocked.number
+                ))
+            })?;
         if !node_keys.contains(&blocked) {
             return Err(GraphError::DanglingInternalEndpoint(blocked.to_string()));
         }
@@ -486,7 +497,15 @@ pub(super) fn build_working(
                             .to_string(),
                     ));
                 }
-                let blocker = NodeKey::new(&replica.repository, dependency.blocker.number);
+                let blocker = issue_keys
+                    .get(&dependency.blocker.number)
+                    .cloned()
+                    .ok_or_else(|| {
+                        GraphError::DanglingInternalEndpoint(format!(
+                            "{}#{}",
+                            replica.repository, dependency.blocker.number
+                        ))
+                    })?;
                 if !node_keys.contains(&blocker) {
                     return Err(GraphError::DanglingInternalEndpoint(blocker.to_string()));
                 }
@@ -504,11 +523,19 @@ pub(super) fn build_working(
                 blocker
             }
         };
+        let edge_provenance =
+            working.provenance_for_dependency(&DependencyEdgeKey::from_dependency(dependency));
+        if dependency.blocker.scope == BlockerScope::External {
+            external_provenance
+                .entry(blocker.clone())
+                .or_default()
+                .extend_from_slice(edge_provenance.operation_ids());
+        }
         edges.insert(ArtifactEdge {
             blocked,
             blocker,
             kind: EdgeKind::BlockedBy,
-            provenance: ElementProvenance::synchronized(),
+            provenance: ElementProvenance::pending(edge_provenance),
         });
     }
 
@@ -520,9 +547,12 @@ pub(super) fn build_working(
             common: NodeCommon {
                 repository: key.repository().to_owned(),
                 number: key.number(),
+                temporary_id: None,
                 key: key.clone(),
                 position: unresolved_position(),
-                provenance: ElementProvenance::synchronized(),
+                provenance: ElementProvenance::pending(PendingProvenance::new(
+                    external_provenance.remove(&key).unwrap_or_default(),
+                )),
             },
             status: match state.as_str() {
                 "open" => ExternalNodeStatus::Open,
@@ -648,6 +678,19 @@ fn validate(artifact: &GraphArtifact) -> Result<(), GraphError> {
             return Err(GraphError::InvalidStableKey(node.key().to_string()));
         }
         match node {
+            ArtifactNode::Issue { common, url, .. }
+                if common
+                    .key
+                    .temporary_id()
+                    .is_some_and(|id| common.temporary_id != Some(id) || !url.is_empty()) =>
+            {
+                return Err(GraphError::InvalidStableKey(common.key.to_string()));
+            }
+            ArtifactNode::ExternalBlocker { common, .. }
+                if common.number.is_none() || common.temporary_id.is_some() =>
+            {
+                return Err(GraphError::InvalidStableKey(common.key.to_string()));
+            }
             ArtifactNode::Issue { common, .. }
                 if !common.repository.eq_ignore_ascii_case(&artifact.repository) =>
             {
@@ -778,10 +821,12 @@ mod tests {
             created_at: "2026-08-01T00:00:00Z".to_owned(),
             updated_at: "2026-08-01T00:00:00Z".to_owned(),
             closed_at: None,
+            identity: Default::default(),
         };
-        let replica = LocalReplica::build(
+        let replica = LocalReplica::build_with_sync(
             "acme/widgets".to_owned(),
             "2026-08-07T00:00:00Z".to_owned(),
+            Default::default(),
             Vec::new(),
             vec![issue],
             Vec::new(),

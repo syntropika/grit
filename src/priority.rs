@@ -62,6 +62,27 @@ impl LogicalPriority {
             },
         }
     }
+
+    pub(crate) fn from_canonical_labels(labels: &[String]) -> Option<Self> {
+        let priorities: Option<Vec<_>> = labels
+            .iter()
+            .map(|label| {
+                DeclaredPriority::parse(label)
+                    .filter(|priority| priority.canonical_label() == label)
+            })
+            .collect();
+        let priorities = priorities?;
+        if labels.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return None;
+        }
+        Some(match priorities.as_slice() {
+            [] => Self::Unspecified,
+            [value] => Self::Declared { value: *value },
+            _ => Self::Conflict {
+                labels: labels.to_vec(),
+            },
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

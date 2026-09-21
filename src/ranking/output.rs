@@ -9,7 +9,7 @@ use super::{
     search::SearchRestriction,
 };
 use crate::{
-    model::{Issue, strip_operation_markers},
+    model::{Issue, TemporaryIssueId, strip_operation_markers},
     operational::{OperationalGraph, ReadyAnalysis},
     priority::PriorityState,
     working_graph::{PendingProvenance, WorkingGraph},
@@ -376,8 +376,8 @@ impl CandidateResult {
             ""
         };
         format!(
-            "#{} {} [{}]{}: {} (unlocks {})",
-            self.first_issue.number,
+            "{} {} [{}]{}: {} (unlocks {})",
+            self.first_issue.key,
             self.first_issue.title,
             self.first_issue.priority.display_name(),
             pending,
@@ -393,7 +393,10 @@ pub(super) struct IssueReference {
     #[serde(flatten)]
     provenance: PendingProvenance,
     key: String,
-    number: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    number: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temporary_id: Option<TemporaryIssueId>,
     url: String,
     title: String,
     priority: PriorityState,
@@ -517,7 +520,7 @@ pub(super) fn candidate_output(
 ) -> CandidateResult {
     let (candidate, critical_route) = candidate.into_parts();
     let first_issue = issue_reference(working, candidate.issue);
-    let provenance = working.provenance_for_issues(
+    let provenance = working.ranking_provenance_for_issues(
         candidate
             .steps
             .iter()
@@ -578,8 +581,9 @@ pub(super) fn candidate_output(
 pub(super) fn issue_reference(working: &WorkingGraph<'_>, issue: &Issue) -> IssueReference {
     IssueReference {
         provenance: working.provenance_for_issue(issue.number),
-        key: format!("{}#{}", working.replica().repository, issue.number),
-        number: issue.number,
+        key: issue.display_key(&working.replica().repository),
+        number: (!issue.is_draft()).then_some(issue.number),
+        temporary_id: issue.temporary_id(),
         url: issue.url.clone(),
         title: strip_operation_markers(&issue.title),
         priority: working.priority(issue),

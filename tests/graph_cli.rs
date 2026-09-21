@@ -634,6 +634,7 @@ fn analysis_projection(output: &Value) -> Value {
 
 struct RepositoryMocks {
     labels: Mock,
+    events: Mock,
     issues: Mock,
     comments: Mock,
     dependencies: Vec<Mock>,
@@ -642,6 +643,7 @@ struct RepositoryMocks {
 impl RepositoryMocks {
     fn assert(self) {
         self.labels.assert();
+        self.events.assert();
         self.issues.assert();
         self.comments.assert();
         for dependency in self.dependencies {
@@ -657,6 +659,13 @@ fn mock_repository(
 ) -> RepositoryMocks {
     let labels = github
         .mock("GET", "/repos/acme/widgets/labels")
+        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("[]")
+        .create();
+    let events = github
+        .mock("GET", "/repos/acme/widgets/issues/events")
         .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -698,6 +707,7 @@ fn mock_repository(
         .collect();
     RepositoryMocks {
         labels,
+        events,
         issues,
         comments,
         dependencies,

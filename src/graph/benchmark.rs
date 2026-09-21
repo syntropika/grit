@@ -162,9 +162,10 @@ fn synthetic_replica(node_count: usize, edge_count: usize) -> LocalReplica {
         .into_iter()
         .map(|(blocked, blocker)| dependency(blocked, blocker))
         .collect();
-    LocalReplica::build(
+    LocalReplica::build_with_sync(
         "benchmark/issues".to_owned(),
         "2026-08-07T00:00:00Z".to_owned(),
+        Default::default(),
         Vec::new(),
         issues,
         dependencies,
@@ -174,6 +175,7 @@ fn synthetic_replica(node_count: usize, edge_count: usize) -> LocalReplica {
 
 fn issue(number: u64) -> Issue {
     Issue {
+        identity: crate::model::IssueIdentityState::GitHub,
         id: number,
         node_id: format!("I_{number}"),
         number,

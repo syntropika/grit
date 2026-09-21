@@ -305,6 +305,10 @@
     recommendationSelect.addEventListener("click", selectRecommendation);
   }
 
+  function issueLabel(issue) {
+    return issue.number == null ? issue.key : `#${issue.number}`;
+  }
+
   function renderAnalysis() {
     const decision = analysis.next;
     const recommendation = decision.recommendation;
@@ -312,7 +316,7 @@
       recommendationStatus.textContent = "No Issue is executable in this scope.";
       recommendationSelect.hidden = true;
     } else {
-      recommendationStatus.textContent = `Do #${recommendation.first_issue.number} ${recommendation.first_issue.title}`;
+      recommendationStatus.textContent = `Do ${issueLabel(recommendation.first_issue)} ${recommendation.first_issue.title}${recommendation.pending ? " [pending]" : ""}`;
     }
     const runnerUp = decision.comparison_to_runner_up?.runner_up;
     const onlyCandidate = recommendation?.reasons.find(
@@ -324,11 +328,11 @@
         || onlyCandidate?.message
         || "No executable recommendation"
     );
-    appendEvidence("Runner-up", runnerUp ? `#${runnerUp.number} ${runnerUp.title}` : "None");
+    appendEvidence("Runner-up", runnerUp ? `${issueLabel(runnerUp)} ${runnerUp.title}` : "None");
     appendEvidence("Search", decision.search_complete ? "Complete" : `Restricted: ${decision.truncated_by.join(", ")}`);
     appendEvidence(
       "Parallel now",
-      analysis.plan.parallel_now.map((issue) => `#${issue.number}`).join(", ") || "None"
+      analysis.plan.parallel_now.map(issueLabel).join(", ") || "None"
     );
     appendEvidence("Unresolved", String(analysis.plan.dependency_layers.unresolved.length));
     appendEvidence("Cycles", String(decision.summary.cyclic_issue_count));

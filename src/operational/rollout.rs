@@ -92,14 +92,17 @@ impl<'graph, 'issues, 'scope> RolloutState<'graph, 'issues, 'scope> {
     }
 
     pub(crate) fn executable(&self) -> Vec<&'issues Issue> {
-        self.graph
+        let mut executable: Vec<_> = self
+            .graph
             .open_numbers
             .iter()
             .enumerate()
             .filter(|(index, _)| self.ready.contains(*index))
             .filter_map(|(_, number)| self.graph.issue(*number))
             .filter(|issue| self.scope.contains(issue))
-            .collect()
+            .collect();
+        executable.sort_by_key(|issue| issue.stable_node_key());
+        executable
     }
 
     pub(crate) fn one_step_analysis(&self) -> OneStepAnalysis<'issues> {
@@ -372,9 +375,10 @@ mod tests {
     }
 
     fn rollout_fixture() -> Result<LocalReplica, ReplicaError> {
-        LocalReplica::build(
+        LocalReplica::build_with_sync(
             "acme/widgets".to_owned(),
             "2026-08-07T00:00:00Z".to_owned(),
+            Default::default(),
             Vec::new(),
             [1, 2, 10, 11, 12].into_iter().map(issue).collect(),
             vec![
@@ -388,6 +392,7 @@ mod tests {
 
     fn issue(number: u64) -> Issue {
         Issue {
+            identity: crate::model::IssueIdentityState::GitHub,
             id: number,
             node_id: format!("I_{number}"),
             number,

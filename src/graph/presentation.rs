@@ -158,9 +158,10 @@ mod tests {
 
     #[test]
     fn constrains_above_limits_and_seeds_the_view_from_ready_work() {
-        let replica = LocalReplica::build(
+        let replica = LocalReplica::build_with_sync(
             "acme/widgets".to_owned(),
             "2026-08-07T00:00:00Z".to_owned(),
+            Default::default(),
             Vec::new(),
             (1..=4).map(|number| issue(number, "open")).collect(),
             Vec::new(),
@@ -234,9 +235,10 @@ mod tests {
     }
 
     fn artifact(issues: Vec<Issue>, dependencies: Vec<Dependency>) -> GraphArtifact {
-        let replica = LocalReplica::build(
+        let replica = LocalReplica::build_with_sync(
             "acme/widgets".to_owned(),
             "2026-08-07T00:00:00Z".to_owned(),
+            Default::default(),
             Vec::new(),
             issues,
             dependencies,
@@ -262,6 +264,7 @@ mod tests {
 
     fn issue(number: u64, state: &str) -> Issue {
         Issue {
+            identity: crate::model::IssueIdentityState::GitHub,
             id: number,
             node_id: format!("I_{number}"),
             number,
