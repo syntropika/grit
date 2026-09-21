@@ -471,6 +471,7 @@ mod tests {
             synced_at: "2026-08-07T00:00:00Z".to_owned(),
             input_hash: "fixture".to_owned(),
             repository_labels: Some(Vec::new()),
+            sync: Default::default(),
             issues,
             dependencies,
         };
