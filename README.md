@@ -9,11 +9,12 @@ frontier enumeration from
 [Issue #2](https://github.com/syntropika/grit/issues/2) and
 [Issue #3](https://github.com/syntropika/grit/issues/3), plus canonical
 Declared priority support from
-[Issue #6](https://github.com/syntropika/grit/issues/6), and step-by-step
-recommendations from
-[Issue #11](https://github.com/syntropika/grit/issues/11) and
-[Issue #14](https://github.com/syntropika/grit/issues/14), and structural plans
-from [Issue #23](https://github.com/syntropika/grit/issues/23).
+[Issue #6](https://github.com/syntropika/grit/issues/6), online Priority
+updates from [Issue #9](https://github.com/syntropika/grit/issues/9), step-by-step
+recommendations from [Issue #11](https://github.com/syntropika/grit/issues/11) and
+[Issue #14](https://github.com/syntropika/grit/issues/14), offline Priority
+intent projection from [Issue #15](https://github.com/syntropika/grit/issues/15),
+and structural plans from [Issue #23](https://github.com/syntropika/grit/issues/23).
 
 ## Build and test
 
@@ -68,6 +69,23 @@ Initialization creates only missing canonical names. It never renames,
 recolors, redescribes, deletes, or assigns an existing label, so repeated runs
 converge without further changes. Read commands never create labels.
 
+Update one Issue's logical Priority with a full Issue reference:
+
+```bash
+grit update OWNER/REPO#NUMBER --priority p0
+grit update OWNER/REPO#NUMBER --priority none --json
+```
+
+A concrete value removes every other canonical Priority label and leaves
+exactly the requested one; `none` removes all canonical Priority labels. Grit
+preserves non-Priority labels and every other Issue field. It writes GitHub
+first, then synchronizes and verifies the logical result before publishing the
+Local replica. If GitHub is unavailable before Grit can confirm the update,
+Grit instead appends a versioned Pending mutation to a durable outbox. Each
+operation retains the logical base and desired values; it never edits the Local
+replica or advances `synced_at`. The output reports both the previous and
+resulting Priority and whether the result is synchronized or pending.
+
 ## Enumerate Executable work
 
 `grit ready` refreshes the Local replica and lists the complete Executable
@@ -84,6 +102,12 @@ reported separately from Dependency readiness. JSON reports every returned
 Issue's priority as `declared`, `unspecified`, or `conflict`. A conflict remains
 eligible and does not change readiness; it compares as neutral in later ranking
 commands. Missing canonical Repository labels and conflicts appear as warnings.
+
+Pending Priority mutations are applied in order over the Local replica to
+form the Working graph used by `ready` and `next`. Their JSON identifies every
+affected Issue and result with `pending: true` and the responsible operation
+IDs. Analysis may pull newer GitHub state, but it never replays or writes the
+outbox; reconciliation is a separate explicit operation.
 
 If GitHub cannot be reached, `ready` uses the latest valid Local replica and
 reports its unchanged `synced_at`. A replica is accepted only when its schema,
@@ -120,7 +144,9 @@ reported in `truncated_by`; a restricted result sets `search_complete` and
 
 Robot output reports both snapshot and effective-input hashes, metric states,
 deterministic main-search and probe work counts, the runner-up comparison,
-structured reasons, and whether the result is a close structural tie. If no
+structured reasons, and whether the result is a close structural tie. Pending
+recommendations, Issue references, comparison evidence, and reasons carry
+operation provenance. If no
 Issue is Executable, the command succeeds with a null recommendation and
 categorized blocker counts. Like `ready`, it attempts a pull Synchronization
 and falls back to the latest valid Local replica without mutating GitHub.
@@ -143,6 +169,12 @@ parallel capacity and counterfactual Dependency layers:
 grit plan --repo OWNER/REPO
 grit plan --repo OWNER/REPO --assignee LOGIN --horizon 3 --json
 ```
+
+`plan` and `next` share the same Working graph, ordered Pending mutations,
+Execution scope, search, and cache. Pending priorities affect both the selected
+rollout and structural Issue annotations. The plan decision preserves the same
+input hash, completeness fields, and operation provenance as `next`; dependency
+layers describe topology and do not predict scheduling or duration.
 
 `parallel_now` is the complete Executable frontier for the active Execution
 scope. `dependency_layers` covers every open Issue in the Repository: layer 0

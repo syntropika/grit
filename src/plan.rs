@@ -4,8 +4,9 @@ use serde::Serialize;
 
 use crate::{
     model::Issue,
-    operational::{BlockerResolution, ExecutionScope, OperationalGraph},
+    operational::{BlockerResolution, ExecutionScope, OperationalGraph, PreparedRepository},
     priority::PriorityState,
+    working_graph::{PendingProvenance, WorkingGraph},
 };
 
 pub(crate) struct StructuralPlan<'a> {
@@ -15,6 +16,8 @@ pub(crate) struct StructuralPlan<'a> {
 
 #[derive(Serialize)]
 pub(crate) struct PlanIssue<'a> {
+    #[serde(flatten)]
+    provenance: PendingProvenance,
     pub(crate) number: u64,
     pub(crate) url: &'a str,
     pub(crate) title: &'a str,
@@ -94,22 +97,25 @@ enum UnresolvedReason {
 }
 
 pub(crate) fn analyze<'a>(
-    graph: &OperationalGraph<'a>,
+    prepared: &PreparedRepository<'a>,
     scope: ExecutionScope<'_>,
 ) -> StructuralPlan<'a> {
+    let graph = prepared.graph();
+    let working = prepared.working();
     let ready = graph.analyze_ready(scope);
     let parallel_now = ready
         .executable
         .iter()
-        .map(|issue| plan_issue(graph, issue, scope))
+        .map(|issue| plan_issue(working, graph, issue, scope))
         .collect();
     StructuralPlan {
         parallel_now,
-        dependency_layers: dependency_layers(graph, scope),
+        dependency_layers: dependency_layers(working, graph, scope),
     }
 }
 
 fn dependency_layers<'a>(
+    working: &WorkingGraph<'_>,
     graph: &OperationalGraph<'a>,
     scope: ExecutionScope<'_>,
 ) -> DependencyLayers<'a> {
@@ -176,7 +182,7 @@ fn dependency_layers<'a>(
         by_layer
             .entry(layer)
             .or_default()
-            .push(plan_issue(graph, issue, scope));
+            .push(plan_issue(working, graph, issue, scope));
     }
     let layers = by_layer
         .into_iter()
@@ -186,7 +192,7 @@ fn dependency_layers<'a>(
         .into_iter()
         .filter_map(|(number, reasons)| {
             graph.issue(number).map(|issue| UnresolvedIssue {
-                issue: plan_issue(graph, issue, scope),
+                issue: plan_issue(working, graph, issue, scope),
                 reasons: reasons.into_iter().collect(),
             })
         })
@@ -248,6 +254,7 @@ fn propagate_unresolved(
 }
 
 fn plan_issue<'a>(
+    working: &WorkingGraph<'_>,
     graph: &OperationalGraph<'a>,
     issue: &'a Issue,
     scope: ExecutionScope<'_>,
@@ -255,6 +262,7 @@ fn plan_issue<'a>(
     let ready_now = graph.is_ready(issue.number);
     let execution_scope_eligible = scope.contains(issue);
     PlanIssue {
+        provenance: working.provenance_for_issue(issue.number),
         number: issue.number,
         url: &issue.url,
         title: &issue.title,
@@ -262,7 +270,7 @@ fn plan_issue<'a>(
         assigned: !issue.assignees.is_empty(),
         execution_scope_eligible,
         executable: ready_now && execution_scope_eligible,
-        priority: PriorityState::from_issue_labels(&issue.labels),
+        priority: working.priority(issue),
         assignees: issue
             .assignees
             .iter()

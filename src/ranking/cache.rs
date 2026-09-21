@@ -14,9 +14,10 @@ use super::{
     search::{SearchRestriction, SearchResult, SearchWork, frontier::frontier},
 };
 use crate::{
+    atomic_file,
     operational::{ExecutionScope, OperationalGraph},
     priority::PriorityComparison,
-    store::publish_bytes_atomically,
+    working_graph::WorkingGraph,
 };
 
 const CACHE_SCHEMA_VERSION: &str = "grit.ranking-cache/v1";
@@ -38,6 +39,7 @@ impl RankingCache {
     pub(super) fn lookup<'issues>(
         &mut self,
         key: &str,
+        working: &WorkingGraph<'_>,
         graph: &OperationalGraph<'issues>,
         scope: ExecutionScope<'_>,
         horizon: u8,
@@ -59,6 +61,7 @@ impl RankingCache {
         Some((
             document.payload.pagerank.clone(),
             document.payload.search.hydrate(
+                working,
                 graph,
                 scope,
                 horizon,
@@ -97,7 +100,7 @@ impl RankingCache {
                 return false;
             };
             bytes.push(b'\n');
-            publish_bytes_atomically(path, &bytes, ".ranking-cache").is_ok()
+            atomic_file::publish(path, "ranking-cache", &bytes).is_ok()
         });
         if published {
             self.memory = Some(document);
@@ -132,6 +135,7 @@ struct CachedSearchResult {
     candidates: Vec<CachedCandidate>,
     truncated_by: Vec<SearchRestriction>,
     work: SearchWork,
+    provenance_numbers: std::collections::BTreeSet<u64>,
 }
 
 impl CachedSearchResult {
@@ -146,11 +150,13 @@ impl CachedSearchResult {
                 .collect(),
             truncated_by: result.truncated_by.clone(),
             work: result.work,
+            provenance_numbers: result.provenance_numbers.clone(),
         }
     }
 
     fn hydrate<'issues>(
         &self,
+        working: &WorkingGraph<'_>,
         graph: &OperationalGraph<'issues>,
         scope: ExecutionScope<'_>,
         horizon: u8,
@@ -163,15 +169,17 @@ impl CachedSearchResult {
             .filter(|number| {
                 graph
                     .issue(*number)
-                    .is_some_and(|issue| super::priority(issue) == PriorityComparison::P0)
+                    .is_some_and(|issue| super::priority(working, issue) == PriorityComparison::P0)
             })
             .collect();
+        let frontier = CachedFrontier {
+            mode: self.mode,
+            p0_targets,
+        };
         let candidates = self
             .candidates
             .iter()
-            .map(|candidate| {
-                candidate.hydrate(graph, scope, horizon, pagerank, self.mode, &p0_targets)
-            })
+            .map(|candidate| candidate.hydrate(working, graph, scope, horizon, pagerank, &frontier))
             .collect::<Option<Vec<_>>>()?;
         Some(SearchResult {
             mode: self.mode,
@@ -179,8 +187,14 @@ impl CachedSearchResult {
             candidates,
             truncated_by: self.truncated_by.clone(),
             work: self.work,
+            provenance_numbers: self.provenance_numbers.clone(),
         })
     }
+}
+
+struct CachedFrontier {
+    mode: RankingMode,
+    p0_targets: std::collections::BTreeSet<u64>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -223,15 +237,23 @@ impl CachedCandidate {
 
     fn hydrate<'issues>(
         &self,
+        working: &WorkingGraph<'_>,
         graph: &OperationalGraph<'issues>,
         scope: ExecutionScope<'_>,
         horizon: u8,
         pagerank: Option<&PageRank>,
-        mode: RankingMode,
-        p0_targets: &std::collections::BTreeSet<u64>,
+        frontier: &CachedFrontier,
     ) -> Option<EvaluatedCandidate<'issues>> {
         let issue = graph.issue(self.first_issue)?;
-        let steps = self.validate_rollout(graph, scope, horizon, pagerank, p0_targets)?;
+        let mode = frontier.mode;
+        let steps = self.validate_rollout(
+            working,
+            graph,
+            scope,
+            horizon,
+            pagerank,
+            &frontier.p0_targets,
+        )?;
         if steps.first().map(|step| step.issue.number) != Some(self.first_issue) {
             return None;
         }
@@ -281,6 +303,7 @@ impl CachedCandidate {
 
     fn validate_rollout<'issues>(
         &self,
+        working: &WorkingGraph<'_>,
         graph: &OperationalGraph<'issues>,
         scope: ExecutionScope<'_>,
         horizon: u8,
@@ -312,7 +335,7 @@ impl CachedCandidate {
                 unlocks
                     .iter()
                     .filter_map(|number| graph.issue(*number))
-                    .filter(|issue| super::priority(issue) == PriorityComparison::P0)
+                    .filter(|issue| super::priority(working, issue) == PriorityComparison::P0)
                     .count(),
             );
             steps.push(step);
@@ -328,14 +351,14 @@ impl CachedCandidate {
         let mut priority_profile = PriorityProfile::default();
         for number in &unlocks {
             let issue = graph.issue(*number)?;
-            let issue_priority = super::priority(issue);
+            let issue_priority = super::priority(working, issue);
             if issue_priority != PriorityComparison::P0 {
                 priority_profile.record(issue_priority);
             }
         }
         let mut step_priorities = steps
             .iter()
-            .map(|step| StepPriority::from(super::priority(step.issue)))
+            .map(|step| StepPriority::from(super::priority(working, step.issue)))
             .collect::<Vec<_>>();
         step_priorities.resize(horizon as usize, StepPriority::NoStep);
         if self.unlocks != unlocks.into_iter().collect::<Vec<_>>()

@@ -18,6 +18,7 @@ impl<'a> PartialRollout<'a> {
         newly_ready: &[u64],
         graph: &crate::operational::OperationalGraph<'a>,
         pagerank: Option<&PageRank>,
+        working: &WorkingGraph<'_>,
     ) -> PartialCheckpoint {
         let steps_len = self.steps.len();
         let unlock_curve_len = self.unlock_curve.len();
@@ -35,10 +36,10 @@ impl<'a> PartialRollout<'a> {
             .unlocks
             .iter()
             .filter_map(|number| graph.issue(*number))
-            .filter(|issue| priority(issue) == PriorityComparison::P0)
+            .filter(|issue| priority(working, issue) == PriorityComparison::P0)
             .count();
         self.p0_curve.push(unlocked_p0);
-        self.order = RolloutOrder::from_partial(self, graph, pagerank);
+        self.order = RolloutOrder::from_partial(self, graph, pagerank, working);
         PartialCheckpoint {
             steps_len,
             unlock_curve_len,
@@ -93,6 +94,7 @@ impl RolloutOrder {
         partial: &PartialRollout<'_>,
         graph: &crate::operational::OperationalGraph<'_>,
         pagerank: Option<&PageRank>,
+        working: &WorkingGraph<'_>,
     ) -> Self {
         let first = partial
             .steps
@@ -103,7 +105,7 @@ impl RolloutOrder {
         let mut priority_profile = PriorityProfile::default();
         for number in &partial.unlocks {
             if let Some(issue) = graph.issue(*number) {
-                let issue_priority = priority(issue);
+                let issue_priority = priority(working, issue);
                 if issue_priority != PriorityComparison::P0 {
                     priority_profile.record(issue_priority);
                 }
@@ -116,7 +118,7 @@ impl RolloutOrder {
         let mut step_priorities = partial
             .steps
             .iter()
-            .map(|step| StepPriority::from(priority(step.issue)))
+            .map(|step| StepPriority::from(priority(working, step.issue)))
             .collect::<Vec<_>>();
         step_priorities.resize(horizon, StepPriority::NoStep);
         let critical_distance = match first.selection {
@@ -285,6 +287,8 @@ mod tests {
             issues: vec![issue(1), issue(2)],
             dependencies: Vec::new(),
         };
+        let outbox = super::super::tests::empty_outbox(&replica.repository);
+        let working = WorkingGraph::project(&replica, &outbox).expect("Working graph");
         let graph = crate::operational::OperationalGraph::prepare(&replica);
         let mut rollout = graph.rollout_state(ExecutionScope::Available);
         let mut partial = SearchState::root(rollout.clone(), 3).partial;
@@ -298,6 +302,7 @@ mod tests {
             first_completion.newly_ready(),
             &graph,
             None,
+            &working,
         );
         let second_completion = rollout.complete(2).expect("Issue #2 is Executable");
         let _second = partial.apply(
@@ -308,6 +313,7 @@ mod tests {
             second_completion.newly_ready(),
             &graph,
             None,
+            &working,
         );
 
         partial.undo(first);

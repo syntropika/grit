@@ -16,9 +16,10 @@ mod performance_tests;
 mod search;
 
 use crate::{
-    model::{Issue, LocalReplica},
+    model::Issue,
     operational::{ExecutionScope, PreparedRepository},
-    priority::{PriorityComparison, PriorityState},
+    priority::PriorityComparison,
+    working_graph::WorkingGraph,
 };
 pub(crate) use cache::RankingCache;
 use decision::{PriorityProfile, RankingMode, StepPriority};
@@ -130,21 +131,14 @@ pub(crate) struct AnalysisProfile {
 }
 
 pub(crate) fn analyze_profiled(
-    replica: &LocalReplica,
+    working: &WorkingGraph<'_>,
     scope: ExecutionScope<'_>,
     horizon: u8,
-    ordered_pending_operation_hashes: &[&str],
     cache: &mut RankingCache,
 ) -> AnalysisRun {
     let total_started = Instant::now();
-    let (prepared, graph_timings) = PreparedRepository::prepare_profiled(replica);
-    let mut run = analyze_prepared(
-        &prepared,
-        scope,
-        horizon,
-        ordered_pending_operation_hashes,
-        cache,
-    );
+    let (prepared, graph_timings) = PreparedRepository::prepare_profiled(working);
+    let mut run = analyze_prepared(&prepared, scope, horizon, cache);
     run.profile.graph_preparation = graph_timings.graph_preparation;
     run.profile.scc_detection = graph_timings.scc_detection;
     run.profile.total = total_started.elapsed();
@@ -155,19 +149,18 @@ pub(crate) fn analyze_prepared(
     prepared: &PreparedRepository<'_>,
     scope: ExecutionScope<'_>,
     horizon: u8,
-    ordered_pending_operation_hashes: &[&str],
     cache: &mut RankingCache,
 ) -> AnalysisRun {
     let total_started = Instant::now();
-    let replica = prepared.replica();
+    let working = prepared.working();
     let graph = prepared.graph();
     let readiness_started = Instant::now();
     let ready = graph.analyze_ready(scope);
     let readiness = readiness_started.elapsed();
-    let input_hash = effective_input_hash(replica, scope, ordered_pending_operation_hashes);
+    let input_hash = effective_input_hash(working, scope);
     let cache_key = ranking_cache_key(&input_hash, horizon);
     let cache_lookup_started = Instant::now();
-    let cached = cache.lookup(&cache_key, graph, scope, horizon);
+    let cached = cache.lookup(&cache_key, working, graph, scope, horizon);
     let cache_lookup = cache_lookup_started.elapsed();
     let cache_hit = cached.is_some();
     let mut pagerank_duration = Duration::ZERO;
@@ -181,7 +174,14 @@ pub(crate) fn analyze_prepared(
         let pagerank = PageRank::calculate(graph);
         pagerank_duration = pagerank_started.elapsed();
         let search_started = Instant::now();
-        let search = search::evaluate(graph, scope, pagerank.as_ref(), horizon, STATE_BUDGET);
+        let search = search::evaluate(
+            working,
+            graph,
+            scope,
+            pagerank.as_ref(),
+            horizon,
+            STATE_BUDGET,
+        );
         search_duration = search_started.elapsed();
         let cache_publication_started = Instant::now();
         cache_published = cache.publish(cache_key, pagerank.as_ref(), &search);
@@ -194,6 +194,7 @@ pub(crate) fn analyze_prepared(
     let search_complete = search.truncated_by.is_empty();
     let truncated_by = search.truncated_by;
     let work = search.work;
+    let ranking_provenance_context: Vec<_> = search.provenance_numbers.into_iter().collect();
     let evaluated = select_top_candidates(search.candidates, ALTERNATIVE_LIMIT + 1);
     let decisive = evaluated
         .first()
@@ -203,7 +204,13 @@ pub(crate) fn analyze_prepared(
         .as_ref()
         .zip(evaluated.first().zip(evaluated.get(1)))
         .map(|(decision, (winner, runner_up))| {
-            explanation::evidence(decision, winner, runner_up, &replica.repository)
+            explanation::evidence(
+                decision,
+                winner,
+                runner_up,
+                working,
+                &ranking_provenance_context,
+            )
         });
     let close_call = decisive
         .as_ref()
@@ -212,7 +219,7 @@ pub(crate) fn analyze_prepared(
     let executable_p0_count = ready
         .executable
         .iter()
-        .filter(|issue| priority(issue) == PriorityComparison::P0)
+        .filter(|issue| priority(working, issue) == PriorityComparison::P0)
         .count();
 
     let mut ranked_results = evaluated.into_iter().enumerate().map(|(index, candidate)| {
@@ -224,13 +231,15 @@ pub(crate) fn analyze_prepared(
                 reasons.push(explanation::only_candidate_reason(candidate_count));
             }
         }
-        output::candidate_output(candidate, &replica.repository, reasons)
+        output::candidate_output(candidate, working, &ranking_provenance_context, reasons)
     });
     let recommendation = ranked_results.next();
     let alternatives: Vec<_> = ranked_results.take(ALTERNATIVE_LIMIT).collect();
     let summary = NextSummary::from_graph(&ready, candidate_count, graph);
     let analysis = NextAnalysis::from_search(NextResult {
         input_hash,
+        pending: working.is_pending(),
+        pending_operation_ids: working.operation_ids(),
         horizon,
         state_budget: STATE_BUDGET,
         mode,
@@ -285,24 +294,19 @@ fn select_top_candidates<'a>(
     best
 }
 
-fn priority(issue: &Issue) -> PriorityComparison {
-    PriorityState::from_issue_labels(&issue.labels).comparison()
+fn priority(working: &WorkingGraph<'_>, issue: &Issue) -> PriorityComparison {
+    working.priority(issue).comparison()
 }
 
-fn effective_input_hash(
-    replica: &LocalReplica,
-    scope: ExecutionScope<'_>,
-    ordered_pending_operation_hashes: &[&str],
-) -> String {
+fn effective_input_hash(working: &WorkingGraph<'_>, scope: ExecutionScope<'_>) -> String {
     let (mode, assignee) = scope.hash_key();
     let input = json!({
         "schema_version": "grit.working-input/v1",
-        "replica_snapshot_hash": replica.input_hash,
+        "working_graph_hash": working.input_hash(),
         "execution_scope": {
             "mode": mode,
             "assignee": assignee,
         },
-        "ordered_pending_operation_hashes": ordered_pending_operation_hashes,
     });
     let canonical = serde_json::to_vec(&input).expect("effective input hash is serializable");
     hex::encode(Sha256::digest(canonical))

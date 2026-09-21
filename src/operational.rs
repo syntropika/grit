@@ -6,7 +6,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::model::{BlockerScope, Dependency, Issue, LocalReplica};
+use crate::{
+    model::{BlockerScope, Dependency, Issue, LocalReplica},
+    working_graph::WorkingGraph,
+};
 pub(crate) use rollout::{OneStepAnalysis, RolloutState};
 use scc::{cyclic_issue_numbers, strongly_connected_components};
 
@@ -84,22 +87,24 @@ pub(crate) struct OperationalGraph<'a> {
 }
 
 pub(crate) struct PreparedRepository<'a> {
-    replica: &'a LocalReplica,
+    working: &'a WorkingGraph<'a>,
     graph: OperationalGraph<'a>,
 }
 
 impl<'a> PreparedRepository<'a> {
-    pub(crate) fn prepare(replica: &'a LocalReplica) -> Self {
-        Self::prepare_profiled(replica).0
+    pub(crate) fn prepare(working: &'a WorkingGraph<'a>) -> Self {
+        Self::prepare_profiled(working).0
     }
 
-    pub(crate) fn prepare_profiled(replica: &'a LocalReplica) -> (Self, GraphPreparationTimings) {
-        let (graph, timings) = OperationalGraph::prepare_profiled(replica);
-        (Self { replica, graph }, timings)
+    pub(crate) fn prepare_profiled(
+        working: &'a WorkingGraph<'a>,
+    ) -> (Self, GraphPreparationTimings) {
+        let (graph, timings) = OperationalGraph::prepare_profiled(working.replica());
+        (Self { working, graph }, timings)
     }
 
-    pub(crate) fn replica(&self) -> &'a LocalReplica {
-        self.replica
+    pub(crate) fn working(&self) -> &'a WorkingGraph<'a> {
+        self.working
     }
 
     pub(crate) fn graph(&self) -> &OperationalGraph<'a> {
