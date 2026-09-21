@@ -10,6 +10,7 @@ native Dependency mutations, Declared priority updates, and deterministic
 static graph artifacts, with actionable triage diagnostics and exact horizon-one
 next-work recommendations. Its offline browser explorer presents the precomputed
 Issue graph with synchronized network and accessible table selection.
+Public exports use a separate allowlisted model after a live Repository visibility check.
 
 ## Build and test
 
@@ -214,6 +215,34 @@ Generation validates the closed artifact model in a staging directory before
 replacing the target. Regenerating from the same effective Local replica is
 byte-stable. `synced_at` is the only time field and changes only when the input
 replica itself has a different synchronization timestamp.
+
+### Generate an allowlisted public graph
+
+`--public` first obtains current Repository metadata from GitHub and refuses to
+generate unless both `visibility: public` and `private: false` confirm the
+requested Repository. A Local replica never substitutes for this live
+visibility check.
+
+```bash
+grit graph --repo OWNER/REPO --output site-public/ --public
+grit graph --repo OWNER/REPO --output site-public/ --public \
+  --public-label-prefix area: --public-label-prefix priority:
+grit graph --repo OWNER/REPO --output site-public/ --public \
+  --public-include-assignees
+```
+
+PublicGraphV1 contains only open Issues from that Repository, canonical Issue
+URLs, titles, state, readiness, internal Dependency edges, and positions
+recomputed from the allowlisted model. Labels require an explicit category
+prefix. Assignee logins require a separate explicit opt-in. Bodies, comments,
+closed history, raw/internal IDs, Project data, Pending mutations, and Operation
+markers are absent.
+
+An unsatisfied External blocker is represented only by `external_unknown` on
+the affected public Issue. Its owner, Repository, number, title, count, and
+topology never enter the public model. Changes to excluded history, private
+text, identities, assignees, labels, or External-blocker details cannot change
+the public hash, readiness, ordering, internal edges, or coordinates.
 
 ## Product decisions
 
