@@ -89,6 +89,7 @@ mod tests {
             synced_at: "2026-08-07T00:00:00Z".to_owned(),
             input_hash: "unused".to_owned(),
             repository_labels: Some(Vec::new()),
+            sync: Default::default(),
             issues: vec![issue(1), issue(2), issue(3)],
             dependencies: vec![
                 dependency(2, 3),
