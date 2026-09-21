@@ -6,6 +6,8 @@ mod graph;
 mod model;
 mod operational;
 mod priority;
+mod priority_update;
+mod replica_sync;
 mod repository;
 mod store;
 mod synchronization;

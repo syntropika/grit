@@ -41,6 +41,11 @@ pub(crate) struct CreateLabelRequest<'a> {
     description: &'a str,
 }
 
+#[derive(Serialize)]
+struct AddIssueLabelsRequest<'a> {
+    labels: &'a [String],
+}
+
 impl<'a> CreateLabelRequest<'a> {
     pub(crate) fn new(name: &'a str, color: &'a str, description: &'a str) -> Self {
         Self {
@@ -276,6 +281,99 @@ impl GitHubClient {
             blocked.repository().owner(),
             blocked.repository().name(),
             blocked.number()
+        ))
+    }
+
+    pub(crate) fn fetch_issue_for_update(
+        &self,
+        repository: &Repository,
+        number: u64,
+    ) -> Result<Issue, GitHubError> {
+        let url = self.endpoint(&format!(
+            "repos/{}/{}/issues/{number}",
+            repository.owner(),
+            repository.name()
+        ))?;
+        let response = self.client.get(url).send().map_err(GitHubError::Request)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(api_status_error(status, response.headers()));
+        }
+        let issue: GitHubIssue = response.json().map_err(GitHubError::Decode)?;
+        if issue.number != number {
+            return Err(GitHubError::IssueIdentityMismatch);
+        }
+        if issue.pull_request.is_some() {
+            return Err(GitHubError::PullRequestPriority(format!(
+                "{}#{number}",
+                repository.full_name()
+            )));
+        }
+        Ok(issue.normalize())
+    }
+
+    pub(crate) fn add_issue_label(
+        &self,
+        repository: &Repository,
+        number: u64,
+        label: &str,
+    ) -> Result<(), GitHubError> {
+        let url = self.endpoint(&format!(
+            "repos/{}/{}/issues/{number}/labels",
+            repository.owner(),
+            repository.name()
+        ))?;
+        let labels = [label.to_owned()];
+        let response = self
+            .client
+            .post(url)
+            .json(&AddIssueLabelsRequest { labels: &labels })
+            .send()
+            .map_err(|source| GitHubError::MutationUncertain {
+                operation: "adding the requested Priority label",
+                source,
+            })?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        Err(mutation_status_error(
+            status,
+            response.headers(),
+            "adding the requested Priority label",
+        ))
+    }
+
+    pub(crate) fn remove_issue_label(
+        &self,
+        repository: &Repository,
+        number: u64,
+        label: &str,
+    ) -> Result<(), GitHubError> {
+        let mut url = self.endpoint(&format!(
+            "repos/{}/{}/issues/{number}/labels",
+            repository.owner(),
+            repository.name()
+        ))?;
+        url.path_segments_mut()
+            .map_err(|_| GitHubError::InvalidLabelUrl)?
+            .push(label);
+        let response =
+            self.client
+                .delete(url)
+                .send()
+                .map_err(|source| GitHubError::MutationUncertain {
+                    operation: "removing an obsolete Priority label",
+                    source,
+                })?;
+        let status = response.status();
+        if status.is_success() || status == StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+        Err(mutation_status_error(
+            status,
+            response.headers(),
+            "removing an obsolete Priority label",
         ))
     }
 
@@ -1153,4 +1251,8 @@ pub(crate) enum GitHubError {
     IssueIdentityMismatch,
     #[error("{0} is a Pull Request; native Dependencies require Issues")]
     PullRequestDependency(String),
+    #[error("could not construct a safe Issue-label URL")]
+    InvalidLabelUrl,
+    #[error("{0} is a Pull Request; Declared priority updates require an Issue")]
+    PullRequestPriority(String),
 }

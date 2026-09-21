@@ -1,6 +1,5 @@
 use std::{env, path::PathBuf};
 
-use chrono::{SecondsFormat, Utc};
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 use thiserror::Error;
@@ -16,11 +15,13 @@ use crate::{
     model::{LocalReplica, ReplicaError},
     operational::{ExecutionScope, analyze_ready},
     priority::{
-        DeclaredPriority, PriorityState, missing_canonical_labels, present_canonical_labels,
+        DeclaredPriority, PrioritySelection, PriorityState, missing_canonical_labels,
+        present_canonical_labels,
     },
+    priority_update::{self, PriorityUpdateError},
+    replica_sync::{self, ReplicaSyncError},
     repository::{IssueReference, IssueReferenceError, Repository, RepositoryError},
     store::{ReplicaStore, StoreError},
-    synchronization::{RepositoryData, refresh_repository},
 };
 
 const SYNC_SCHEMA_VERSION: &str = "grit.sync/v1";
@@ -28,6 +29,7 @@ const READY_SCHEMA_VERSION: &str = "grit.ready/v1";
 const GRAPH_SCHEMA_VERSION: &str = "grit.graph/v1";
 const DEPENDENCY_MUTATION_SCHEMA_VERSION: &str = "grit.dependency-mutation/v1";
 const INIT_SCHEMA_VERSION: &str = "grit.init/v1";
+const PRIORITY_UPDATE_SCHEMA_VERSION: &str = "grit.priority-update/v1";
 
 #[derive(Parser)]
 #[command(name = "grit", version, about)]
@@ -38,6 +40,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Update one Issue's logical Declared priority.
+    Update {
+        /// Issue in OWNER/REPO#NUMBER form.
+        issue: String,
+        /// Desired logical Priority, or none to remove it.
+        #[arg(long)]
+        priority: PrioritySelection,
+        /// Emit versioned machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
     /// Generate a deterministic static Issue graph site.
     Graph {
         /// Repository in OWNER/REPO form.
@@ -107,6 +120,11 @@ enum Command {
 pub(crate) fn execute() -> Result<(), CliError> {
     let cli = Cli::parse();
     match cli.command {
+        Command::Update {
+            issue,
+            priority,
+            json,
+        } => update_priority(&issue, priority, json),
         Command::Graph { repo, output, json } => graph(&Repository::parse(&repo)?, &output, json),
         Command::Block { issue, by, json } => {
             mutate_dependency(&issue, &by, DependencyIntent::Block, json)
@@ -209,6 +227,37 @@ fn initialize(repository: &Repository, json: bool) -> Result<(), CliError> {
     Ok(())
 }
 
+fn update_priority(issue: &str, requested: PrioritySelection, json: bool) -> Result<(), CliError> {
+    let issue = IssueReference::parse(issue)?;
+    let client = github_client()?;
+    let result = priority_update::update(&client, &issue, requested)?;
+    let output = PriorityUpdateOutput {
+        schema_version: PRIORITY_UPDATE_SCHEMA_VERSION,
+        command: "update",
+        repository: &result.replica.repository,
+        issue: PriorityIssueOutput {
+            key: &result.issue_key,
+            number: result.issue_number,
+            url: &result.issue_url,
+        },
+        previous_priority: result.previous_priority,
+        resulting_priority: result.resulting_priority,
+        snapshot: snapshot_summary(&result.replica),
+    };
+    if json {
+        serde_json::to_writer(std::io::stdout().lock(), &output).map_err(CliError::EncodeOutput)?;
+        println!();
+    } else {
+        println!(
+            "Updated {} Priority from {} to {}",
+            output.issue.key,
+            output.previous_priority.display_name(),
+            output.resulting_priority.display_name()
+        );
+    }
+    Ok(())
+}
+
 fn sync(repository: &Repository, json: bool) -> Result<(), CliError> {
     let replica = synchronize(repository)?;
     print_sync_result(&replica, json)?;
@@ -225,10 +274,7 @@ fn synchronize(repository: &Repository) -> Result<LocalReplica, CliError> {
         Err(error) => return Err(error.into()),
     };
     let client = github_client()?;
-    let data = refresh_repository(&client, repository, previous.as_ref())?;
-
-    let replica = build_replica(repository, data)?;
-
+    let replica = replica_sync::refresh(&client, repository, previous.as_ref())?;
     store.publish(&replica)?;
     Ok(replica)
 }
@@ -243,23 +289,6 @@ fn github_client() -> Result<GitHubClient, CliError> {
     GitHubClient::new(base_url, &token).map_err(Into::into)
 }
 
-fn fetch_replica(client: &GitHubClient, repository: &Repository) -> Result<LocalReplica, CliError> {
-    let data = refresh_repository(client, repository, None)?;
-    build_replica(repository, data)
-}
-
-fn build_replica(repository: &Repository, data: RepositoryData) -> Result<LocalReplica, CliError> {
-    LocalReplica::build_with_sync(
-        repository.full_name().to_owned(),
-        Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-        data.sync,
-        data.labels,
-        data.issues,
-        data.dependencies,
-    )
-    .map_err(Into::into)
-}
-
 fn mutate_dependency(
     blocked: &str,
     blocker: &str,
@@ -271,9 +300,9 @@ fn mutate_dependency(
     let client = github_client()?;
     let result = client.mutate_dependency(&blocked, &blocker, intent)?;
 
-    let replica = fetch_replica(&client, blocked.repository()).map_err(|source| {
+    let replica = replica_sync::fetch(&client, blocked.repository()).map_err(|source| {
         CliError::MutationSynchronization {
-            source: Box::new(source),
+            source: Box::new(source.into()),
         }
     })?;
     if replica.has_dependency(&blocked, &blocker) != intent.desired_present() {
@@ -569,6 +598,24 @@ struct InitOutput<'a> {
 }
 
 #[derive(Serialize)]
+struct PriorityUpdateOutput<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    repository: &'a str,
+    issue: PriorityIssueOutput<'a>,
+    previous_priority: PriorityState,
+    resulting_priority: PriorityState,
+    snapshot: SnapshotSummary<'a>,
+}
+
+#[derive(Serialize)]
+struct PriorityIssueOutput<'a> {
+    key: &'a str,
+    number: u64,
+    url: &'a str,
+}
+
+#[derive(Serialize)]
 struct SnapshotSummary<'a> {
     schema_version: &'a str,
     synced_at: &'a str,
@@ -701,6 +748,10 @@ pub(crate) enum CliError {
     Store(#[from] StoreError),
     #[error(transparent)]
     Replica(#[from] ReplicaError),
+    #[error(transparent)]
+    ReplicaSync(#[from] ReplicaSyncError),
+    #[error(transparent)]
+    PriorityUpdate(#[from] PriorityUpdateError),
     #[error(transparent)]
     Graph(#[from] GraphError),
     #[error("could not encode command JSON output: {0}")]
