@@ -444,6 +444,7 @@ fn ready_command(state: &TempDir, api_url: &str, repository: &str) -> Command {
 }
 
 struct RepositoryMocks {
+    events: Mock,
     labels: Mock,
     issues: Mock,
     comments: Mock,
@@ -452,6 +453,7 @@ struct RepositoryMocks {
 
 impl RepositoryMocks {
     fn assert(self) {
+        self.events.assert();
         self.labels.assert();
         self.issues.assert();
         self.comments.assert();
@@ -468,6 +470,14 @@ fn mock_repository(
     dependencies: Vec<(u64, Vec<Value>)>,
 ) -> RepositoryMocks {
     let labels_path = format!("/repos/{repository}/labels");
+    let events_path = format!("/repos/{repository}/issues/events");
+    let events = github
+        .mock("GET", events_path.as_str())
+        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("[]")
+        .create();
     let labels = github
         .mock("GET", labels_path.as_str())
         .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
@@ -522,6 +532,7 @@ fn mock_repository(
         })
         .collect();
     RepositoryMocks {
+        events,
         labels,
         issues,
         comments,
