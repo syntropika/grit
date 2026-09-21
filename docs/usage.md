@@ -11,6 +11,8 @@ graphs. Start with the [README](../README.md) for a quick introduction and
 | Sign in through a browser | `grit auth login` |
 | Inspect the active GitHub account | `grit auth status` |
 | Remove Grit's saved login | `grit auth logout` |
+| Install agent usage instructions in this project | `grit skill install` |
+| List supported skill providers | `grit skill providers` |
 | Refresh the local snapshot | `grit sync --repo OWNER/REPO` |
 | List executable Issues | `grit ready --repo OWNER/REPO` |
 | Recommend the next Issue | `grit next --repo OWNER/REPO` |

@@ -39,7 +39,15 @@ requires notarization, use a local source build instead.
 
 ## Install from source
 
-With Rust 1.94.0 installed:
+The crates.io package is named `syntropika-grit`; its executable is `grit`.
+With Rust 1.94.0 or newer:
+
+```bash
+cargo install --locked syntropika-grit --version 0.1.1
+grit --version
+```
+
+To build the matching Git tag with the pinned toolchain instead:
 
 ```bash
 cargo +1.94.0 install --locked --git https://github.com/syntropika/grit --tag v0.1.1
@@ -47,7 +55,38 @@ grit --version
 ```
 
 Cargo installs into its binary directory, usually `$HOME/.cargo/bin`.
-This installs the tagged Grit repository; no crates.io package is required.
+
+## Install the agent skill
+
+Run this from a project to install Grit's bundled usage instructions for
+agents that read `.agents/skills`:
+
+```bash
+grit skill install
+```
+
+The command creates `.agents/skills/grit/SKILL.md` in the current directory.
+It runs offline, needs no GitHub login, and copies the skill embedded in the
+binary. The installed skill covers recommendations, Issue creation,
+assignment, comments, dependencies, pending changes, and graph generation.
+
+Select specific providers or another project explicitly:
+
+```bash
+grit skill providers
+grit skill install --providers codex,claude-code --project-root /path/to/project
+```
+
+Providers sharing `.agents/skills` use one physical copy. Claude Code uses
+`.claude/skills/grit`. Existing installations are preserved unless you pass
+`--force`, which replaces the existing Grit skill directory. Installation
+prints the actual destinations.
+
+User scope is available for providers with dedicated user directories, for
+example `grit skill install --scope user --providers claude-code`. In this
+release, user scope is rejected for shared-path providers such as Codex and
+`universal` because the installer's user mapping does not match their discovery
+paths. Use project scope for those providers.
 
 ## Connect to GitHub
 

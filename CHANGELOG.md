@@ -7,6 +7,10 @@
 - Keep custom app configuration through `--client-id` and
   `GRIT_GITHUB_CLIENT_ID`. GitHub Enterprise hosts require their own app.
 - Update the installation guide and quickstart for the configured login.
+- Bundle a Grit usage skill and install it offline with `grit skill install`,
+  using the native `skillinstaller` library for provider destinations.
+- Publish the `syntropika-grit` Cargo package while keeping the executable
+  named `grit`. Include the agent skill in both source and binary distributions.
 
 ## 0.1.0
 

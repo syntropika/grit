@@ -35,9 +35,10 @@ def command(*args):
 
 
 def identity():
-    version = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["version"]
+    manifest = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]
+    version = manifest["version"]
     lock = tomllib.loads((ROOT / "Cargo.lock").read_text())
-    package = [p for p in lock["package"] if p["name"] == "grit" and "source" not in p]
+    package = [p for p in lock["package"] if p["name"] == manifest["name"] and "source" not in p]
     if len(package) != 1 or package[0]["version"] != version:
         raise ValueError("Cargo.toml and Cargo.lock versions do not match")
     ref = os.environ.get("GITHUB_REF", "")

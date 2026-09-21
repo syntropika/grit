@@ -24,10 +24,10 @@ so work with another unresolved blocker stays blocked.
 Download a Linux or macOS binary for x86_64 or ARM64 from
 [GitHub Releases](https://github.com/syntropika/grit/releases/latest). See the
 [installation guide](docs/installation.md) for system requirements and checksum
-verification. With Rust 1.94.0 installed, you can also build v0.1.1 from source:
+verification. With Rust 1.94.0 or newer, install from crates.io:
 
 ```bash
-cargo +1.94.0 install --locked --git https://github.com/syntropika/grit --tag v0.1.1
+cargo install --locked syntropika-grit --version 0.1.1
 ```
 
 Sign in through your browser, then replace `OWNER/REPO` with the repository
@@ -45,6 +45,17 @@ If you already provide `GH_TOKEN`, skip the login command. See
 [authentication](docs/installation.md#connect-to-github) for token login and
 GitHub Enterprise configuration.
 These commands read GitHub without changing remote Issues.
+
+To give a coding agent the Grit usage guide, run this from your project:
+
+```bash
+grit skill install
+```
+
+This installs the bundled skill in `.agents/skills/grit`. It explains how to
+choose ready work, create and update Issues, add comments, and reconcile
+pending changes. See [agent setup](docs/installation.md#install-the-agent-skill)
+for other providers. The skill is included in the binary and installs offline.
 
 By default, `next` chooses from **unassigned, ready work**. To choose from ready
 Issues assigned to a specific person, pass their GitHub login:
