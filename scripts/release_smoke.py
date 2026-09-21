@@ -14,7 +14,7 @@ def smoke(binary: Path, version: str) -> None:
     binary = binary.resolve()
     assert subprocess.check_output([binary, "--version"], text=True).strip() == f"grit {version}"
     help_text = subprocess.check_output([binary, "--help"], text=True)
-    for command in ("create", "comment", "next", "plan", "ready", "graph", "reconcile"):
+    for command in ("auth", "create", "comment", "next", "plan", "ready", "graph", "reconcile"):
         assert any(line.strip().startswith(f"{command} ") for line in help_text.splitlines()), command
 
     class Fixture(BaseHTTPRequestHandler):
@@ -39,8 +39,9 @@ def smoke(binary: Path, version: str) -> None:
 
     with tempfile.TemporaryDirectory(prefix="grit-release-smoke-") as directory:
         env = dict(os.environ)
-        # Prevent discovery of the operator's gh session or any real API endpoint.
+        # Prevent discovery of the operator's keychain or any real API endpoint.
         env.update(PATH="", GH_TOKEN="fixture-only", GRIT_STATE_DIR=directory,
+                   GRIT_NO_KEYRING="1",
                    NO_PROXY="127.0.0.1", no_proxy="127.0.0.1")
         server = ThreadingHTTPServer(("127.0.0.1", 0), Fixture)
         env["GRIT_GITHUB_API_URL"] = f"http://127.0.0.1:{server.server_port}"

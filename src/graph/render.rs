@@ -196,6 +196,10 @@ pub(super) fn graph_query_javascript() -> &'static [u8] {
     include_bytes!("render/graph-query.js")
 }
 
+pub(super) fn graph_camera_javascript() -> &'static [u8] {
+    include_bytes!("render/graph-camera.js")
+}
+
 fn joined_relations(relations: &BTreeMap<String, Vec<String>>, key: &str) -> String {
     relations
         .get(key)

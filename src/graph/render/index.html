@@ -11,6 +11,7 @@
     <script id="graph-presentation-data" type="application/json">{{presentation_data}}</script>
     <script src="./network-view.js" defer></script>
     <script src="./graph-query.js" defer></script>
+    <script src="./graph-camera.js" defer></script>
     <script src="./app.js" defer></script>
   </head>
   <body>
@@ -18,7 +19,7 @@
     <header class="site-header">
       <a class="wordmark" href="#">grit<span class="wordmark-dot" aria-hidden="true"></span></a>
       <span class="repository-name">{{repository}}</span>
-      <nav aria-label="Page sections"><a href="#graph-heading">Graph</a><a href="#graph-table">Issue table</a><a href="./graph.json" download>Export JSON</a></nav>
+      <nav aria-label="Page sections"><a id="view-graph" href="#graph-heading">Graph</a><a id="view-table" href="#graph-table">Issue table</a><a href="./graph.json" download>Export JSON</a></nav>
     </header>
     <main>
       <section class="overview" aria-labelledby="overview-heading">
@@ -107,19 +108,19 @@
         <button id="show-full-network" type="button">Render full network</button>
       </section>
       <div class="explorer">
-        <section class="graph-region" aria-labelledby="graph-heading">
+        <section id="graph-region" class="graph-region" aria-labelledby="graph-heading">
           <div class="section-heading">
             <div>
               <h2 id="graph-heading">Dependency map</h2>
-              <p id="graph-help">Arrows connect blockers to the work they unlock. Scroll to explore; select an Issue to inspect. Closed history is shown separately.</p>
+              <p id="graph-help">Drag to pan, scroll or pinch to zoom. Select an Issue to follow its connections. Arrows point from blocker to dependent.</p>
             </div>
-            <div class="zoom-controls" role="group" aria-label="Zoom controls"><button id="zoom-out" type="button" aria-label="Zoom out">−</button><button id="zoom-reset" type="button">100%</button><button id="zoom-in" type="button" aria-label="Zoom in">+</button></div>
+            <div class="map-actions"><label for="graph-layout" class="visually-hidden">Graph layout</label><select id="graph-layout"><option value="network">Network</option><option value="layers">Dependency layers</option></select><div class="zoom-controls" role="group" aria-label="Zoom controls"><button id="zoom-out" type="button" aria-label="Zoom out">−</button><button id="zoom-reset" type="button" aria-label="Reset to actual size">100%</button><button id="zoom-in" type="button" aria-label="Zoom in">+</button><button id="zoom-fit" type="button">Fit</button></div><button id="expand-map" type="button" aria-expanded="false" aria-controls="graph-region">Expand map</button></div>
           </div>
           <div class="graph-legend" role="group" aria-label="Graph legend"><span class="legend-ready">Ready</span><span class="legend-blocked">Blocked</span><span class="legend-completed">Completed</span><span class="legend-closed">Other closed</span><span class="legend-unknown">Unresolved / cycle</span></div>
-          <div class="graph-frame">
-            <svg id="graph-canvas" data-zoom="1" role="group" aria-labelledby="graph-heading graph-help">
+          <div class="map-status"><span id="map-node-count">{{issue_count}} Issues</span><span>Precomputed layout · <kbd>↑</kbd><kbd>↓</kbd><kbd>←</kbd><kbd>→</kbd> pan · <kbd>0</kbd> fit</span></div><div class="graph-frame">
+            <svg id="graph-canvas" data-zoom="1" role="group" aria-labelledby="graph-heading graph-help" tabindex="0">
               <defs>
-                <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <marker id="arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
                   <path d="M 0 0 L 10 5 L 0 10 z"></path>
                 </marker>
               </defs>

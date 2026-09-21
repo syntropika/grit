@@ -8,6 +8,9 @@ graphs. Start with the [README](../README.md) for a quick introduction and
 
 | Task | Command |
 | --- | --- |
+| Sign in through a browser | `grit auth login --client-id PUBLIC_CLIENT_ID` |
+| Inspect the active GitHub account | `grit auth status` |
+| Remove Grit's saved login | `grit auth logout` |
 | Refresh the local snapshot | `grit sync --repo OWNER/REPO` |
 | List executable Issues | `grit ready --repo OWNER/REPO` |
 | Recommend the next Issue | `grit next --repo OWNER/REPO` |
@@ -23,8 +26,9 @@ when offline. They never replay pending writes.
 
 ## Synchronize a Repository
 
-Grit first tries the token from the active `gh` session and falls back to a
-non-empty `GH_TOKEN`:
+Grit uses a non-empty `GH_TOKEN` first, then its host-specific saved credential.
+See [authentication](installation.md#connect-to-github) for browser login, piped
+token login, and headless use:
 
 ```bash
 grit sync --repo OWNER/REPO
@@ -39,6 +43,10 @@ The Local replica uses the operating system's application-data directory.
 Set `GRIT_STATE_DIR` to isolate it, for example in CI. `GRIT_GITHUB_API_URL`
 and `GRIT_GITHUB_HOST` support GitHub Enterprise and deterministic test
 servers; the API URL must be a credential-free HTTP(S) base URL.
+Saved Grit credentials are sent only to the selected host's canonical HTTPS
+API. A custom API override requires an explicit environment token.
+Set `GRIT_NO_KEYRING=1` in tests to disable credential-store
+discovery independently of local snapshot storage.
 
 The first synchronization retrieves every page of Issues and Repository Issue
 comments, then the native `blocked_by` Dependencies for each Issue. Pull
@@ -362,17 +370,27 @@ Issue history: its outcome counts and completed-Issue list make finished work
 visible alongside the remaining open work. Select an outcome to filter the
 graph and table. Completed, not planned, and other closed Issues remain
 distinct; closing an Issue does not automatically mean its work was completed.
-Advanced filters and relationship tools are available in a disclosure panel.
+The map includes search, outcome controls, and an Issue detail panel, with the
+accessible table below it. Fit the entire network, zoom around a point, or drag
+to pan; camera movements never change the positions or analysis stored in the
+artifact. Expand the map for immersive exploration. Advanced filters and
+relationship tools remain available alongside the map.
+The default Network view uses spatial coordinates calculated by Grit. Switch
+to Dependency layers to inspect the structural arrangement. Both views use the
+same Issues, Dependencies, filters, and recommendation evidence.
 Historical dependencies use a separate arrangement calculated by Grit. Closed
 Issues have no operational dependency layer; the table identifies them as
 history instead of presenting them as unresolved work.
 
-The target contains `index.html`, `app.css`, `graph-query.js`, `network-view.js`, `app.js`,
+The target contains `index.html`, `app.css`, `graph-query.js`, `network-view.js`, `graph-camera.js`, `app.js`,
 `graph.json`, and `graph.schema.json`. The versioned JSON uses explicit
 `blocked` and `blocker`
 edge roles, normalized Issue fields, precomputed layered positions,
 operational counts, hashes, and provenance. Bodies, comments, raw API records,
 and Operation markers are not part of the artifact.
+The HTML also embeds `grit.graph-presentation/v1` data with precomputed network
+coordinates. `graph.json` retains its dependency-layer positions; switching the
+browser view does not modify that artifact or its analysis.
 
 Closed Issue nodes carry an optional `resolution`: `completed`, `not_planned`,
 or `other`, derived from GitHub's closure reason. Open nodes omit the field.

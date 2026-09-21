@@ -51,18 +51,63 @@ This installs the tagged Grit repository; no crates.io package is required.
 
 ## Connect to GitHub
 
-Authenticate using the [GitHub CLI](https://cli.github.com/):
+Grit calls GitHub's API directly from Rust. Choose one of the following ways
+to authenticate.
+
+### Sign in with a browser
 
 ```bash
-gh auth login
+grit auth login --client-id YOUR_PUBLIC_OAUTH_CLIENT_ID
+grit auth status
+```
+
+Open the verification address printed by Grit and enter the displayed code.
+Grit validates the resulting token and saves it in the operating system's
+secure credential store: macOS Keychain or a Linux Secret Service session.
+It never falls back to a plaintext credential file.
+
+Browser login requires a registered GitHub OAuth App with Device Flow enabled.
+This release does not embed an official Grit Client ID. Supply your app's
+public ID with `--client-id` or `GRIT_GITHUB_CLIENT_ID`; no Client Secret is
+required. The app is registered once by its maintainer, and each user
+authorizes it. An organization that restricts OAuth apps may require its
+owner's approval before organization repositories can be accessed. See
+[GitHub's registration guide](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/creating-an-oauth-app).
+
+If GitHub issues an expiring token, Grit records its expiration and asks you
+to log in again after it expires. This release does not refresh OAuth tokens
+automatically.
+
+### Save an existing token
+
+Pipe a token from your password manager or another trusted secret source into
+`grit auth login --with-token`. The command only accepts piped standard input,
+so the token does not need to appear in a command argument or shell history.
+This method needs no OAuth App registration and uses the same secure store.
+
+### Use an environment token
+
+Supply a GitHub token through `GH_TOKEN` in your shell or CI secret
+configuration. This works without a desktop keychain.
+
+Credential precedence is **`GH_TOKEN` → Grit's saved login**.
+The account must be able to read the repository; mutation commands also need
+permission to make the requested changes. Then run:
+
+```bash
 grit sync --repo OWNER/REPO
 grit next --repo OWNER/REPO
 ```
 
-Grit first tries the active `gh` session, then a non-empty `GH_TOKEN`.
-`gh` is optional when a token is already supplied through the environment.
-The account must be able to read the repository; mutation commands also need
-permission to make the requested changes.
+Use `grit auth status --json` to inspect the active account and credential
+source without exposing the token. `grit auth logout` removes only Grit's
+saved credential; it does not revoke the token on GitHub or modify `GH_TOKEN`.
+
+For GitHub Enterprise, pass `--hostname github.example.com` to auth commands
+and set `GRIT_GITHUB_HOST=github.example.com` for repository commands.
+Credentials are stored separately for each host. Set `GRIT_NO_KEYRING=1`
+to disable secure-store discovery in headless sessions or isolated tests;
+`GH_TOKEN` remains available.
 
 The first successful synchronization creates the local snapshot used for
 offline analysis. See the [usage guide](usage.md) for assignment scope,

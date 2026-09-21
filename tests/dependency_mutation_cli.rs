@@ -619,6 +619,7 @@ fn dependency_references_reject_ambiguous_or_zero_issue_forms_before_authenticat
         let output = Command::new(env!("CARGO_BIN_EXE_grit"))
             .args(["block", reference, "--by", "acme/widgets#1", "--json"])
             .env_remove("GH_TOKEN")
+            .env("GRIT_NO_KEYRING", "1")
             .env("GRIT_STATE_DIR", state.path())
             .env("PATH", "")
             .output()
@@ -672,6 +673,7 @@ fn dependency_command(
     command
         .env("GH_TOKEN", "automation-token")
         .env("GRIT_GITHUB_API_URL", api_url)
+        .env("GRIT_NO_KEYRING", "1")
         .env("GRIT_STATE_DIR", state.path())
         .env("PATH", "");
     command
@@ -683,6 +685,7 @@ fn next_command(state: &TempDir, api_url: &str) -> Command {
     command
         .env("GH_TOKEN", "automation-token")
         .env("GRIT_GITHUB_API_URL", api_url)
+        .env("GRIT_NO_KEYRING", "1")
         .env("GRIT_STATE_DIR", state.path())
         .env("PATH", "");
     command
@@ -694,6 +697,7 @@ fn reconcile_command(state: &TempDir, api_url: &str) -> Command {
     command
         .env("GH_TOKEN", "automation-token")
         .env("GRIT_GITHUB_API_URL", api_url)
+        .env("GRIT_NO_KEYRING", "1")
         .env("GRIT_STATE_DIR", state.path())
         .env("PATH", "");
     command
@@ -711,6 +715,7 @@ fn priority_command(state: &TempDir, api_url: &str, issue_number: u64, priority:
     command
         .env("GH_TOKEN", "automation-token")
         .env("GRIT_GITHUB_API_URL", api_url)
+        .env("GRIT_NO_KEYRING", "1")
         .env("GRIT_STATE_DIR", state.path())
         .env("PATH", "");
     command
@@ -722,6 +727,7 @@ fn mutation_command_human(state: &TempDir, api_url: &str, command_name: &str) ->
     command
         .env("GH_TOKEN", "automation-token")
         .env("GRIT_GITHUB_API_URL", api_url)
+        .env("GRIT_NO_KEYRING", "1")
         .env("GRIT_STATE_DIR", state.path())
         .env("PATH", "");
     command
@@ -733,6 +739,7 @@ fn ready_command(state: &TempDir, api_url: &str) -> Command {
     command
         .env("GH_TOKEN", "automation-token")
         .env("GRIT_GITHUB_API_URL", api_url)
+        .env("GRIT_NO_KEYRING", "1")
         .env("GRIT_STATE_DIR", state.path())
         .env("PATH", "");
     command
@@ -744,6 +751,7 @@ fn sync_command(state: &TempDir, api_url: &str) -> Command {
     command
         .env("GH_TOKEN", "automation-token")
         .env("GRIT_GITHUB_API_URL", api_url)
+        .env("GRIT_NO_KEYRING", "1")
         .env("GRIT_STATE_DIR", state.path())
         .env("PATH", "");
     command

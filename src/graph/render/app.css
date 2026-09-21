@@ -636,7 +636,7 @@ fieldset input {
 }
 #graph-viewport {
   transform-origin: 0 0;
-  transition: transform 140ms ease;
+  transition: none;
 }
 .graph-edge {
   fill: none;
@@ -672,7 +672,7 @@ fieldset input {
   fill: var(--paper);
   stroke: var(--blocked);
   stroke-width: 3;
-  transition: r 120ms ease;
+  vector-effect: non-scaling-stroke;
 }
 
 .graph-node.ready circle {
@@ -786,11 +786,10 @@ tbody tr.causal-evidence {
   opacity: 0;
   pointer-events: none;
   fill: var(--ink);
-  font-size: 12px;
   font-weight: 650;
   paint-order: stroke;
   stroke: white;
-  stroke-width: 4px;
+
   transition: opacity 100ms ease;
 }
 
@@ -819,7 +818,7 @@ tbody tr.causal-evidence {
   stroke-width: 5;
 }
 .graph-edge {
-  stroke: #a5b3a5;
+  stroke: #7f917f;
   stroke-width: 1.6;
 }
 .layer-label {
@@ -1201,33 +1200,158 @@ tbody tr.relationship-path {
   border-color: #98a2b3;
 }
 
-/* Keep map geometry readable; pan the viewport instead of shrinking whole histories. */
+/* The camera moves a fixed network; Issue positions and analysis stay unchanged. */
 .graph-frame {
-  height: 410px;
+  height: 500px;
   min-height: 0;
-  overflow: auto;
+  overflow: hidden;
 }
 #graph-canvas {
-  width: auto;
-  min-width: 100%;
-  height: auto;
+  width: 100%;
+  height: 100%;
+  cursor: grab;
+  touch-action: none;
+}
+#graph-canvas[data-dragging="true"] {
+  cursor: grabbing;
+}
+.graph-edge {
+  vector-effect: non-scaling-stroke;
+}
+body[data-layout="network"] .layer-label {
+  display: none;
 }
 .node-summary {
   fill: var(--ink);
-  font-size: 12px;
   font-weight: 500;
   pointer-events: none;
   paint-order: stroke;
   stroke: #fafbf7;
-  stroke-width: 4px;
 }
 .graph-node:hover .node-summary,
 .graph-node:focus .node-summary,
 .graph-node.selected .node-summary {
   opacity: 0;
 }
+.graph-edge.selected-connection {
+  stroke: var(--accent);
+  stroke-width: 2.8;
+}
+.graph-node.connected circle {
+  stroke-width: 4;
+}
+.section-heading {
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+.map-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.65rem;
+}
+.map-actions select,
+#expand-map {
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--paper);
+  padding: 0.3rem 0.6rem;
+  font-size: 0.75rem;
+  color: var(--ink);
+}
+#expand-map {
+  color: var(--accent);
+  font-weight: 600;
+}
+.map-status {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0 1.3rem 0.75rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+.map-status kbd {
+  font: inherit;
+  margin-right: 0.2rem;
+}
+.detail-close {
+  float: right;
+  margin: -0.3rem -0.3rem 0.7rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--paper);
+  padding: 0.4rem 0.6rem;
+  font-size: 0.75rem;
+}
+body[data-map-expanded="true"] {
+  overflow: hidden;
+}
+body[data-map-expanded="true"] .graph-region {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  border: 0;
+  border-radius: 0;
+}
+body[data-map-expanded="true"] .graph-frame {
+  flex: 1;
+  min-height: 0;
+  border-radius: 0;
+}
+body[data-map-expanded="true"][data-details-open="true"] .graph-region {
+  right: 330px;
+}
+body[data-map-expanded="true"] .detail-panel {
+  display: none;
+}
+body[data-map-expanded="true"][data-details-open="true"] .detail-panel {
+  display: block;
+  position: fixed;
+  inset: 0 0 0 auto;
+  z-index: 31;
+  width: 330px;
+  overflow: auto;
+  border-radius: 0;
+}
 @media (max-width: 720px) {
   .graph-frame {
-    height: 340px;
+    height: 400px;
   }
+  .map-actions {
+    gap: 0.45rem;
+  }
+  .map-status {
+    padding-right: 1rem;
+    padding-left: 1rem;
+  }
+  .map-status span:last-child {
+    display: none;
+  }
+  body[data-map-expanded="true"][data-details-open="true"] .graph-region {
+    right: 0;
+    bottom: 43dvh;
+  }
+  body[data-map-expanded="true"][data-details-open="true"] .detail-panel {
+    inset: auto 0 0;
+    width: 100%;
+    height: 43dvh;
+    min-height: 0;
+    border-top: 1px solid var(--line);
+  }
+}
+
+body[data-map-expanded="true"][data-details-open="true"]
+  .graph-node.selected
+  .node-label {
+  opacity: 0;
+}
+body[data-map-expanded="true"][data-details-open="true"]
+  .graph-node.selected
+  .node-summary {
+  opacity: 1;
 }

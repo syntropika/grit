@@ -30,16 +30,17 @@ verification. With Rust 1.94.0 installed, you can also build v0.1.0 from source:
 cargo +1.94.0 install --locked --git https://github.com/syntropika/grit --tag v0.1.0
 ```
 
-Authenticate with the [GitHub CLI](https://cli.github.com/), then replace
-`OWNER/REPO` with the repository you want to analyze:
+Connect a GitHub account using [Grit's authentication commands](docs/installation.md#connect-to-github)
+or `GH_TOKEN`.
+Then replace `OWNER/REPO` with the repository you want to analyze:
 
 ```bash
-gh auth login
 grit sync --repo OWNER/REPO
 grit next --repo OWNER/REPO
 ```
 
-Grit prefers your active `gh` session and falls back to `GH_TOKEN`.
+Grit calls GitHub's API directly from Rust. It uses `GH_TOKEN` first, then its
+own saved login.
 These commands read GitHub without changing remote Issues.
 
 By default, `next` chooses from **unassigned, ready work**. To choose from ready
@@ -91,8 +92,9 @@ state and surfaces conflicts for explicit resolution.
 
 ## Explore the graph
 
-Generate a local browser explorer to search Issues, filter the graph, and trace
-blockers and dependents alongside an accessible Issue table:
+Generate a local browser explorer to pan and zoom through a spatial network,
+search Issues, and trace blockers and dependents. Switch to dependency layers
+or the accessible Issue table when you need another view:
 
 ```bash
 grit graph --repo OWNER/REPO --output site/

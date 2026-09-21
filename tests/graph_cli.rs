@@ -520,6 +520,15 @@ fn generated_site_is_a_keyboard_accessible_offline_graph_explorer() {
         "labels_hidden_by_default",
         "selected_label_only",
         "keyboard_navigation",
+        "layouts_use_precomputed_positions",
+        "layout_and_camera_preserve_canonical_analysis",
+        "camera_keyboard_pan",
+        "camera_pointer_pan",
+        "camera_anchored_wheel_zoom",
+        "camera_touch_pinch_zoom",
+        "camera_fit_shows_all_nodes",
+        "expanded_map_keyboard_exit_and_inspection",
+        "accessible_table_remains_visible",
         "zoom",
         "recommendation_summary",
         "distinct_runner_up",
@@ -602,7 +611,7 @@ fn run_browser_harness(workspace: &TempDir, script: &str) -> Value {
     let harness = workspace.path().join("browser-test.html");
     fs::write(
         &harness,
-        "<!doctype html><html><body><iframe id=\"app\" src=\"./site/index.html\"></iframe><iframe id=\"constrained-app\" src=\"./constrained-site/index.html\"></iframe><iframe id=\"project-app\" src=\"./project-site/index.html\"></iframe><output id=\"result\">pending</output><script src=\"./browser-test.js\"></script></body></html>\n",
+        "<!doctype html><html><head><style>iframe{width:1280px;height:900px}</style></head><body><iframe id=\"app\" src=\"./site/index.html\"></iframe><iframe id=\"constrained-app\" src=\"./constrained-site/index.html\"></iframe><iframe id=\"project-app\" src=\"./project-site/index.html\"></iframe><output id=\"result\">pending</output><script src=\"./browser-test.js\"></script></body></html>\n",
     )
     .expect("browser harness");
     fs::write(workspace.path().join("browser-test.js"), script)
@@ -677,6 +686,7 @@ fn graph_command(state: &TempDir, api_url: &str, output: &std::path::Path) -> Co
     command
         .env("GH_TOKEN", "automation-token")
         .env("GRIT_GITHUB_API_URL", api_url)
+        .env("GRIT_NO_KEYRING", "1")
         .env("GRIT_STATE_DIR", state.path())
         .env("PATH", "");
     command
@@ -688,6 +698,7 @@ fn offline_analysis_command(state: &TempDir, api_url: &str, command_name: &str) 
     command
         .env_remove("GH_TOKEN")
         .env("GRIT_GITHUB_API_URL", api_url)
+        .env("GRIT_NO_KEYRING", "1")
         .env("GRIT_STATE_DIR", state.path())
         .env("PATH", "");
     command
@@ -849,6 +860,7 @@ fn prepare_project_browser_site(source: &std::path::Path, target: &std::path::Pa
     for asset in [
         "app.css",
         "graph-query.js",
+        "graph-camera.js",
         "network-view.js",
         "app.js",
         "graph.schema.json",
@@ -905,6 +917,7 @@ fn prepare_constrained_browser_site(source: &std::path::Path, target: &std::path
         "app.css",
         "network-view.js",
         "graph-query.js",
+        "graph-camera.js",
         "app.js",
         "graph.json",
         "graph.schema.json",

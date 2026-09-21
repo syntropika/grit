@@ -278,6 +278,7 @@ fn triage_command(
     }
     command
         .env("GRIT_GITHUB_API_URL", api_url)
+        .env("GRIT_NO_KEYRING", "1")
         .env("GRIT_STATE_DIR", state.path())
         .env("PATH", "");
     if online {

@@ -35,7 +35,7 @@ Run checks relevant to your change. Before merging code, run:
 cargo +1.94.0 fmt --all -- --check
 cargo +1.94.0 clippy --locked --all-targets --all-features -- -D warnings
 cargo +1.94.0 test --locked --all-targets --all-features
-node --test tests/network_view.test.js
+node --test tests/*.test.js
 git diff --check
 ```
 

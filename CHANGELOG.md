@@ -5,6 +5,9 @@
 First release of Grit, a CLI for choosing executable work from GitHub Issues
 and understanding what it can unblock.
 
+- Sign in using browser device authorization or a token
+  supplied on standard input. Store credentials in the operating system's
+  secure store; inspect the active account and remove Grit's saved login.
 - Synchronize native Issue dependencies into a validated local replica.
   Analyze the latest successful snapshot when GitHub is unavailable.
 - List ready work, recommend a next Issue with bounded rollout evidence,
@@ -12,8 +15,9 @@ and understanding what it can unblock.
 - Create Draft Issues and queue edits, comments, labels, parent relationships,
   and Dependencies offline. Project pending work into analysis and reconcile
   it explicitly with GitHub.
-- Generate a self-contained graph explorer with search, an accessible Issue
-  table, dependency navigation, and precomputed recommendation evidence.
+- Generate a self-contained graph explorer with a spatial network view,
+  dependency layers, pan/zoom/fit controls, search, an accessible Issue table,
+  and precomputed recommendation evidence.
   Visible outcome counts and a completed-Issue list distinguish completed
   work from Issues closed as not planned or without a known reason.
 - Generate a separate allowlisted public graph for public repositories,

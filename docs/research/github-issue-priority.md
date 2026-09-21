@@ -39,19 +39,9 @@ The change is saved automatically. People with `triage` access or higher can edi
 
 GitHub explicitly documents that Issue Fields are the source of truth for an Issue, while a Project Field is limited to the Project and can have different values for the same Issue. [Official difference between Issue Fields and Project Fields](https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/managing-issue-fields-in-your-organization#issue-fields-and-projects)
 
-If a Project Field is used, the Issue must first be a Project item. It can be edited with GraphQL `updateProjectV2ItemFieldValue`, with the Projects REST API, or with:
+If a Project Field is used, the Issue must first be a Project item. It can be edited with GraphQL `updateProjectV2ItemFieldValue` or the Projects REST API.
 
-```bash
-gh project item-edit PROJECT_NUMBER \
-  --owner OWNER \
-  --url https://github.com/OWNER/REPO/issues/42 \
-  --field Priority \
-  --value High
-```
-
-[`gh project item-edit` manual](https://cli.github.com/manual/gh_project_item-edit)
-
-## REST, GraphQL, and `gh`
+## REST and GraphQL
 
 ### Organization Issue Fields
 
@@ -79,20 +69,6 @@ GraphQL exposes `Issue.issueFieldValues`, the `IssueFieldSingleSelect`/`IssueFie
 
 The REST Issue listing supports filtering with `issue_field_values=priority:High` and combining it with `since`; it does not include a complete collection of field values in each object in the documented response. For synchronizing thousands of Issues, nested GraphQL or a few REST queries per option are preferable to `GET issue-field-values` for each Issue.
 
-### GitHub CLI
-
-The current `gh issue edit` command **does not have** `--priority` or `--field`. For an Organization Issue Field, `gh` authentication must be reused through `gh api` against REST or `gh api graphql`. [`gh issue edit`](https://cli.github.com/manual/gh_issue_edit), [`gh api`](https://cli.github.com/manual/gh_api)
-
-For example, once `FIELD_ID` is known:
-
-```bash
-gh api --method POST \
-  repos/OWNER/REPO/issues/42/issue-field-values \
-  --input priority.json
-```
-
-Direct HTTP access with `GH_TOKEN` can make exactly the same call.
-
 ## Fallback with labels
 
 For a personal-account repository or a GitHub Enterprise Server version earlier than 3.23, labels can be defined as:
@@ -105,7 +81,7 @@ priority:p3
 priority:p4
 ```
 
-They work in any repository and are already included in the REST Issue listing. They can also be assigned with `gh issue edit 42 --add-label priority:p1`. However, GitHub does not prevent an Issue from having multiple priority labels simultaneously; Grit would have to detect that state as a conflict and not silently choose one of them. [Labels REST API](https://docs.github.com/en/rest/issues/labels), [`gh issue edit`](https://cli.github.com/manual/gh_issue_edit)
+They work in any repository and are already included in the REST Issue listing. However, GitHub does not prevent an Issue from having multiple priority labels simultaneously; Grit would have to detect that state as a conflict and not silently choose one of them. [Labels REST API](https://docs.github.com/en/rest/issues/labels)
 
 ## Initial recommendation for Grit v1 (superseded)
 

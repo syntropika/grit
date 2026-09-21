@@ -634,6 +634,7 @@ fn concurrent_offline_field_updates_all_survive_restart() {
             let api_url = api_url.clone();
             thread::spawn(move || {
                 Command::new(env!("CARGO_BIN_EXE_grit"))
+                    .env("GRIT_NO_KEYRING", "1")
                     .env("GRIT_STATE_DIR", state_path)
                     .env("GRIT_GITHUB_API_URL", api_url)
                     .env_remove("GH_TOKEN")
@@ -962,6 +963,7 @@ fn issue_with(number: u64, title: &Value, body: &Value) -> Value {
 fn grit(state: &TempDir, api_url: &str) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_grit"));
     command
+        .env("GRIT_NO_KEYRING", "1")
         .env("GRIT_STATE_DIR", state.path())
         .env("GRIT_GITHUB_API_URL", api_url)
         .env("GH_TOKEN", "test-token");

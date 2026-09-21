@@ -3,13 +3,64 @@
 import io
 import json
 import os
+from contextlib import contextmanager
 from pathlib import Path
 import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError
+from urllib.parse import parse_qs, urlsplit
+from urllib.request import Request
 
 import release
+
+
+class ReleaseAPIFixture:
+    def __init__(self, version, commit):
+        self.tag = f"v{version}"
+        self.commit = commit
+        self.events = []
+        self.existing = False
+        self.draft = None
+        self.assets = {}
+        self.corrupt_download = False
+        self.fail_upload_at = None
+
+    def request(self, url, method="GET", data=None, content_type="application/json", binary=False):
+        parsed = urlsplit(url)
+        path = parsed.path
+        self.events.append((method, path))
+        if "/git/ref/tags/" in path:
+            result = {"object": {"type": "commit", "sha": self.commit}}
+        elif method == "GET" and path.endswith("/releases"):
+            result = [{"tag_name": self.tag, "draft": False}] if self.existing else []
+        elif method == "POST" and path.endswith("/releases"):
+            self.draft = json.loads(data)
+            assert self.draft["draft"] is True
+            self.draft["id"] = 17
+            result = self.draft
+        elif method == "POST" and path.endswith("/releases/17/assets"):
+            assert parsed.hostname == "uploads.github.com"
+            if self.fail_upload_at == len(self.assets) + 1:
+                raise RuntimeError("Fixture upload failure")
+            name = parse_qs(parsed.query)["name"][0]
+            asset_id = len(self.assets) + 1
+            metadata = {"name": name, "id": asset_id, "size": len(data), "state": "uploaded"}
+            self.assets[asset_id] = (metadata, data)
+            result = metadata
+        elif method == "GET" and path.endswith("/releases/17"):
+            result = {**self.draft, "assets": [metadata for metadata, _ in self.assets.values()]}
+        elif method == "GET" and "/releases/assets/" in path:
+            assert binary is True
+            data = self.assets[int(path.rsplit("/", 1)[1])][1]
+            return b"truncated upload" if self.corrupt_download else data
+        elif method == "PATCH" and path.endswith("/releases/17"):
+            self.draft.update(json.loads(data))
+            result = self.draft
+        else:
+            raise AssertionError(f"Unexpected fixture operation: {method} {path}")
+        return json.dumps(result).encode()
 
 
 class ReleaseGuards(unittest.TestCase):
@@ -64,6 +115,29 @@ class ReleaseGuards(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, f"requires macOS {minimum}"):
                         release.platform_requirement(Path("grit"), "aarch64-apple-darwin")
 
+    def test_macos_linker_tool_version_is_not_a_deployment_requirement(self):
+        output = """Load command 10
+      cmd LC_BUILD_VERSION
+  cmdsize 32
+ platform 1
+    minos 13.0
+      sdk 15.5
+   ntools 1
+     tool 3
+  version 1167.5
+Load command 11
+      cmd LC_SOURCE_VERSION
+  cmdsize 16
+  version 0.0
+"""
+        with patch.object(release, "command", return_value=output):
+            self.assertEqual(release.platform_requirement(Path("grit"), "aarch64-apple-darwin"), "macOS 13.0")
+
+    def test_legacy_macos_minimum_version_command_is_supported(self):
+        output = "cmd LC_VERSION_MIN_MACOSX\ncmdsize 16\nversion 13.0\nsdk 15.5"
+        with patch.object(release, "command", return_value=output):
+            self.assertEqual(release.platform_requirement(Path("grit"), "x86_64-apple-darwin"), "macOS 13.0")
+
     def test_archive_links_keep_bundled_guides_and_pin_unbundled_sources(self):
         (self.output / "README.md").write_text("[Usage](docs/usage.md)\n[Contributing](CONTRIBUTING.md)\n")
         with patch.object(release, "ROOT", self.output):
@@ -75,12 +149,11 @@ class ReleaseGuards(unittest.TestCase):
         first_page = [{"tag_name": f"v0.0.{number}", "draft": False} for number in range(100)]
         draft = {"tag_name": "v1.0.0", "draft": True}
         with (
-            patch.dict(os.environ, GH_TOKEN="fixture-token"),
-            patch.object(release, "urlopen", side_effect=[io.BytesIO(json.dumps(first_page).encode()),
-                                                         io.BytesIO(json.dumps([draft]).encode())]) as request,
+            patch.object(release, "github_request", side_effect=[json.dumps(first_page).encode(),
+                                                                 json.dumps([draft]).encode()]) as request,
         ):
             self.assertEqual(release.existing_release("release/smoke", "v1.0.0"), draft)
-            self.assertTrue(request.call_args.args[0].full_url.endswith("page=2"))
+            self.assertTrue(request.call_args.args[0].endswith("page=2"))
 
     def test_unexpected_checkout_is_rejected(self):
         with patch.dict(os.environ, GITHUB_SHA="0" * 40):
@@ -122,46 +195,115 @@ class ReleaseGuards(unittest.TestCase):
                 release.publish(self.output)
 
     def test_existing_release_cannot_be_overwritten(self):
-        with (
-            patch.dict(os.environ, GITHUB_EVENT_NAME="push", GITHUB_REF=f"refs/tags/v{self.version}",
-                       GITHUB_REPOSITORY="release/smoke"),
-            patch.object(release, "identity", return_value=(self.version, self.commit)),
-            patch.object(release, "command", return_value=self.commit) as command,
-            patch.object(release, "verify_archives", return_value=[]),
-            patch.object(release, "existing_release", return_value={"draft": False}),
-        ):
+        with self.publication_fixture() as api:
+            api.existing = True
             with self.assertRaisesRegex(ValueError, "refusing to replace"):
                 release.publish(self.output)
-            self.assertEqual(command.call_count, 1)
-            self.assertEqual(command.call_args.args[0], "git")
+            self.assertTrue(all(method == "GET" for method, _ in api.events))
 
     def test_failed_upload_readback_leaves_release_as_draft(self):
-        asset = self.output / "fixture.tar.gz"
-        asset.write_bytes(b"verified archive")
-        calls = []
+        with self.publication_fixture() as api:
+            api.corrupt_download = True
+            with self.assertRaisesRegex(ValueError, "checksum verification"):
+                release.publish(self.output)
+            self.assertIs(api.draft["draft"], True)
+            self.assertFalse(any(method == "PATCH" for method, _ in api.events))
 
-        def command(*args):
-            calls.append(args)
-            if args[:3] == ("gh", "release", "download"):
-                directory = Path(args[args.index("--dir") + 1])
-                directory.mkdir()
-                (directory / asset.name).write_bytes(b"truncated upload")
-            return self.commit
-
+    @contextmanager
+    def publication_fixture(self):
+        for target in release.TARGETS:
+            self.archive(target)
+        api = ReleaseAPIFixture(self.version, self.commit)
         with (
             patch.dict(os.environ, GITHUB_EVENT_NAME="push", GITHUB_REF=f"refs/tags/v{self.version}",
                        GITHUB_REPOSITORY="release/smoke"),
             patch.object(release, "identity", return_value=(self.version, self.commit)),
-            patch.object(release, "command", side_effect=command),
-            patch.object(release, "verify_archives", return_value=[asset]),
-            patch.object(release, "existing_release", side_effect=[None, {
-                "draft": True, "assets": [{"name": asset.name}],
-            }]),
+            patch.object(release, "command", return_value=self.commit),
+            patch.object(release, "github_request", side_effect=api.request),
         ):
-            with self.assertRaisesRegex(ValueError, "checksum verification"):
+            yield api
+
+    def test_complete_rest_publication_verifies_all_assets_before_publish(self):
+        with self.publication_fixture() as api:
+            release.publish(self.output)
+        self.assertIs(api.draft["draft"], False)
+        self.assertEqual(api.draft["target_commitish"], self.commit)
+        self.assertEqual(api.draft["make_latest"], "true")
+        self.assertEqual(len(api.assets), 5)
+        self.assertEqual(sum("/releases/assets/" in path for _, path in api.events), 5)
+        self.assertEqual(sum("/git/ref/tags/" in path for _, path in api.events), 2)
+        self.assertEqual(api.events[-1], ("PATCH", "/repos/release/smoke/releases/17"))
+
+    def test_upload_failure_leaves_an_unpublished_partial_draft(self):
+        with self.publication_fixture() as api:
+            api.fail_upload_at = 3
+            with self.assertRaisesRegex(RuntimeError, "Fixture upload failure"):
                 release.publish(self.output)
-        self.assertTrue(any(call[:3] == ("gh", "release", "create") and "--draft" in call for call in calls))
-        self.assertFalse(any(call[:3] == ("gh", "release", "edit") for call in calls))
+        self.assertEqual(len(api.assets), 2)
+        self.assertIs(api.draft["draft"], True)
+        self.assertFalse(any(method == "PATCH" for method, _ in api.events))
+
+    def test_remote_tag_mismatch_prevents_release_creation(self):
+        with self.publication_fixture() as api:
+            api.commit = "0" * 40
+            with self.assertRaisesRegex(ValueError, "remote release tag"):
+                release.publish(self.output)
+        self.assertIsNone(api.draft)
+        self.assertTrue(all(method == "GET" for method, _ in api.events))
+
+    def test_annotated_tag_resolves_to_the_tested_commit(self):
+        with patch.object(release, "github_api", side_effect=[
+            {"object": {"type": "tag", "sha": "1" * 40}},
+            {"object": {"type": "commit", "sha": self.commit}},
+        ]) as request:
+            release.verify_remote_tag("release/smoke", "v0.1.0", self.commit)
+        self.assertEqual(request.call_args.args[0], f"/repos/release/smoke/git/tags/{'1' * 40}")
+
+    def test_asset_redirect_strips_authorization_across_hosts_and_redirect_chain(self):
+        handler = release.ReleaseRedirectHandler()
+        initial = Request("https://api.github.com/repos/release/smoke/releases/assets/1",
+                          headers={"Authorization": "Bearer fixture-secret", "Accept": "application/octet-stream"})
+        first = handler.redirect_request(initial, None, 302, "Found", {},
+                                         "https://release-assets.githubusercontent.com/asset?signature=fixture")
+        self.assertIsNone(first.get_header("Authorization"))
+        self.assertEqual(first.get_header("Accept"), "application/octet-stream")
+        second = handler.redirect_request(first, None, 302, "Found", {},
+                                          "https://objects.githubusercontent.com/final-asset")
+        self.assertIsNone(second.get_header("Authorization"))
+
+    def test_same_api_host_redirect_preserves_authentication(self):
+        request = Request("https://api.github.com/old", headers={"Authorization": "Bearer fixture-secret"})
+        redirected = release.ReleaseRedirectHandler().redirect_request(
+            request, None, 302, "Found", {}, "https://api.github.com/new")
+        self.assertEqual(redirected.get_header("Authorization"), "Bearer fixture-secret")
+
+    def test_release_transport_rejects_unexpected_hosts_and_plain_http(self):
+        for url in ("http://api.github.com/repos/x/y", "https://unexpected.invalid/upload",
+                    "https://fixture-secret@api.github.com/repos/x/y", "https://api.github.com:8443/repos/x/y"):
+            with self.subTest(url=url), patch.object(release, "build_opener") as opener:
+                with self.assertRaisesRegex(ValueError, "expected HTTPS"):
+                    release.github_request(url)
+                opener.assert_not_called()
+
+    def test_redirects_reject_plain_http_and_mutating_requests(self):
+        handler = release.ReleaseRedirectHandler()
+        request = Request("https://api.github.com/asset", headers={"Authorization": "Bearer fixture-secret"})
+        with self.assertRaisesRegex(ValueError, "expected HTTPS"):
+            handler.redirect_request(request, None, 302, "Found", {}, "http://release-assets.githubusercontent.com/asset")
+        upload = Request("https://uploads.github.com/asset", method="POST", data=b"archive")
+        with self.assertRaisesRegex(ValueError, "mutations cannot follow"):
+            handler.redirect_request(upload, None, 303, "See Other", {}, "https://api.github.com/other")
+
+    def test_api_errors_never_include_token_or_signed_url(self):
+        error = HTTPError("https://api.github.com/asset?secret=fixture-secret", 403,
+                          "fixture-secret", {}, io.BytesIO(b"fixture-secret"))
+        with patch.dict(os.environ, GITHUB_TOKEN="fixture-secret"), patch.object(release, "build_opener") as opener:
+            opener.return_value.open.side_effect = error
+            with self.assertRaisesRegex(RuntimeError, "HTTP 403") as raised:
+                release.github_request("https://api.github.com/repos/release/smoke/releases")
+            self.assertNotIn("fixture-secret", str(raised.exception))
+            request = opener.return_value.open.call_args.args[0]
+            self.assertEqual(request.get_header("Authorization"), "Bearer fixture-secret")
 
 
 if __name__ == "__main__":

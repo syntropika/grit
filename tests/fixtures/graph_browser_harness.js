@@ -26,6 +26,7 @@ const exercise = () => {
       ...exerciseIsolation(harness),
       ...exerciseRelationships(harness),
       ...exerciseKeyboardAndZoom(harness),
+      ...exerciseCameraAndLayouts(harness),
       ...exerciseHostileText(harness),
       ...exerciseRecommendation(harness),
       ...exerciseProjectFilter(projectHarness),
@@ -53,7 +54,9 @@ function exerciseConstrainedMode(doc) {
   search.value = "#5";
   search.dispatchEvent(new Event("input", { bubbles: true }));
   const searchable = visibleTableKeys().join(",") === "acme/widgets#5";
+  doc.querySelector("#view-table").click();
   doc.querySelector('tr[data-node-key="acme/widgets#5"] button').click();
+  doc.querySelector("#view-graph").click();
   search.value = "";
   search.dispatchEvent(new Event("input", { bubbles: true }));
   const neighborhood = visibleGraphKeys().join(",") === "acme/widgets#4,acme/widgets#5";
@@ -74,7 +77,9 @@ function exerciseConstrainedMode(doc) {
   priority.dispatchEvent(new Event("change", { bubbles: true }));
   const completeFilteredTable = visibleGraphKeys().length === 0
     && visibleTableKeys().join(",") === "acme/widgets#2";
+  doc.querySelector("#view-table").click();
   doc.querySelector('tr[data-node-key="acme/widgets#2"] button').click();
+  doc.querySelector("#view-graph").click();
   const filteredSelection = visibleGraphKeys().join(",") === "acme/widgets#2"
     && visibleTableKeys().join(",") === "acme/widgets#2";
 
@@ -100,7 +105,9 @@ function exerciseConstrainedMode(doc) {
   const cleared = visibleGraphKeys().join(",") === "acme/widgets#1"
     && visibleTableKeys().length === data.nodes.length
     && doc.querySelectorAll(".relationship-upstream, .relationship-root").length === 0;
+  doc.querySelector("#view-table").click();
   doc.querySelector('tr[data-node-key="acme/widgets#5"] button').click();
+  doc.querySelector("#view-graph").click();
   const sizeControl = doc.querySelector("#node-size-metric");
   sizeControl.value = "pagerank_bucket";
   sizeControl.dispatchEvent(new Event("change", { bubbles: true }));
@@ -345,6 +352,7 @@ function exerciseRelationships(harness) {
 
 function exerciseKeyboardAndZoom(harness) {
   const { doc } = harness;
+  doc.querySelector("#view-table").click();
   const firstRowButton = doc.querySelector('tr[data-node-key="acme/widgets#1"] button');
   firstRowButton.focus();
   firstRowButton.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
@@ -352,10 +360,12 @@ function exerciseKeyboardAndZoom(harness) {
   doc.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
   const keyboardSelected = doc.querySelector("#issue-details").dataset.selectedKey
     === "acme/widgets#2";
+  doc.querySelector("#view-graph").click();
+  const beforeZoom = Number(doc.querySelector("#graph-canvas").dataset.zoom);
   doc.querySelector("#zoom-in").click();
   return {
     keyboard_navigation: keyboardMoved && keyboardSelected,
-    zoom: Number(doc.querySelector("#graph-canvas").dataset.zoom) > 1
+    zoom: Number(doc.querySelector("#graph-canvas").dataset.zoom) > beforeZoom
   };
 }
 
@@ -368,7 +378,7 @@ function exerciseHostileText(harness) {
       .includes("<script>alert(1)</script>")
       && doc.querySelector("#issue-details").textContent
         .includes("area:<img src=x onerror=alert(2)>"),
-    no_injected_elements: doc.querySelectorAll("script").length === 5
+    no_injected_elements: doc.querySelectorAll("script").length === 6
       && doc.querySelectorAll("img").length === 0
   };
 }
@@ -477,7 +487,7 @@ function exerciseOutcomes({ doc, data }) {
   const historyNode = doc.querySelector('.graph-node[data-node-key="acme/widgets#3"]');
   const historyReadable = !historyNode.classList.contains("unresolved")
     && historyNode.querySelector(".node-summary").textContent.includes("#3")
-    && historyNode.querySelector("circle").getBoundingClientRect().width >= 15
+    && historyNode.querySelector("circle").getBoundingClientRect().width >= 7.5
     && doc.querySelector("#issue-details").textContent.includes("History (not operational)");
   const constrainedDoc = constrainedFrame.contentDocument;
   constrainedDoc.querySelector('[data-work-view="completed"]').click();
@@ -500,5 +510,77 @@ function exerciseOutcomes({ doc, data }) {
     completed_filter_and_details: filtered && inspected,
     closed_empty_state: empty,
     completion_to_recommendation_preserves_analysis: resumed
+  };
+}
+
+function exerciseCameraAndLayouts(harness) {
+  const { doc, canonicalArtifact, select } = harness;
+  harness.clear();
+  doc.querySelector("#view-graph").click();
+  const canvas = doc.querySelector("#graph-canvas");
+  const presentation = JSON.parse(doc.querySelector("#graph-presentation-data").textContent);
+  const decision = doc.querySelector("#recommendation-status").textContent;
+  const node = () => doc.querySelector('.graph-node[data-node-key="acme/widgets#1"]');
+  const position = presentation.network_positions[node().dataset.nodeKey];
+  const networkMatches = node().dataset.displayX === String(position.x)
+    && node().dataset.displayY === String(position.y);
+  select("#graph-layout", "layers");
+  const layersMatch = node().dataset.displayX === node().dataset.sourceX
+    && node().dataset.displayY === node().dataset.sourceY;
+  select("#graph-layout", "network");
+  const geometry = [...doc.querySelectorAll(".graph-node")].map((element) => element.getAttribute("transform")).join(";");
+  const before = Number(canvas.dataset.panX);
+  canvas.focus();
+  canvas.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+  const keyboardPan = Number(canvas.dataset.panX) === before - 48;
+  const rect = canvas.getBoundingClientRect();
+  const pointerBefore = Number(canvas.dataset.panX);
+  canvas.dispatchEvent(new PointerEvent("pointerdown", { pointerId: 7, button: 0, clientX: rect.x + 20, clientY: rect.y + 20, bubbles: true }));
+  canvas.dispatchEvent(new PointerEvent("pointermove", { pointerId: 7, clientX: rect.x + 65, clientY: rect.y + 45, bubbles: true }));
+  canvas.dispatchEvent(new PointerEvent("pointerup", { pointerId: 7, bubbles: true }));
+  const pointerPan = Number(canvas.dataset.panX) === pointerBefore + 45 && !canvas.dataset.dragging;
+  const beforeWheel = Number(canvas.dataset.zoom);
+  const wheel = new WheelEvent("wheel", { deltaY: -100, clientX: rect.x + 85, clientY: rect.y + 95, bubbles: true, cancelable: true });
+  const anchor = { x: wheel.clientX - rect.left, y: wheel.clientY - rect.top };
+  const worldX = (anchor.x - Number(canvas.dataset.panX)) / beforeWheel;
+  const worldY = (anchor.y - Number(canvas.dataset.panY)) / beforeWheel;
+  canvas.dispatchEvent(wheel);
+  const wheelZoom = Number(canvas.dataset.zoom) > beforeWheel
+    && Math.abs((anchor.x - Number(canvas.dataset.panX)) / Number(canvas.dataset.zoom) - worldX) < 1e-8
+    && Math.abs((anchor.y - Number(canvas.dataset.panY)) / Number(canvas.dataset.zoom) - worldY) < 1e-8;
+  const beforePinch = Number(canvas.dataset.zoom);
+  canvas.dispatchEvent(new PointerEvent("pointerdown", { pointerId: 11, pointerType: "touch", button: 0, clientX: rect.x + 100, clientY: rect.y + 100, bubbles: true }));
+  canvas.dispatchEvent(new PointerEvent("pointerdown", { pointerId: 12, pointerType: "touch", button: 0, clientX: rect.x + 200, clientY: rect.y + 100, bubbles: true }));
+  canvas.dispatchEvent(new PointerEvent("pointermove", { pointerId: 12, pointerType: "touch", clientX: rect.x + 250, clientY: rect.y + 100, bubbles: true }));
+  const pinchZoom = Number(canvas.dataset.zoom) > beforePinch;
+  canvas.dispatchEvent(new PointerEvent("pointerup", { pointerId: 11, bubbles: true }));
+  canvas.dispatchEvent(new PointerEvent("pointerup", { pointerId: 12, bubbles: true }));
+  doc.querySelector("#zoom-fit").click();
+  const fitAll = [...doc.querySelectorAll(".graph-node circle")].every((circle) => {
+    const bounds = circle.getBoundingClientRect();
+    return bounds.left >= rect.left && bounds.right <= rect.right && bounds.top >= rect.top && bounds.bottom <= rect.bottom;
+  });
+  const geometryPreserved = geometry === [...doc.querySelectorAll(".graph-node")].map((element) => element.getAttribute("transform")).join(";");
+  doc.querySelector("#expand-map").click();
+  const expanded = doc.body.dataset.mapExpanded === "true" && doc.activeElement === canvas
+    && doc.querySelector(".overview").inert && doc.querySelector(".explorer").getAttribute("aria-modal") === "true";
+  node().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  const selected = doc.querySelector("#issue-details").dataset.selectedKey === "acme/widgets#1"
+    && doc.querySelectorAll(".graph-edge.selected-connection").length === 2;
+  canvas.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  const dismissed = !doc.querySelector("#issue-details").dataset.selectedKey;
+  canvas.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  const exited = doc.body.dataset.mapExpanded === "false" && doc.activeElement.id === "expand-map" && !doc.querySelector(".overview").inert;
+  const tableVisible = doc.querySelector("#graph-table").getBoundingClientRect().height > 0;
+  return {
+    layouts_use_precomputed_positions: networkMatches && layersMatch,
+    layout_and_camera_preserve_canonical_analysis: geometryPreserved && canonicalArtifact === JSON.stringify(readGraph(doc)) && decision === doc.querySelector("#recommendation-status").textContent,
+    camera_keyboard_pan: keyboardPan,
+    camera_pointer_pan: pointerPan,
+    camera_anchored_wheel_zoom: wheelZoom,
+    camera_touch_pinch_zoom: pinchZoom && !canvas.dataset.dragging,
+    camera_fit_shows_all_nodes: fitAll,
+    expanded_map_keyboard_exit_and_inspection: expanded && selected && dismissed && exited,
+    accessible_table_remains_visible: tableVisible
   };
 }

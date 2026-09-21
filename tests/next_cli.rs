@@ -47,6 +47,7 @@ fn offline_priority_activates_a_bounded_p0_route_and_marks_its_rollout() {
             "p0",
             "--json",
         ])
+        .env("GRIT_NO_KEYRING", "1")
         .env("GRIT_STATE_DIR", state.path())
         .env("GRIT_GITHUB_API_URL", &api_url)
         .env("GH_TOKEN", "test-token")
@@ -590,6 +591,7 @@ fn delayed_cascade_survives_one_hundred_twenty_nine_better_immediate_results() {
             "p1",
             "--json",
         ])
+        .env("GRIT_NO_KEYRING", "1")
         .env("GRIT_STATE_DIR", state.path())
         .env("GRIT_GITHUB_API_URL", &api_url)
         .env("GH_TOKEN", "test-token")
@@ -1301,6 +1303,7 @@ fn empty_graph_omits_pagerank_globally_and_out_of_range_horizon_is_rejected() {
 
     let unsupported = Command::new(env!("CARGO_BIN_EXE_grit"))
         .args(["next", "--repo", "acme/empty", "--horizon", "4", "--json"])
+        .env("GRIT_NO_KEYRING", "1")
         .env("GRIT_STATE_DIR", state.path())
         .env("PATH", "")
         .output()
@@ -1412,6 +1415,7 @@ fn next_default_human_command(state: &TempDir, api_url: &str, repository: &str) 
     command.args(["next", "--repo", repository]);
     command
         .env("GRIT_GITHUB_API_URL", api_url)
+        .env("GRIT_NO_KEYRING", "1")
         .env("GRIT_STATE_DIR", state.path())
         .env_remove("GH_TOKEN")
         .env("PATH", "");
@@ -1432,6 +1436,7 @@ fn next_command_with_horizon(
     }
     command
         .env("GRIT_GITHUB_API_URL", api_url)
+        .env("GRIT_NO_KEYRING", "1")
         .env("GRIT_STATE_DIR", state.path())
         .env("PATH", "");
     if online {
@@ -1469,6 +1474,7 @@ fn ready_command(state: &TempDir, api_url: &str, repository: &str) -> Command {
     command.args(["ready", "--repo", repository, "--json"]);
     command
         .env("GRIT_GITHUB_API_URL", api_url)
+        .env("GRIT_NO_KEYRING", "1")
         .env("GRIT_STATE_DIR", state.path())
         .env_remove("GH_TOKEN")
         .env("PATH", "");

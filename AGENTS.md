@@ -9,6 +9,8 @@ do not invent an Issue or an approval requirement for routine work.
 ## Repository map
 
 - `src/cli.rs`: argument parsing, command orchestration, and output envelopes.
+- `src/auth.rs`, `src/auth/`: authentication, device authorization, and
+  host-scoped secure credential storage.
 - `src/github.rs`, `src/synchronization.rs`, `src/dependency_events.rs`: GitHub
   access, incremental continuity, and full-refresh fallback.
 - `src/model.rs`, `src/store.rs`, `src/atomic_file.rs`: normalized data and
@@ -54,6 +56,8 @@ responsible module over expanding unrelated CLI orchestration.
   merely because its version string matches; build it from the release commit.
 - Use mocked GitHub and temporary state in tests. Never point tests at a real
   repository or a user's existing replica/outbox.
+- Set `GRIT_NO_KEYRING=1` in CLI fixtures so tests cannot discover an operator's
+  saved login. Auth unit tests inject their own HTTP and credential-store fakes.
 - Run the relevant checks from `CONTRIBUTING.md`. Changes to generated HTML
   require real browser verification, including keyboard and mobile behavior.
   Public renderer changes also require the sealing and browser-egress tests.

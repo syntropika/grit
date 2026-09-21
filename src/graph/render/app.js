@@ -59,7 +59,12 @@
     highlightedEdges: new Map(),
     recommendationSelected: false
   };
+  let layoutMode = presentation.network_positions ? "network" : "layers";
+  document.body.dataset.layout = layoutMode;
   let zoom = 1;
+  let labelZoom = null;
+  let mapOrigin = { x: 0, y: 0 };
+  const camera = globalThis.GritGraphCamera.create(canvas, viewport, updateCameraLabels);
 
   const initialRenderStartedAt = performance.now();
   renderGraph(networkView.current(), "initial overview");
@@ -68,6 +73,7 @@
   populateControls();
   bindControls();
   applyView();
+  camera.fit();
   document.body.getBoundingClientRect();
   document.documentElement.dataset.gritLoadMs = applicationStartedAt.toFixed(3);
   document.documentElement.dataset.gritRenderMs = initialRenderDuration.toFixed(3);
@@ -90,12 +96,8 @@
     const marginX = 80;
     const marginY = 70;
     const { minX, minY, width, height } = positionBounds(renderedNodes);
-    canvas.setAttribute(
-      "viewBox",
-      `0 0 ${Math.max(520, width + 260)} ${Math.max(380, height + 150)}`
-    );
-    canvas.setAttribute("width", String(Math.max(520, width + 260)));
-    canvas.setAttribute("height", String(Math.max(380, height + 150)));
+    mapOrigin = { x: minX - marginX, y: minY - marginY };
+    camera.setBounds({ x: marginX - 30, y: marginY - 50, width: Math.max(80, width + 60), height: Math.max(80, height + 100) });
 
     for (const edge of graph.edges) {
       if (!keys.has(edge.blocker) || !keys.has(edge.blocked)) continue;
@@ -106,22 +108,23 @@
       line.classList.add("graph-edge");
       line.dataset.blocker = edge.blocker;
       line.dataset.blocked = edge.blocked;
-      line.setAttribute("x1", blocker.position.x - minX + marginX);
-      line.setAttribute("y1", blocker.position.y - minY + marginY);
-      line.setAttribute("x2", blocked.position.x - minX + marginX);
-      line.setAttribute("y2", blocked.position.y - minY + marginY);
+      line.setAttribute("x1", displayPosition(blocker).x - minX + marginX);
+      line.setAttribute("y1", displayPosition(blocker).y - minY + marginY);
+      line.setAttribute("x2", displayPosition(blocked).x - minX + marginX);
+      line.setAttribute("y2", displayPosition(blocked).y - minY + marginY);
       edgeElementsByKey.set(query.edgeKey(edge.blocker, edge.blocked), line);
       edgeLayer.append(line);
     }
 
     const labels = new Map();
     for (const node of renderedNodes) {
+      const position = displayPosition(node);
       const labelKey = query.layerKey(node);
       if (!labels.has(labelKey)) {
         labels.set(labelKey, {
           text: node.state === "closed" ? "Closed history" : node.position.layer === null ? "Unresolved / SCC" : `Layer ${node.position.layer}`,
-          x: node.position.x - minX + marginX,
-          y: node.position.y - minY + marginY - 36
+          x: position.x - minX + marginX,
+          y: position.y - minY + marginY - 36
         });
       }
 
@@ -132,9 +135,11 @@
       group.dataset.nodeKey = node.key;
       group.dataset.sourceX = String(node.position.x);
       group.dataset.sourceY = String(node.position.y);
+      group.dataset.displayX = String(position.x);
+      group.dataset.displayY = String(position.y);
       group.setAttribute(
         "transform",
-        `translate(${node.position.x - minX + marginX} ${node.position.y - minY + marginY})`
+        `translate(${position.x - minX + marginX} ${position.y - minY + marginY})`
       );
       group.setAttribute("tabindex", "0");
       group.setAttribute("role", "button");
@@ -158,6 +163,8 @@
         summary.setAttribute("y", "4");
         const shortTitle = (node.title || "External blocker").slice(0, 31);
         summary.textContent = `${node.number == null ? "Draft" : `#${node.number}`} ${shortTitle}${(node.title || "").length > 31 ? "…" : ""}`;
+        summary.dataset.fullLabel = summary.textContent;
+        summary.dataset.shortLabel = node.number == null ? "Draft" : `#${node.number}`;
         group.append(summary);
       }
       group.addEventListener("click", () => selectNode(node.key));
@@ -196,21 +203,27 @@
     }
     applyVisualMetrics();
     if (view.recommendationSelected) applyRecommendationHighlights();
+    highlightConnections(detailPanel.dataset.selectedKey);
     updateNetworkStatus(description);
+    camera.fit();
+  }
+
+  function displayPosition(node) {
+    return layoutMode === "network" ? (presentation.network_positions?.[node.key] || node.position) : node.position;
   }
 
   function positionBounds(nodes) {
     if (nodes.length === 0) return { minX: 0, minY: 0, width: 0, height: 0 };
-    let minX = nodes[0].position.x;
-    let minY = nodes[0].position.y;
+    let minX = displayPosition(nodes[0]).x;
+    let minY = displayPosition(nodes[0]).y;
     let maxX = minX;
     let maxY = minY;
     for (let index = 1; index < nodes.length; index += 1) {
       const node = nodes[index];
-      minX = Math.min(minX, node.position.x);
-      minY = Math.min(minY, node.position.y);
-      maxX = Math.max(maxX, node.position.x);
-      maxY = Math.max(maxY, node.position.y);
+      minX = Math.min(minX, displayPosition(node).x);
+      minY = Math.min(minY, displayPosition(node).y);
+      maxX = Math.max(maxX, displayPosition(node).x);
+      maxY = Math.max(maxY, displayPosition(node).y);
     }
     return { minX, minY, width: maxX - minX, height: maxY - minY };
   }
@@ -272,6 +285,43 @@
   }
 
   function bindControls() {
+    const layoutControl = document.querySelector("#graph-layout");
+    layoutControl.value = layoutMode;
+    layoutControl.disabled = !presentation.network_positions;
+    layoutControl.addEventListener("change", () => {
+      layoutMode = layoutControl.value;
+      document.body.dataset.layout = layoutMode;
+      renderGraph(networkView.current(), "layout changed");
+      applyView();
+      fitVisibleGraph();
+    });
+    document.querySelector("#expand-map").addEventListener("click", () => expandMap());
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        if (detailPanel.dataset.selectedKey) {
+          clearSelection();
+          if (document.body.dataset.mapExpanded === "true") canvas.focus({ preventScroll: true });
+        }
+        else if (document.body.dataset.mapExpanded === "true") expandMap(false);
+      }
+      if (event.key === "/" && !event.target.matches("input, select, textarea") && document.body.dataset.mapExpanded !== "true") {
+        event.preventDefault();
+        search.focus();
+      }
+      if (event.key === "Tab" && document.body.dataset.mapExpanded === "true") {
+        const targets = [...document.querySelector(".explorer").querySelectorAll("button, a, select, [tabindex='0']")]
+          .filter((target) => target.getBoundingClientRect().width && !target.disabled);
+        const first = targets[0];
+        const last = targets[targets.length - 1];
+        if (event.shiftKey && (document.activeElement === first || !targets.includes(document.activeElement))) {
+          event.preventDefault();
+          last?.focus();
+        } else if (!event.shiftKey && (document.activeElement === last || !targets.includes(document.activeElement))) {
+          event.preventDefault();
+          first?.focus();
+        }
+      }
+    });
     for (const button of document.querySelectorAll("[data-work-view]")) {
       button.addEventListener("click", () => showOutcome(button.dataset.workView));
     }
@@ -291,7 +341,7 @@
       if (first) {
         event.preventDefault();
         selectNode(first.dataset.nodeKey);
-        first.focus();
+        graphElement(first.dataset.nodeKey)?.focus();
       }
     });
     for (const filter of query.filters) {
@@ -306,9 +356,10 @@
       if (button) selectNode(button.dataset.nodeKey);
     });
     tableBody.addEventListener("keydown", handleTableKeyboard);
-    document.querySelector("#zoom-in").addEventListener("click", () => setZoom(zoom + 0.2));
-    document.querySelector("#zoom-out").addEventListener("click", () => setZoom(zoom - 0.2));
+    document.querySelector("#zoom-in").addEventListener("click", () => setZoom(zoom * 1.25));
+    document.querySelector("#zoom-out").addEventListener("click", () => setZoom(zoom / 1.25));
     document.querySelector("#zoom-reset").addEventListener("click", () => setZoom(1));
+    document.querySelector("#zoom-fit").addEventListener("click", fitVisibleGraph);
     document.querySelector("#show-initial-network").addEventListener("click", () => {
       renderGraph(networkView.reset(), "initial overview");
       applyView();
@@ -380,6 +431,7 @@
     const recommendation = analysis.next.recommendation;
     if (!recommendation) return;
     showOutcome("all");
+    document.querySelector("#graph-region").scrollIntoView({ block: "start" });
     view.recommendationSelected = true;
     selectNode(recommendation.first_issue.key);
     applyRecommendationHighlights();
@@ -422,6 +474,7 @@
       circle.setAttribute("r", radius.toFixed(2));
       element.dataset.sizeMetric = metric;
       element.dataset.sizeValue = String(value);
+      element.dataset.baseRadius = radius.toFixed(2);
       for (const className of [...element.classList]) {
         if (className.startsWith("color-")) element.classList.remove(className);
       }
@@ -440,6 +493,7 @@
         return item;
       })
     );
+    updateCameraLabels({ zoom }, true);
   }
 
   function colorClass(node, metric) {
@@ -493,6 +547,7 @@
     if (detailPanel.dataset.selectedKey && !visibleKeys.has(detailPanel.dataset.selectedKey)) {
       clearSelection();
     }
+    document.querySelector("#map-node-count").textContent = `${visibleNetworkCount} nodes · ${[...edgeLayer.children].filter((edge) => !edge.hasAttribute("hidden")).length} connections`;
   }
 
   function matchesOutcome(node) {
@@ -513,6 +568,7 @@
     applyView();
     const label = outcome === "not_planned" ? "not planned" : outcome === "other" ? "other closed" : outcome;
     viewStatus.textContent = `Showing ${label} Issues. Recommendations still use open work only.`;
+    fitVisibleGraph();
   }
 
   function stateLabel(node) {
@@ -556,16 +612,9 @@
       if (element.matches("button, .graph-node")) element.setAttribute("aria-pressed", String(selected));
     }
     renderDetails(node);
-    const selectedElement = graphElement(key);
-    if (selectedElement) {
-      const frame = document.querySelector(".graph-frame");
-      const nodeBounds = selectedElement.getBoundingClientRect();
-      const frameBounds = frame.getBoundingClientRect();
-      frame.scrollBy({
-        left: nodeBounds.left - frameBounds.left - frame.clientWidth / 3,
-        top: nodeBounds.top - frameBounds.top - frame.clientHeight / 2
-      });
-    }
+    camera.focus({ x: displayPosition(node).x - mapOrigin.x, y: displayPosition(node).y - mapOrigin.y });
+    document.body.dataset.detailsOpen = "true";
+    highlightConnections(key);
   }
 
   function updateNetworkStatus(description) {
@@ -577,6 +626,8 @@
 
   function clearSelection() {
     delete detailPanel.dataset.selectedKey;
+    document.body.dataset.detailsOpen = "false";
+    highlightConnections(null);
     for (const element of document.querySelectorAll("[data-node-key]")) {
       element.classList.remove("selected");
       if (element.matches("button, .graph-node")) element.setAttribute("aria-pressed", "false");
@@ -612,7 +663,13 @@
     appendDetail(details, "PageRank bucket", node.pagerank_bucket == null ? "—" : String(node.pagerank_bucket));
     const projects = query.projectsFor(node);
     if (projects.length > 0) appendDetail(details, "Projects", projects.join(", "));
-    detailPanel.append(heading, key, badge, details);
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "detail-close";
+    close.textContent = "Close";
+    close.setAttribute("aria-label", "Close Issue details");
+    close.addEventListener("click", () => { clearSelection(); canvas.focus({ preventScroll: true }); });
+    detailPanel.append(close, heading, key, badge, details);
     appendRelations("Blockers", query.blockersByKey.get(node.key) || []);
     appendRelations("Dependents", query.dependentsByKey.get(node.key) || []);
     if (node.url) {
@@ -748,8 +805,8 @@
     view.recommendationSelected = false;
     for (const row of tableRowsByKey.values()) row.classList.remove("causal-evidence");
     renderGraph(networkView.reset(), "initial overview");
-    setZoom(1);
     applyView();
+    fitVisibleGraph();
     viewStatus.textContent = "Canonical graph restored";
   }
 
@@ -778,10 +835,77 @@
   }
 
   function setZoom(value) {
-    zoom = Math.min(2, Math.max(0.6, Math.round(value * 10) / 10));
-    canvas.dataset.zoom = String(zoom);
-    viewport.setAttribute("transform", `scale(${zoom})`);
+    camera.zoomTo(value);
+  }
+
+  function updateCameraLabels(state, force = false) {
+    zoom = state.zoom;
+    if (!force && zoom === labelZoom) return;
+    labelZoom = zoom;
     document.querySelector("#zoom-reset").textContent = `${Math.round(zoom * 100)}%`;
+    const arrow = document.querySelector("#arrow");
+    arrow.setAttribute("markerWidth", String(7 / zoom));
+    arrow.setAttribute("markerHeight", String(7 / zoom));
+    for (const edge of edgeLayer.children) {
+      const target = query.nodesByKey.get(edge.dataset.blocked);
+      const end = displayPosition(target);
+      const startX = Number(edge.getAttribute("x1"));
+      const startY = Number(edge.getAttribute("y1"));
+      const dx = end.x - mapOrigin.x - startX;
+      const dy = end.y - mapOrigin.y - startY;
+      const distance = Math.hypot(dx, dy) || 1;
+      const radius = Math.max(4 / zoom, Number(graphElement(target.key)?.dataset.baseRadius || 9));
+      const remaining = Math.max(0, distance - radius - 2 / zoom) / distance;
+      edge.setAttribute("x2", String(startX + dx * remaining));
+      edge.setAttribute("y2", String(startY + dy * remaining));
+    }
+    for (const element of graphElementsByKey.values()) {
+      element.querySelector("circle").setAttribute("r", String(Math.max(4 / zoom, Number(element.dataset.baseRadius || 9))));
+      for (const label of element.querySelectorAll(".node-summary, .node-label")) {
+        label.setAttribute("font-size", String(12 / zoom));
+        label.setAttribute("x", String(16 / zoom));
+        label.setAttribute("y", String(4 / zoom));
+        label.setAttribute("stroke-width", String(3 / zoom));
+        if (label.classList.contains("node-summary")) label.textContent = layoutMode === "network" || zoom < 0.65 ? label.dataset.shortLabel : label.dataset.fullLabel;
+      }
+    }
+  }
+
+  function fitVisibleGraph() {
+    const nodes = graph.nodes.filter((node) => {
+      const element = graphElement(node.key);
+      return element && !element.hasAttribute("hidden");
+    });
+    const bounds = positionBounds(nodes);
+    camera.setBounds({ x: bounds.minX - mapOrigin.x - 30, y: bounds.minY - mapOrigin.y - 50, width: Math.max(80, bounds.width + 60), height: Math.max(80, bounds.height + 100) });
+    camera.fit();
+  }
+
+  function highlightConnections(key) {
+    const connected = new Set([...(query.blockersByKey.get(key) || []), ...(query.dependentsByKey.get(key) || [])]);
+    for (const [nodeKey, element] of graphElementsByKey) element.classList.toggle("connected", connected.has(nodeKey));
+    for (const edge of edgeLayer.children) edge.classList.toggle("selected-connection", edge.dataset.blocker === key || edge.dataset.blocked === key);
+  }
+
+  function expandMap(expanded = document.body.dataset.mapExpanded !== "true") {
+    document.body.dataset.mapExpanded = String(expanded);
+    const button = document.querySelector("#expand-map");
+    button.textContent = expanded ? "Exit expanded map" : "Expand map";
+    button.setAttribute("aria-expanded", String(expanded));
+    const explorer = document.querySelector(".explorer");
+    for (const element of document.querySelectorAll("main > :not(.explorer), .site-header, .site-footer, .skip-link")) element.inert = expanded;
+    if (expanded) {
+      explorer.setAttribute("role", "dialog");
+      explorer.setAttribute("aria-modal", "true");
+      explorer.setAttribute("aria-label", "Expanded dependency map");
+      canvas.focus({ preventScroll: true });
+    } else {
+      explorer.removeAttribute("role");
+      explorer.removeAttribute("aria-modal");
+      explorer.removeAttribute("aria-label");
+      button.focus({ preventScroll: true });
+    }
+    fitVisibleGraph();
   }
 
   function graphElement(key) {
