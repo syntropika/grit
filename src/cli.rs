@@ -1,4 +1,4 @@
-use std::env;
+use std::{env, path::PathBuf};
 
 use chrono::{SecondsFormat, Utc};
 use clap::{Parser, Subcommand};
@@ -12,6 +12,7 @@ use crate::{
         CreateLabelRequest, DependencyChange, DependencyIntent, GitHubClient, GitHubError,
         LabelCreation,
     },
+    graph::{ARTIFACT_SCHEMA_VERSION, GraphError, publish_site},
     model::{LocalReplica, ReplicaError},
     operational::{ExecutionScope, analyze_ready},
     priority::{
@@ -24,6 +25,7 @@ use crate::{
 
 const SYNC_SCHEMA_VERSION: &str = "grit.sync/v1";
 const READY_SCHEMA_VERSION: &str = "grit.ready/v1";
+const GRAPH_SCHEMA_VERSION: &str = "grit.graph/v1";
 const DEPENDENCY_MUTATION_SCHEMA_VERSION: &str = "grit.dependency-mutation/v1";
 const INIT_SCHEMA_VERSION: &str = "grit.init/v1";
 
@@ -36,6 +38,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Generate a deterministic static Issue graph site.
+    Graph {
+        /// Repository in OWNER/REPO form.
+        #[arg(long)]
+        repo: String,
+        /// Target directory for the complete static site.
+        #[arg(long)]
+        output: PathBuf,
+        /// Emit versioned machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
     /// Make one Issue blocked by another native GitHub Issue.
     Block {
         /// Issue to block in OWNER/REPO#NUMBER form.
@@ -93,6 +107,7 @@ enum Command {
 pub(crate) fn execute() -> Result<(), CliError> {
     let cli = Cli::parse();
     match cli.command {
+        Command::Graph { repo, output, json } => graph(&Repository::parse(&repo)?, &output, json),
         Command::Block { issue, by, json } => {
             mutate_dependency(&issue, &by, DependencyIntent::Block, json)
         }
@@ -107,6 +122,43 @@ pub(crate) fn execute() -> Result<(), CliError> {
             json,
         } => ready(&Repository::parse(&repo)?, assignee.as_deref(), json),
     }
+}
+
+fn graph(repository: &Repository, output: &std::path::Path, json: bool) -> Result<(), CliError> {
+    let (replica, source) = refresh_or_local(repository)?;
+    let site = publish_site(&replica, output)?;
+    let output_path = output.display().to_string();
+    let result = GraphOutput {
+        schema_version: GRAPH_SCHEMA_VERSION,
+        command: "graph",
+        repository: &replica.repository,
+        source,
+        synced_at: &replica.synced_at,
+        input_hash: &replica.input_hash,
+        output: &output_path,
+        artifact: GraphArtifactSummary {
+            schema_version: ARTIFACT_SCHEMA_VERSION,
+            node_count: site.node_count,
+            edge_count: site.edge_count,
+            artifact_hash: &site.artifact_hash,
+        },
+    };
+    if json {
+        serde_json::to_writer(std::io::stdout().lock(), &result).map_err(CliError::EncodeOutput)?;
+        println!();
+    } else {
+        println!(
+            "Generated {} nodes and {} Dependencies in {}",
+            site.node_count, site.edge_count, output_path
+        );
+        if source.is_fallback() {
+            eprintln!(
+                "warning: GitHub refresh failed; generated from Local replica at {}",
+                replica.synced_at
+            );
+        }
+    }
+    Ok(())
 }
 
 fn initialize(repository: &Repository, json: bool) -> Result<(), CliError> {
@@ -299,21 +351,7 @@ fn snapshot_summary(replica: &LocalReplica) -> SnapshotSummary<'_> {
 }
 
 fn ready(repository: &Repository, assignee: Option<&str>, json: bool) -> Result<(), CliError> {
-    let (replica, source) = match synchronize(repository) {
-        Ok(replica) => (replica, ReplicaSource::Live),
-        Err(refresh_error) => {
-            let store = ReplicaStore::discover(repository)?;
-            match store.load(repository) {
-                Ok(replica) => (replica, ReplicaSource::LocalFallback),
-                Err(replica_error) => {
-                    return Err(CliError::RefreshAndReplicaUnavailable {
-                        refresh: refresh_error.to_string(),
-                        replica: replica_error.to_string(),
-                    });
-                }
-            }
-        }
-    };
+    let (replica, source) = refresh_or_local(repository)?;
     let scope = assignee
         .map(ExecutionScope::Assignee)
         .unwrap_or(ExecutionScope::Available);
@@ -429,6 +467,22 @@ fn ready(repository: &Repository, assignee: Option<&str>, json: bool) -> Result<
     Ok(())
 }
 
+fn refresh_or_local(repository: &Repository) -> Result<(LocalReplica, ReplicaSource), CliError> {
+    match synchronize(repository) {
+        Ok(replica) => Ok((replica, ReplicaSource::Live)),
+        Err(refresh_error) => {
+            let store = ReplicaStore::discover(repository)?;
+            match store.load(repository) {
+                Ok(replica) => Ok((replica, ReplicaSource::LocalFallback)),
+                Err(replica_error) => Err(CliError::RefreshAndReplicaUnavailable {
+                    refresh: refresh_error.to_string(),
+                    replica: replica_error.to_string(),
+                }),
+            }
+        }
+    }
+}
+
 fn api_base_url() -> Result<Url, CliError> {
     let raw =
         env::var("GRIT_GITHUB_API_URL").unwrap_or_else(|_| "https://api.github.com/".to_owned());
@@ -466,6 +520,26 @@ struct SyncOutput<'a> {
     command: &'static str,
     repository: &'a str,
     snapshot: SnapshotSummary<'a>,
+}
+
+#[derive(Serialize)]
+struct GraphOutput<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    repository: &'a str,
+    source: ReplicaSource,
+    synced_at: &'a str,
+    input_hash: &'a str,
+    output: &'a str,
+    artifact: GraphArtifactSummary<'a>,
+}
+
+#[derive(Serialize)]
+struct GraphArtifactSummary<'a> {
+    schema_version: &'static str,
+    node_count: usize,
+    edge_count: usize,
+    artifact_hash: &'a str,
 }
 
 #[derive(Serialize)]
@@ -627,6 +701,8 @@ pub(crate) enum CliError {
     Store(#[from] StoreError),
     #[error(transparent)]
     Replica(#[from] ReplicaError),
+    #[error(transparent)]
+    Graph(#[from] GraphError),
     #[error("could not encode command JSON output: {0}")]
     EncodeOutput(serde_json::Error),
     #[error("GitHub refresh failed ({refresh}); no valid Local replica is available ({replica})")]

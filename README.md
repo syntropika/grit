@@ -4,15 +4,9 @@ Grit treats the Issues and native Dependencies in one GitHub Repository as a
 graph. GitHub remains the source of truth; Grit keeps a disposable Local
 replica so later analysis can be fast and work offline.
 
-The current executable tracer implements full and incremental synchronization
-plus Executable frontier enumeration from
-[Issue #2](https://github.com/syntropika/grit/issues/2) and
-[Issue #3](https://github.com/syntropika/grit/issues/3), with ordinary Issue
-changes from [Issue #4](https://github.com/syntropika/grit/issues/4),
-Dependency-event continuity from
-[Issue #5](https://github.com/syntropika/grit/issues/5), and canonical
-Declared priority support from
-[Issue #6](https://github.com/syntropika/grit/issues/6).
+Grit supports full and incremental synchronization, Dependency-event continuity,
+Executable frontier enumeration, canonical Declared priority initialization,
+native Dependency mutations, and deterministic static graph artifacts.
 
 ## Build and test
 
@@ -122,6 +116,28 @@ readback before atomically replacing the Local replica. Repeating either
 operation uses set semantics: an existing edge can be added again and an absent
 edge can be removed again without error. If the write outcome or readback is
 uncertain, the previous Local replica remains unchanged.
+
+## Generate a static graph artifact
+
+`grit graph` writes a complete static site without a live service or
+browser-side GitHub client:
+
+```bash
+grit graph --repo OWNER/REPO --output site/
+grit graph --repo OWNER/REPO --output site/ --json
+```
+
+The target contains `index.html`, `graph.json`, and `graph.schema.json`. The
+versioned JSON uses explicit `blocked` and `blocker` edge roles, normalized
+Issue fields, precomputed layered positions, operational counts, hashes, and
+provenance. Bodies, comments, raw API records, and Operation markers are not
+part of the artifact. The HTML is an accessible, script-free table with no
+remote assets.
+
+Generation validates the closed artifact model in a staging directory before
+replacing the target. Regenerating from the same effective Local replica is
+byte-stable. `synced_at` is the only time field and changes only when the input
+replica itself has a different synchronization timestamp.
 
 ## Product decisions
 

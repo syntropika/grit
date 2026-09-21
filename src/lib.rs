@@ -2,6 +2,7 @@ mod auth;
 mod cli;
 mod dependency_events;
 mod github;
+mod graph;
 mod model;
 mod operational;
 mod priority;
