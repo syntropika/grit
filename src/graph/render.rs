@@ -1,9 +1,8 @@
 use std::collections::BTreeMap;
 
 use schemars::schema_for;
-use serde::Serialize;
 
-use super::{GraphError, artifact::GraphArtifact};
+use super::{GraphError, artifact::GraphArtifact, serialization::pretty_json, text::escape_html};
 
 pub(super) fn graph_json(artifact: &GraphArtifact) -> Result<Vec<u8>, GraphError> {
     pretty_json(artifact)
@@ -89,7 +88,6 @@ pub(super) fn html(artifact: &GraphArtifact) -> Result<String, GraphError> {
         ],
     )
 }
-
 pub(super) fn stylesheet() -> &'static [u8] {
     include_bytes!("render/app.css")
 }
@@ -131,12 +129,6 @@ fn render_template(template: &str, values: &[(&str, String)]) -> Result<String, 
     Ok(output)
 }
 
-fn pretty_json<T: Serialize>(value: &T) -> Result<Vec<u8>, GraphError> {
-    let mut bytes = serde_json::to_vec_pretty(value).map_err(GraphError::EncodeArtifact)?;
-    bytes.push(b'\n');
-    Ok(bytes)
-}
-
 fn escape_script_data(value: &str) -> String {
     value
         .replace('&', "\\u0026")
@@ -144,13 +136,4 @@ fn escape_script_data(value: &str) -> String {
         .replace('>', "\\u003e")
         .replace('\u{2028}', "\\u2028")
         .replace('\u{2029}', "\\u2029")
-}
-
-fn escape_html(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
 }
