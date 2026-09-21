@@ -13,6 +13,7 @@ Issue graph with synchronized network and accessible table selection,
 composable filters, Dependency relationship isolation, and a bounded view for dense graphs.
 Public exports use a separate allowlisted model after a live Repository visibility check.
 Unavailable Priority updates are queued durably and projected into analysis with explicit Pending provenance.
+Structural plans share the same Working graph and cached decision as next.
 
 ## Build and test
 
@@ -191,6 +192,34 @@ and analysis-serialization timings in microseconds; Synchronization is
 explicitly excluded. Human profiling does not perform an unused JSON
 serialization. See [`docs/performance/next-v1.md`](docs/performance/next-v1.md) for
 the 5,000-Issue reference benchmark.
+
+## Inspect a structural plan
+
+`grit plan` exposes the exact `next/v1` decision together with immediate
+parallel capacity and counterfactual Dependency layers:
+
+```bash
+grit plan --repo OWNER/REPO
+grit plan --repo OWNER/REPO --assignee LOGIN --horizon 3 --json
+```
+
+`plan` and `next` share the same Working graph, ordered Pending mutations,
+Execution scope, search, and cache. Pending priorities affect both the selected
+rollout and structural Issue annotations. The plan decision preserves the same
+input hash, completeness fields, and operation provenance as `next`; dependency
+layers describe topology and do not predict scheduling or duration.
+
+`parallel_now` is the complete Executable frontier for the active Execution
+scope. `dependency_layers` covers every open Issue in the Repository: layer 0
+contains all current Ready Issues, and each later finite layer follows the
+latest layer of all its open blockers. Every Issue records assignment,
+Execution-scope eligibility, and whether it is Executable now.
+
+Cycles, opaque External blockers, unknown internal blockers, and their
+affected descendants remain in `unresolved`; Grit does not assign them a
+misleading finite layer. These layers describe dependency topology under
+unlimited structural capacity. They are not dates, worker rounds, an ETA, or
+a Critical Path. `plan/v1` therefore rejects `--workers` explicitly.
 
 ## Triage graph problems
 

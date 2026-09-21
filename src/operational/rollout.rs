@@ -1,13 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{ExecutionScope, IssueState, OperationalGraph};
-use crate::model::{BlockerScope, Dependency, Issue};
-
-enum BlockerResolution {
-    Satisfied,
-    Internal(u64),
-    OpaqueExternal,
-}
+use super::{BlockerResolution, ExecutionScope, IssueState, OperationalGraph};
+use crate::model::Issue;
 
 pub(crate) struct Completion {
     issue_number: u64,
@@ -69,33 +63,14 @@ impl<'a> OperationalGraph<'a> {
             return false;
         }
         self.dependencies_for(number).iter().all(|dependency| {
-            matches!(
-                self.blocker_resolution(dependency, completed),
-                BlockerResolution::Satisfied
-            )
+            match self.blocker_resolution(dependency) {
+                BlockerResolution::Satisfied => true,
+                BlockerResolution::InternalOpen(blocker) => completed.contains(&blocker),
+                BlockerResolution::ExternalOpen
+                | BlockerResolution::ExternalUnknown
+                | BlockerResolution::InternalUnknown => false,
+            }
         })
-    }
-
-    fn blocker_resolution(&self, dependency: &Dependency, completed: &[u64]) -> BlockerResolution {
-        match dependency.blocker.scope {
-            BlockerScope::Internal => {
-                let blocker = dependency.blocker.number;
-                if completed.contains(&blocker)
-                    || self.issue_state(blocker) == Some(IssueState::Closed)
-                {
-                    BlockerResolution::Satisfied
-                } else {
-                    BlockerResolution::Internal(blocker)
-                }
-            }
-            BlockerScope::External => {
-                if IssueState::parse(&dependency.blocker.state) == IssueState::Closed {
-                    BlockerResolution::Satisfied
-                } else {
-                    BlockerResolution::OpaqueExternal
-                }
-            }
-        }
     }
 }
 
@@ -144,13 +119,17 @@ impl<'graph, 'issues, 'scope> RolloutState<'graph, 'issues, 'scope> {
             let mut sole_blocker = None;
             let mut feasible = true;
             for dependency in self.graph.dependencies_for(*dependent) {
-                match self.graph.blocker_resolution(dependency, &self.completed) {
+                match self.graph.blocker_resolution(dependency) {
                     BlockerResolution::Satisfied => {}
-                    BlockerResolution::OpaqueExternal => {
+                    BlockerResolution::InternalOpen(blocker)
+                        if self.completed.contains(&blocker) => {}
+                    BlockerResolution::ExternalOpen
+                    | BlockerResolution::ExternalUnknown
+                    | BlockerResolution::InternalUnknown => {
                         feasible = false;
                         break;
                     }
-                    BlockerResolution::Internal(blocker) => match sole_blocker {
+                    BlockerResolution::InternalOpen(blocker) => match sole_blocker {
                         None => sole_blocker = Some(blocker),
                         Some(existing) if existing == blocker => {}
                         Some(_) => {
@@ -275,10 +254,12 @@ impl<'graph, 'issues, 'scope> RolloutState<'graph, 'issues, 'scope> {
         required: &mut BTreeSet<u64>,
     ) -> Option<()> {
         for dependency in self.graph.dependencies_for(issue_number) {
-            match self.graph.blocker_resolution(dependency, &self.completed) {
+            match self.graph.blocker_resolution(dependency) {
                 BlockerResolution::Satisfied => {}
-                BlockerResolution::OpaqueExternal => return None,
-                BlockerResolution::Internal(blocker) => {
+                BlockerResolution::InternalOpen(blocker) => {
+                    if self.completed.contains(&blocker) {
+                        continue;
+                    }
                     let blocker_issue = self.graph.issue(blocker)?;
                     if self.graph.issue_state(blocker) != Some(IssueState::Open)
                         || self.graph.cyclic_numbers.contains(&blocker)
@@ -293,6 +274,9 @@ impl<'graph, 'issues, 'scope> RolloutState<'graph, 'issues, 'scope> {
                         self.collect_open_prerequisites(blocker, maximum_size, required)?;
                     }
                 }
+                BlockerResolution::ExternalOpen
+                | BlockerResolution::ExternalUnknown
+                | BlockerResolution::InternalUnknown => return None,
             }
         }
         Some(())
@@ -331,7 +315,9 @@ impl IssueMask {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{BlockerIdentity, Dependency, IssueIdentity, LocalReplica, ReplicaError};
+    use crate::model::{
+        BlockerIdentity, BlockerScope, Dependency, IssueIdentity, LocalReplica, ReplicaError,
+    };
 
     #[test]
     fn rollouts_restore_nested_and_fanout_frontiers_in_lifo_order() -> Result<(), ReplicaError> {

@@ -17,13 +17,13 @@ mod search;
 
 use crate::{
     model::Issue,
-    operational::{ExecutionScope, OperationalGraph},
+    operational::{ExecutionScope, PreparedRepository},
     priority::PriorityComparison,
     working_graph::WorkingGraph,
 };
 pub(crate) use cache::RankingCache;
 use decision::{PriorityProfile, RankingMode, StepPriority};
-pub(crate) use output::NextAnalysis;
+pub(crate) use output::{NextAnalysis, PlanDecision};
 use output::{NextResult, NextSummary};
 use pagerank::PageRank;
 
@@ -137,15 +137,30 @@ pub(crate) fn analyze_profiled(
     cache: &mut RankingCache,
 ) -> AnalysisRun {
     let total_started = Instant::now();
-    let replica = working.replica();
-    let (graph, graph_timings) = OperationalGraph::prepare_profiled(replica);
+    let (prepared, graph_timings) = PreparedRepository::prepare_profiled(working);
+    let mut run = analyze_prepared(&prepared, scope, horizon, cache);
+    run.profile.graph_preparation = graph_timings.graph_preparation;
+    run.profile.scc_detection = graph_timings.scc_detection;
+    run.profile.total = total_started.elapsed();
+    run
+}
+
+pub(crate) fn analyze_prepared(
+    prepared: &PreparedRepository<'_>,
+    scope: ExecutionScope<'_>,
+    horizon: u8,
+    cache: &mut RankingCache,
+) -> AnalysisRun {
+    let total_started = Instant::now();
+    let working = prepared.working();
+    let graph = prepared.graph();
     let readiness_started = Instant::now();
     let ready = graph.analyze_ready(scope);
     let readiness = readiness_started.elapsed();
     let input_hash = effective_input_hash(working, scope);
     let cache_key = ranking_cache_key(&input_hash, horizon);
     let cache_lookup_started = Instant::now();
-    let cached = cache.lookup(&cache_key, working, &graph, scope, horizon);
+    let cached = cache.lookup(&cache_key, working, graph, scope, horizon);
     let cache_lookup = cache_lookup_started.elapsed();
     let cache_hit = cached.is_some();
     let mut pagerank_duration = Duration::ZERO;
@@ -156,12 +171,12 @@ pub(crate) fn analyze_profiled(
         cached
     } else {
         let pagerank_started = Instant::now();
-        let pagerank = PageRank::calculate(&graph);
+        let pagerank = PageRank::calculate(graph);
         pagerank_duration = pagerank_started.elapsed();
         let search_started = Instant::now();
         let search = search::evaluate(
             working,
-            &graph,
+            graph,
             scope,
             pagerank.as_ref(),
             horizon,
@@ -220,7 +235,7 @@ pub(crate) fn analyze_profiled(
     });
     let recommendation = ranked_results.next();
     let alternatives: Vec<_> = ranked_results.take(ALTERNATIVE_LIMIT).collect();
-    let summary = NextSummary::from_graph(&ready, candidate_count, &graph);
+    let summary = NextSummary::from_graph(&ready, candidate_count, graph);
     let analysis = NextAnalysis::from_search(NextResult {
         input_hash,
         pending: working.is_pending(),
@@ -242,8 +257,8 @@ pub(crate) fn analyze_profiled(
     AnalysisRun {
         analysis,
         profile: AnalysisProfile {
-            graph_preparation: graph_timings.graph_preparation,
-            scc_detection: graph_timings.scc_detection,
+            graph_preparation: Duration::ZERO,
+            scc_detection: Duration::ZERO,
             readiness,
             cache_lookup,
             pagerank: pagerank_duration,
