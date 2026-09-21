@@ -99,7 +99,7 @@ pub(super) struct ArtifactNode {
     pub(super) state: String,
     pub(super) readiness: Readiness,
     pub(super) assignees: Vec<String>,
-    labels: Vec<String>,
+    pub(super) labels: Vec<String>,
     pub(super) position: Position,
     provenance: ElementProvenance,
 }

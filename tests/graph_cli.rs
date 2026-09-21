@@ -38,6 +38,8 @@ fn graph_generates_a_deterministic_valid_offline_site_without_raw_records() {
     assert!(!output_directory.join("stale.txt").exists());
     let graph_bytes = fs::read(output_directory.join("graph.json")).expect("graph JSON");
     let html_bytes = fs::read(output_directory.join("index.html")).expect("graph HTML");
+    let stylesheet_bytes = fs::read(output_directory.join("app.css")).expect("graph stylesheet");
+    let javascript_bytes = fs::read(output_directory.join("app.js")).expect("graph JavaScript");
     let schema_bytes = fs::read(output_directory.join("graph.schema.json")).expect("graph schema");
     let graph: Value = serde_json::from_slice(&graph_bytes).expect("artifact JSON");
     assert_eq!(graph["schema_version"], "grit.graph-artifact/v1");
@@ -102,10 +104,17 @@ fn graph_generates_a_deterministic_valid_offline_site_without_raw_records() {
     assert!(html.contains("<table"));
     assert!(html.contains("<caption>Issue graph for acme/widgets</caption>"));
     assert!(html.contains("Root &lt;script&gt;alert(1)&lt;/script&gt;"));
+    assert!(html.contains("area:&lt;img src=x onerror=alert(2)&gt;"));
     assert!(!html.contains("<script>alert(1)</script>"));
+    assert!(!html.contains("<img src=x onerror=alert(2)>"));
     assert!(!html.contains("<script src=\"http"));
     assert!(!html.contains("<link rel=\"stylesheet\" href=\"http"));
     assert!(html.contains("href=\"./graph.json\""));
+    assert!(html.contains("connect-src 'none'"));
+    assert!(html.contains("src=\"./app.js\""));
+    assert!(html.contains("href=\"./app.css\""));
+    assert!(!String::from_utf8_lossy(&javascript_bytes).contains("fetch("));
+    assert!(!String::from_utf8_lossy(&stylesheet_bytes).contains("url(http"));
 
     let schema: Value = serde_json::from_slice(&schema_bytes).expect("schema JSON");
     assert_eq!(schema["additionalProperties"], false);
@@ -134,6 +143,14 @@ fn graph_generates_a_deterministic_valid_offline_site_without_raw_records() {
     assert_eq!(
         fs::read(output_directory.join("graph.schema.json")).expect("regenerated schema"),
         schema_bytes
+    );
+    assert_eq!(
+        fs::read(output_directory.join("app.css")).expect("regenerated stylesheet"),
+        stylesheet_bytes
+    );
+    assert_eq!(
+        fs::read(output_directory.join("app.js")).expect("regenerated JavaScript"),
+        javascript_bytes
     );
 }
 
@@ -191,6 +208,102 @@ fn dependency_layers_follow_readiness_and_leave_cycles_unresolved() {
     assert_eq!(layer(&graph, 8), None);
     assert_eq!(layer(&graph, 9), None);
     mocks.assert();
+}
+
+#[test]
+#[ignore = "requires a Chrome-compatible browser; run explicitly as documented in README.md"]
+fn generated_site_is_a_keyboard_accessible_offline_graph_explorer() {
+    let mut github = Server::new();
+    let state = TempDir::new().expect("temporary state directory");
+    let workspace = TempDir::new().expect("temporary graph workspace");
+    let output_directory = workspace.path().join("site");
+    let mocks = mock_repository(
+        &mut github,
+        browser_issue_inventory(),
+        vec![
+            (1, "[]".to_owned()),
+            (2, blockers_for_two()),
+            (3, "[]".to_owned()),
+            (4, internal_blocker(5)),
+            (5, internal_blocker(4)),
+        ],
+    );
+    let generated = graph_command(&state, &github.url(), &output_directory)
+        .output()
+        .expect("graph command");
+    assert_success(&generated);
+    mocks.assert();
+
+    let harness = workspace.path().join("browser-test.html");
+    fs::write(
+        &harness,
+        "<!doctype html><html><body><iframe id=\"app\" src=\"./site/index.html\"></iframe><output id=\"result\">pending</output><script src=\"./browser-test.js\"></script></body></html>\n",
+    )
+    .expect("browser harness");
+    fs::write(
+        workspace.path().join("browser-test.js"),
+        include_str!("fixtures/graph_browser_harness.js"),
+    )
+    .expect("browser harness JavaScript");
+
+    let browser_profile = TempDir::new().expect("temporary browser profile");
+    let browser_binary = std::env::var_os("GRIT_BROWSER").unwrap_or_else(|| "google-chrome".into());
+    let browser = Command::new(browser_binary)
+        .arg("--headless=new")
+        .arg("--no-sandbox")
+        .arg("--disable-gpu")
+        .arg("--disable-background-networking")
+        .arg("--disable-component-update")
+        .arg("--disable-default-apps")
+        .arg("--disable-sync")
+        .arg("--metrics-recording-only")
+        .arg("--no-first-run")
+        .arg("--allow-file-access-from-files")
+        .arg("--host-resolver-rules=MAP * ~NOTFOUND")
+        .arg("--virtual-time-budget=3000")
+        .arg(format!(
+            "--user-data-dir={}",
+            browser_profile.path().display()
+        ))
+        .arg("--dump-dom")
+        .arg(format!("file://{}", harness.display()))
+        .output()
+        .expect("launch Google Chrome");
+    assert!(
+        browser.status.success(),
+        "Chrome stderr: {}",
+        String::from_utf8_lossy(&browser.stderr)
+    );
+    let dom = String::from_utf8(browser.stdout).expect("browser DOM");
+    let result = browser_result(&dom);
+    assert!(result.get("error").is_none(), "browser result: {result}");
+    let checks = result["checks"].as_object().expect("browser checks");
+    let expected_checks = [
+        "title_search",
+        "number_search",
+        "side_panel",
+        "canonical_link",
+        "precomputed_position",
+        "scc_position",
+        "labels_hidden_by_default",
+        "selected_label_only",
+        "keyboard_navigation",
+        "zoom",
+        "hostile_text_is_literal",
+        "no_injected_elements",
+    ];
+    assert_eq!(
+        checks.len(),
+        expected_checks.len(),
+        "browser result: {result}"
+    );
+    for name in expected_checks {
+        assert_eq!(
+            checks.get(name),
+            Some(&Value::Bool(true)),
+            "browser check {name} failed: {result}"
+        );
+    }
 }
 
 #[test]
@@ -331,6 +444,21 @@ fn issue_inventory() -> String {
     .to_string()
 }
 
+fn browser_issue_inventory() -> String {
+    json!([
+        issue(
+            1,
+            "Root <script>alert(1)</script><!-- grit:operation operation-123 -->",
+            "open"
+        ),
+        issue(2, "Dependent", "open"),
+        issue(3, "Historical", "closed"),
+        issue(4, "Cycle A", "open"),
+        issue(5, "Cycle B", "open")
+    ])
+    .to_string()
+}
+
 fn issue(number: u64, title: &str, state: &str) -> Value {
     json!({
         "id": number * 100,
@@ -343,7 +471,7 @@ fn issue(number: u64, title: &str, state: &str) -> Value {
         "html_url": format!("https://github.com/acme/widgets/issues/{number}"),
         "user": null,
         "assignees": [],
-        "labels": [{"id": 9000 + number, "node_id": format!("L_{number}"), "name": "area:core", "color": "123456", "description": null}],
+        "labels": [{"id": 9000 + number, "node_id": format!("L_{number}"), "name": "area:<img src=x onerror=alert(2)>", "color": "123456", "description": null}],
         "created_at": "2026-08-01T00:00:00Z",
         "updated_at": "2026-08-01T00:00:00Z",
         "closed_at": if state == "closed" { Some("2026-08-02T00:00:00Z") } else { None }
@@ -442,6 +570,16 @@ fn layer(graph: &Value, number: u64) -> Option<u64> {
         .get("position")
         .and_then(|position| position.get("layer"))
         .and_then(Value::as_u64)
+}
+
+fn browser_result(dom: &str) -> Value {
+    let marker = "<output id=\"result\">";
+    let start = dom.find(marker).expect("browser result element") + marker.len();
+    let end = dom[start..]
+        .find("</output>")
+        .map(|offset| start + offset)
+        .expect("browser result closing tag");
+    serde_json::from_str(&dom[start..end]).expect("browser result JSON")
 }
 
 fn assert_success(output: &std::process::Output) {
