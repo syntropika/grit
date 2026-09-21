@@ -33,7 +33,10 @@ impl<'a> WorkingGraph<'a> {
             if !issue_numbers.contains(&issue_number) {
                 return Err(WorkingGraphError::MissingIssue(issue_number));
             }
-            priority_overrides.insert(issue_number, operation.desired().clone());
+            priority_overrides.insert(issue_number, operation.effective_priority().clone());
+            if !operation.state().is_pending_intent() {
+                continue;
+            }
             let operation_id = operation.id().to_owned();
             operation_ids.push(operation_id.clone());
             operation_ids_by_issue
@@ -74,7 +77,7 @@ impl<'a> WorkingGraph<'a> {
     }
 
     pub(crate) fn priority_is_pending(&self, issue_number: u64) -> bool {
-        self.priority_overrides.contains_key(&issue_number)
+        self.operation_ids_by_issue.contains_key(&issue_number)
     }
 
     pub(crate) fn priority(&self, issue: &Issue) -> PriorityState {

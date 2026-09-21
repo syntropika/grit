@@ -11,6 +11,7 @@ mod plan;
 mod priority;
 mod priority_update;
 mod ranking;
+mod reconciliation;
 mod replica_sync;
 mod repository;
 mod store;

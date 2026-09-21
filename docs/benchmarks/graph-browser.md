@@ -1,8 +1,11 @@
 # Static graph browser benchmark
 
-**Measured:** 2026-08-07  
-**Implementation:** Issue #17  
-**Browser:** Google Chrome 150.0.7871.186, headless  
+**Measured:** 2026-08-07
+
+**Implementation:** Issue #17
+
+**Browser:** Google Chrome 150.0.7871.186, headless
+
 **Host:** Linux 7.0.0-28-generic, x86-64 QEMU virtual CPU, 12 cores, 62 GiB RAM
 
 ## Decision
