@@ -214,6 +214,7 @@ fn update_reports_a_partial_remote_change_when_a_later_label_write_fails() {
 }
 
 struct SynchronizationMocks {
+    events: Mock,
     labels: Mock,
     issues: Mock,
     comments: Mock,
@@ -222,6 +223,7 @@ struct SynchronizationMocks {
 
 impl SynchronizationMocks {
     fn assert(self) {
+        self.events.assert();
         self.labels.assert();
         self.issues.assert();
         self.comments.assert();
@@ -261,6 +263,13 @@ fn mock_priority_removal(github: &mut Server, label: &str, status: usize) -> Moc
 }
 
 fn mock_synchronization(github: &mut Server, issue: Value) -> SynchronizationMocks {
+    let events = github
+        .mock("GET", "/repos/acme/widgets/issues/events")
+        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("[]")
+        .create();
     let labels = github
         .mock("GET", "/repos/acme/widgets/labels")
         .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
@@ -311,6 +320,7 @@ fn mock_synchronization(github: &mut Server, issue: Value) -> SynchronizationMoc
         .with_body("[]")
         .create();
     SynchronizationMocks {
+        events,
         labels,
         issues,
         comments,

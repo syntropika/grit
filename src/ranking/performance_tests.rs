@@ -315,9 +315,10 @@ fn repository_scale_fixture(issue_count: usize, dependency_count: usize) -> Loca
             dependencies.push(dependency(blocked, blocker));
         }
     }
-    LocalReplica::build(
+    LocalReplica::build_with_sync(
         "acme/repository-scale".to_owned(),
         "2026-08-07T00:00:00.000Z".to_owned(),
+        Default::default(),
         Vec::new(),
         issues,
         dependencies,
