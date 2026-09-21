@@ -19,7 +19,7 @@ use crate::{
         Actor, BlockerIdentity, BlockerScope, Comment, Dependency, EntityTag, Issue, IssueIdentity,
         Label,
     },
-    repository::Repository,
+    repository::{IssueReference, Repository},
 };
 
 const API_VERSION: &str = "2026-03-10";
@@ -49,6 +49,27 @@ impl<'a> CreateLabelRequest<'a> {
             description,
         }
     }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum DependencyIntent {
+    Block,
+    Unblock,
+}
+
+impl DependencyIntent {
+    pub(crate) fn desired_present(self) -> bool {
+        matches!(self, Self::Block)
+    }
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DependencyChange {
+    Created,
+    AlreadyPresent,
+    Removed,
+    AlreadyAbsent,
 }
 
 impl GitHubClient {
@@ -116,6 +137,146 @@ impl GitHubClient {
             .into_iter()
             .filter_map(GitHubComment::normalize_change)
             .collect())
+    }
+
+    pub(crate) fn mutate_dependency(
+        &self,
+        blocked: &IssueReference,
+        blocker: &IssueReference,
+        intent: DependencyIntent,
+    ) -> Result<DependencyChange, GitHubError> {
+        let blocker_id = self.fetch_issue_id(blocker)?;
+        let blockers = self.fetch_blockers(blocked.repository(), blocked.number(), "50")?;
+        let present = blockers.iter().any(|candidate| candidate.id == blocker_id);
+
+        match (intent, present) {
+            (DependencyIntent::Block, true) => Ok(DependencyChange::AlreadyPresent),
+            (DependencyIntent::Unblock, false) => Ok(DependencyChange::AlreadyAbsent),
+            (DependencyIntent::Block, false) => self.add_dependency(blocked, blocker_id),
+            (DependencyIntent::Unblock, true) => self.remove_dependency(blocked, blocker_id),
+        }
+    }
+
+    fn fetch_issue_id(&self, issue: &IssueReference) -> Result<u64, GitHubError> {
+        let url = self.endpoint(&format!(
+            "repos/{}/{}/issues/{}",
+            issue.repository().owner(),
+            issue.repository().name(),
+            issue.number()
+        ))?;
+        let response = self.client.get(url).send().map_err(GitHubError::Request)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(api_status_error(status, response.headers()));
+        }
+        let remote: GitHubIssueLocator = response.json().map_err(GitHubError::Decode)?;
+        if remote.number != issue.number() {
+            return Err(GitHubError::IssueIdentityMismatch);
+        }
+        if remote.pull_request.is_some() {
+            return Err(GitHubError::PullRequestDependency(issue.stable_key()));
+        }
+        Ok(remote.id)
+    }
+
+    fn fetch_blockers(
+        &self,
+        repository: &Repository,
+        issue_number: u64,
+        per_page: &str,
+    ) -> Result<Vec<GitHubBlocker>, GitHubError> {
+        let url = self.endpoint(&format!(
+            "repos/{}/{}/issues/{issue_number}/dependencies/blocked_by",
+            repository.owner(),
+            repository.name()
+        ))?;
+        self.paginate(url, &[("per_page", per_page)])
+    }
+
+    fn add_dependency(
+        &self,
+        blocked: &IssueReference,
+        blocker_id: u64,
+    ) -> Result<DependencyChange, GitHubError> {
+        let url = self.dependency_url(blocked)?;
+        let response = self
+            .client
+            .post(url)
+            .json(&AddDependency {
+                issue_id: blocker_id,
+            })
+            .send()
+            .map_err(|source| GitHubError::MutationUncertain {
+                operation: "adding the blocked-by relationship",
+                source,
+            })?;
+        let status = response.status();
+        if status == StatusCode::CREATED {
+            return Ok(DependencyChange::Created);
+        }
+        if status == StatusCode::UNPROCESSABLE_ENTITY
+            && self.dependency_exists(blocked, blocker_id)?
+        {
+            return Ok(DependencyChange::AlreadyPresent);
+        }
+        Err(mutation_status_error(
+            status,
+            response.headers(),
+            "adding the blocked-by relationship",
+        ))
+    }
+
+    fn remove_dependency(
+        &self,
+        blocked: &IssueReference,
+        blocker_id: u64,
+    ) -> Result<DependencyChange, GitHubError> {
+        let url = self.endpoint(&format!(
+            "repos/{}/{}/issues/{}/dependencies/blocked_by/{blocker_id}",
+            blocked.repository().owner(),
+            blocked.repository().name(),
+            blocked.number()
+        ))?;
+        let response =
+            self.client
+                .delete(url)
+                .send()
+                .map_err(|source| GitHubError::MutationUncertain {
+                    operation: "removing the blocked-by relationship",
+                    source,
+                })?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(DependencyChange::Removed);
+        }
+        if status == StatusCode::NOT_FOUND && !self.dependency_exists(blocked, blocker_id)? {
+            return Ok(DependencyChange::AlreadyAbsent);
+        }
+        Err(mutation_status_error(
+            status,
+            response.headers(),
+            "removing the blocked-by relationship",
+        ))
+    }
+
+    fn dependency_exists(
+        &self,
+        blocked: &IssueReference,
+        blocker_id: u64,
+    ) -> Result<bool, GitHubError> {
+        let url = self.dependency_url(blocked)?;
+        let blockers: Vec<GitHubBlocker> =
+            self.paginate(url, &[("per_page", "50"), ("page", "1")])?;
+        Ok(blockers.iter().any(|candidate| candidate.id == blocker_id))
+    }
+
+    fn dependency_url(&self, blocked: &IssueReference) -> Result<Url, GitHubError> {
+        self.endpoint(&format!(
+            "repos/{}/{}/issues/{}/dependencies/blocked_by",
+            blocked.repository().owner(),
+            blocked.repository().name(),
+            blocked.number()
+        ))
     }
 
     pub(crate) fn fetch_labels(&self, repository: &Repository) -> Result<Vec<Label>, GitHubError> {
@@ -659,6 +820,18 @@ fn api_status_error(status: StatusCode, headers: &HeaderMap) -> GitHubError {
     }
 }
 
+fn mutation_status_error(
+    status: StatusCode,
+    headers: &HeaderMap,
+    operation: &'static str,
+) -> GitHubError {
+    if status.is_server_error() || status == StatusCode::REQUEST_TIMEOUT {
+        GitHubError::MutationUncertainStatus { operation, status }
+    } else {
+        api_status_error(status, headers)
+    }
+}
+
 #[derive(Deserialize)]
 struct GitHubIssue {
     id: u64,
@@ -677,6 +850,13 @@ struct GitHubIssue {
     created_at: String,
     updated_at: String,
     closed_at: Option<String>,
+    pull_request: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct GitHubIssueLocator {
+    id: u64,
+    number: u64,
     pull_request: Option<serde_json::Value>,
 }
 
@@ -917,6 +1097,11 @@ struct GitHubIssueCountConnection {
     total_count: u64,
 }
 
+#[derive(Serialize)]
+struct AddDependency {
+    issue_id: u64,
+}
+
 #[derive(Debug, Error)]
 pub(crate) enum GitHubError {
     #[error("the GitHub token cannot be represented as an HTTP header")]
@@ -925,6 +1110,20 @@ pub(crate) enum GitHubError {
     BuildClient(reqwest::Error),
     #[error("GitHub request failed: {0}")]
     Request(reqwest::Error),
+    #[error(
+        "the outcome of {operation} is uncertain because the GitHub request failed after it may have been sent: {source}; Local replica was not changed"
+    )]
+    MutationUncertain {
+        operation: &'static str,
+        source: reqwest::Error,
+    },
+    #[error(
+        "the outcome of {operation} is uncertain after GitHub returned HTTP {status}; Local replica was not changed"
+    )]
+    MutationUncertainStatus {
+        operation: &'static str,
+        status: StatusCode,
+    },
     #[error("GitHub returned HTTP {0}")]
     Status(StatusCode),
     #[error("GitHub rejected authentication with HTTP {0}")]
@@ -950,4 +1149,8 @@ pub(crate) enum GitHubError {
     InvalidRepositoryUrl,
     #[error("GitHub GraphQL did not return the Repository Issue count")]
     GraphQl,
+    #[error("GitHub returned an Issue different from the requested Issue")]
+    IssueIdentityMismatch,
+    #[error("{0} is a Pull Request; native Dependencies require Issues")]
+    PullRequestDependency(String),
 }

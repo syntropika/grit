@@ -8,19 +8,23 @@ use url::Url;
 
 use crate::{
     auth::{AuthError, AuthToken},
-    github::{CreateLabelRequest, GitHubClient, GitHubError, LabelCreation},
+    github::{
+        CreateLabelRequest, DependencyChange, DependencyIntent, GitHubClient, GitHubError,
+        LabelCreation,
+    },
     model::{LocalReplica, ReplicaError},
     operational::{ExecutionScope, analyze_ready},
     priority::{
         DeclaredPriority, PriorityState, missing_canonical_labels, present_canonical_labels,
     },
-    repository::{Repository, RepositoryError},
+    repository::{IssueReference, IssueReferenceError, Repository, RepositoryError},
     store::{ReplicaStore, StoreError},
-    synchronization::refresh_repository,
+    synchronization::{RepositoryData, refresh_repository},
 };
 
 const SYNC_SCHEMA_VERSION: &str = "grit.sync/v1";
 const READY_SCHEMA_VERSION: &str = "grit.ready/v1";
+const DEPENDENCY_MUTATION_SCHEMA_VERSION: &str = "grit.dependency-mutation/v1";
 const INIT_SCHEMA_VERSION: &str = "grit.init/v1";
 
 #[derive(Parser)]
@@ -32,6 +36,28 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Make one Issue blocked by another native GitHub Issue.
+    Block {
+        /// Issue to block in OWNER/REPO#NUMBER form.
+        issue: String,
+        /// Blocking Issue in OWNER/REPO#NUMBER form.
+        #[arg(long)]
+        by: String,
+        /// Emit versioned machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a native blocked-by relationship between two Issues.
+    Unblock {
+        /// Issue that is currently blocked in OWNER/REPO#NUMBER form.
+        issue: String,
+        /// Blocking Issue in OWNER/REPO#NUMBER form.
+        #[arg(long)]
+        by: String,
+        /// Emit versioned machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
     /// Create any missing canonical Priority labels.
     Init {
         /// Repository in OWNER/REPO form.
@@ -67,6 +93,12 @@ enum Command {
 pub(crate) fn execute() -> Result<(), CliError> {
     let cli = Cli::parse();
     match cli.command {
+        Command::Block { issue, by, json } => {
+            mutate_dependency(&issue, &by, DependencyIntent::Block, json)
+        }
+        Command::Unblock { issue, by, json } => {
+            mutate_dependency(&issue, &by, DependencyIntent::Unblock, json)
+        }
         Command::Init { repo, json } => initialize(&Repository::parse(&repo)?, json),
         Command::Sync { repo, json } => sync(&Repository::parse(&repo)?, json),
         Command::Ready {
@@ -143,14 +175,7 @@ fn synchronize(repository: &Repository) -> Result<LocalReplica, CliError> {
     let client = github_client()?;
     let data = refresh_repository(&client, repository, previous.as_ref())?;
 
-    let replica = LocalReplica::build_with_sync(
-        repository.full_name().to_owned(),
-        Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-        data.sync,
-        data.labels,
-        data.issues,
-        data.dependencies,
-    )?;
+    let replica = build_replica(repository, data)?;
 
     store.publish(&replica)?;
     Ok(replica)
@@ -166,20 +191,75 @@ fn github_client() -> Result<GitHubClient, CliError> {
     GitHubClient::new(base_url, &token).map_err(Into::into)
 }
 
-fn print_sync_result(replica: &LocalReplica, json: bool) -> Result<(), CliError> {
-    let comment_count = replica
-        .issues
-        .iter()
-        .map(|issue| issue.comments.len())
-        .sum();
-    let snapshot = SnapshotSummary {
-        schema_version: &replica.schema_version,
-        synced_at: &replica.synced_at,
-        input_hash: &replica.input_hash,
-        issue_count: replica.issues.len(),
-        comment_count,
-        dependency_count: replica.dependencies.len(),
+fn fetch_replica(client: &GitHubClient, repository: &Repository) -> Result<LocalReplica, CliError> {
+    let data = refresh_repository(client, repository, None)?;
+    build_replica(repository, data)
+}
+
+fn build_replica(repository: &Repository, data: RepositoryData) -> Result<LocalReplica, CliError> {
+    LocalReplica::build_with_sync(
+        repository.full_name().to_owned(),
+        Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        data.sync,
+        data.labels,
+        data.issues,
+        data.dependencies,
+    )
+    .map_err(Into::into)
+}
+
+fn mutate_dependency(
+    blocked: &str,
+    blocker: &str,
+    intent: DependencyIntent,
+    json: bool,
+) -> Result<(), CliError> {
+    let blocked = IssueReference::parse(blocked)?;
+    let blocker = IssueReference::parse(blocker)?;
+    let client = github_client()?;
+    let result = client.mutate_dependency(&blocked, &blocker, intent)?;
+
+    let replica = fetch_replica(&client, blocked.repository()).map_err(|source| {
+        CliError::MutationSynchronization {
+            source: Box::new(source),
+        }
+    })?;
+    if replica.has_dependency(&blocked, &blocker) != intent.desired_present() {
+        return Err(CliError::MutationReadbackMismatch {
+            blocked: blocked.stable_key(),
+            blocker: blocker.stable_key(),
+            expected: dependency_expected_relationship(intent),
+        });
+    }
+    ReplicaStore::discover(blocked.repository())
+        .map_err(|source| CliError::MutationPublication { source })?
+        .publish(&replica)
+        .map_err(|source| CliError::MutationPublication { source })?;
+
+    let snapshot = snapshot_summary(&replica);
+    let output = DependencyMutationOutput {
+        schema_version: DEPENDENCY_MUTATION_SCHEMA_VERSION,
+        command: dependency_command_name(intent),
+        repository: blocked.repository().full_name(),
+        result,
+        edge: DependencyEdgeOutput {
+            blocked: blocked.stable_key(),
+            blocker: blocker.stable_key(),
+            kind: "blocked_by",
+        },
+        snapshot,
     };
+    if json {
+        serde_json::to_writer(std::io::stdout().lock(), &output).map_err(CliError::EncodeOutput)?;
+        println!();
+    } else {
+        println!("{}", dependency_human_message(&output.edge, result));
+    }
+    Ok(())
+}
+
+fn print_sync_result(replica: &LocalReplica, json: bool) -> Result<(), CliError> {
+    let snapshot = snapshot_summary(replica);
     if json {
         let output = SyncOutput {
             schema_version: SYNC_SCHEMA_VERSION,
@@ -200,6 +280,22 @@ fn print_sync_result(replica: &LocalReplica, json: bool) -> Result<(), CliError>
         );
     }
     Ok(())
+}
+
+fn snapshot_summary(replica: &LocalReplica) -> SnapshotSummary<'_> {
+    let comment_count = replica
+        .issues
+        .iter()
+        .map(|issue| issue.comments.len())
+        .sum();
+    SnapshotSummary {
+        schema_version: &replica.schema_version,
+        synced_at: &replica.synced_at,
+        input_hash: &replica.input_hash,
+        issue_count: replica.issues.len(),
+        comment_count,
+        dependency_count: replica.dependencies.len(),
+    }
 }
 
 fn ready(repository: &Repository, assignee: Option<&str>, json: bool) -> Result<(), CliError> {
@@ -373,6 +469,23 @@ struct SyncOutput<'a> {
 }
 
 #[derive(Serialize)]
+struct DependencyMutationOutput<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    repository: &'a str,
+    result: DependencyChange,
+    edge: DependencyEdgeOutput,
+    snapshot: SnapshotSummary<'a>,
+}
+
+#[derive(Serialize)]
+struct DependencyEdgeOutput {
+    blocked: String,
+    blocker: String,
+    kind: &'static str,
+}
+
+#[derive(Serialize)]
 struct InitOutput<'a> {
     schema_version: &'static str,
     command: &'static str,
@@ -449,6 +562,38 @@ enum ReplicaSource {
     LocalFallback,
 }
 
+fn dependency_command_name(intent: DependencyIntent) -> &'static str {
+    match intent {
+        DependencyIntent::Block => "block",
+        DependencyIntent::Unblock => "unblock",
+    }
+}
+
+fn dependency_expected_relationship(intent: DependencyIntent) -> &'static str {
+    if intent.desired_present() {
+        "present"
+    } else {
+        "absent"
+    }
+}
+
+fn dependency_human_message(edge: &DependencyEdgeOutput, result: DependencyChange) -> String {
+    match result {
+        DependencyChange::Created => {
+            format!("{} is now blocked by {}", edge.blocked, edge.blocker)
+        }
+        DependencyChange::AlreadyPresent => {
+            format!("{} was already blocked by {}", edge.blocked, edge.blocker)
+        }
+        DependencyChange::Removed => {
+            format!("{} is no longer blocked by {}", edge.blocked, edge.blocker)
+        }
+        DependencyChange::AlreadyAbsent => {
+            format!("{} was not blocked by {}", edge.blocked, edge.blocker)
+        }
+    }
+}
+
 impl ReplicaSource {
     fn is_fallback(self) -> bool {
         matches!(self, Self::LocalFallback)
@@ -468,6 +613,8 @@ impl ReplicaSource {
 pub(crate) enum CliError {
     #[error(transparent)]
     Repository(#[from] RepositoryError),
+    #[error(transparent)]
+    IssueReference(#[from] IssueReferenceError),
     #[error("GRIT_GITHUB_API_URL is invalid: {0}")]
     ParseApiBase(url::ParseError),
     #[error("GRIT_GITHUB_API_URL must be a safe absolute HTTP(S) base URL")]
@@ -484,6 +631,28 @@ pub(crate) enum CliError {
     EncodeOutput(serde_json::Error),
     #[error("GitHub refresh failed ({refresh}); no valid Local replica is available ({replica})")]
     RefreshAndReplicaUnavailable { refresh: String, replica: String },
+    #[error(
+        "GitHub dependency operation completed, but synchronized readback failed; Local replica was not changed: {source}"
+    )]
+    MutationSynchronization {
+        #[source]
+        source: Box<CliError>,
+    },
+    #[error(
+        "GitHub dependency operation completed and readback was verified, but Local replica publication failed: {source}"
+    )]
+    MutationPublication {
+        #[source]
+        source: StoreError,
+    },
+    #[error(
+        "GitHub dependency operation completed, but synchronized readback did not show {blocked} blocked by {blocker} as {expected}; Local replica was not changed"
+    )]
+    MutationReadbackMismatch {
+        blocked: String,
+        blocker: String,
+        expected: &'static str,
+    },
 }
 
 #[cfg(test)]
