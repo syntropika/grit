@@ -11,6 +11,153 @@ use support::browser::audit_local_page;
 const PUBLIC_ARTIFACT_SCHEMA: &str = "grit.public-graph/v1";
 
 #[test]
+fn pages_workflow_has_least_privilege_and_uploads_the_sealed_contract() {
+    let workflow_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/pages.yml");
+    let workflow_source = fs::read_to_string(&workflow_path).expect("Pages workflow must exist");
+    let documents =
+        yaml_rust2::YamlLoader::load_from_str(&workflow_source).expect("valid Pages workflow YAML");
+    let [workflow] = documents.as_slice() else {
+        panic!("Pages workflow must contain one YAML document");
+    };
+
+    assert!(
+        workflow["permissions"]
+            .as_hash()
+            .expect("top-level permissions map")
+            .is_empty(),
+        "workflow permissions must default to none"
+    );
+    let triggers = workflow["on"].as_hash().expect("structured triggers");
+    assert_eq!(
+        mapping_keys(triggers),
+        ["push", "schedule", "workflow_dispatch"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    );
+    assert_eq!(workflow["on"]["push"]["branches"][0].as_str(), Some("main"));
+    assert!(
+        workflow["on"]["schedule"][0]["cron"].as_str().is_some(),
+        "scheduled refresh must have a cron expression"
+    );
+    assert_eq!(
+        mapping_keys(workflow["jobs"].as_hash().expect("jobs map")),
+        ["build", "deploy"].into_iter().map(str::to_owned).collect()
+    );
+
+    let build = &workflow["jobs"]["build"];
+    assert_eq!(
+        string_mapping(&build["permissions"]),
+        [("contents", "read"), ("issues", "read")]
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect()
+    );
+    assert!(build["env"].is_badvalue());
+    let build_steps = build["steps"].as_vec().expect("build steps");
+    let graph_step = step_with_id(build_steps, "generate");
+    assert_eq!(
+        string_mapping(&graph_step["env"]),
+        [
+            ("GH_TOKEN", "${{ secrets.GITHUB_TOKEN }}"),
+            ("GRIT_STATE_DIR", "${{ runner.temp }}/grit-state"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect()
+    );
+    let command = graph_step["run"]
+        .as_str()
+        .expect("public graph command")
+        .split_ascii_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert_eq!(
+        command,
+        "./target/release/grit graph --repo \"${{ github.repository }}\" --output site-public/ --public"
+    );
+    for step in build_steps {
+        if step != graph_step {
+            assert!(
+                step["env"]["GH_TOKEN"].is_badvalue(),
+                "GH_TOKEN leaked outside the graph generation step"
+            );
+        }
+    }
+    let archive = step_with_id(build_steps, "archive");
+    assert_eq!(archive["env"]["INPUT_PATH"].as_str(), Some("site-public/"));
+    assert_eq!(
+        archive["run"]
+            .as_str()
+            .expect("archive command")
+            .split_ascii_whitespace()
+            .collect::<Vec<_>>()
+            .join(" "),
+        "tar --dereference --hard-dereference --directory \"$INPUT_PATH\" -cvf \"$RUNNER_TEMP/artifact.tar\" ."
+    );
+    let upload = step_with_id(build_steps, "upload");
+    assert_action(upload, "actions/upload-artifact");
+    assert_eq!(
+        upload["with"]["path"].as_str(),
+        Some("${{ runner.temp }}/artifact.tar")
+    );
+    assert_eq!(upload["with"]["name"].as_str(), Some("github-pages"));
+    assert_action(step_with_id(build_steps, "checkout"), "actions/checkout");
+
+    let deploy = &workflow["jobs"]["deploy"];
+    assert_eq!(deploy["needs"].as_str(), Some("build"));
+    assert_eq!(
+        string_mapping(&deploy["permissions"]),
+        [("id-token", "write"), ("pages", "write")]
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect()
+    );
+    assert!(deploy["env"].is_badvalue());
+    assert_action(
+        step_with_id(
+            deploy["steps"].as_vec().expect("deploy steps"),
+            "deployment",
+        ),
+        "actions/deploy-pages",
+    );
+    assert_eq!(
+        workflow["concurrency"]["group"].as_str(),
+        Some("grit-pages")
+    );
+    assert_eq!(
+        workflow["concurrency"]["cancel-in-progress"].as_bool(),
+        Some(true)
+    );
+
+    for step in build_steps
+        .iter()
+        .chain(deploy["steps"].as_vec().expect("deploy steps"))
+    {
+        if let Some(action) = step["uses"].as_str() {
+            assert!(
+                is_immutable_action_reference(action),
+                "unpinned action: {action}"
+            );
+        }
+    }
+
+    let generated = generate_adversarial_public_site();
+    assert_eq!(
+        generated.files,
+        ["graph.json", "graph.schema.json", "index.html"]
+    );
+    let schema = serde_json::to_string(&generated.schema).expect("serialized public schema");
+    for artifact in [&generated.serialized, &schema, &generated.html] {
+        assert!(
+            !artifact.contains("automation-token"),
+            "GitHub token entered the upload artifact"
+        );
+    }
+}
+
+#[test]
 fn public_graph_fails_closed_before_refresh_when_repository_metadata_is_not_confirmed() {
     let cases = [
         (
@@ -1014,4 +1161,44 @@ fn assert_success(output: &std::process::Output) {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn mapping_keys(mapping: &yaml_rust2::yaml::Hash) -> std::collections::BTreeSet<String> {
+    mapping
+        .keys()
+        .map(|key| key.as_str().expect("string mapping key").to_owned())
+        .collect()
+}
+
+fn string_mapping(value: &yaml_rust2::Yaml) -> std::collections::BTreeMap<String, String> {
+    value
+        .as_hash()
+        .expect("string mapping")
+        .iter()
+        .map(|(key, value)| {
+            (
+                key.as_str().expect("string mapping key").to_owned(),
+                value.as_str().expect("string mapping value").to_owned(),
+            )
+        })
+        .collect()
+}
+
+fn step_with_id<'a>(steps: &'a [yaml_rust2::Yaml], id: &str) -> &'a yaml_rust2::Yaml {
+    steps
+        .iter()
+        .find(|step| step["id"].as_str() == Some(id))
+        .unwrap_or_else(|| panic!("missing workflow step {id}"))
+}
+
+fn is_immutable_action_reference(reference: &str) -> bool {
+    let Some((_, revision)) = reference.rsplit_once('@') else {
+        return false;
+    };
+    revision.len() == 40 && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn assert_action(step: &yaml_rust2::Yaml, expected: &str) {
+    let action = step["uses"].as_str().expect("action step");
+    assert_eq!(action.split_once('@').map(|(name, _)| name), Some(expected));
 }

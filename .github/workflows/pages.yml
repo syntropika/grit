@@ -1,0 +1,68 @@
+name: Deploy sealed Grit graph to Pages
+
+on:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: grit-pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - name: Check out the default branch
+        id: checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Build Grit
+        id: build-grit
+        run: cargo build --release --locked
+      - name: Generate sealed public graph
+        id: generate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GRIT_STATE_DIR: ${{ runner.temp }}/grit-state
+        run: |
+          ./target/release/grit graph --repo "${{ github.repository }}" --output site-public/ --public
+      - name: Archive sealed Pages artifact
+        id: archive
+        env:
+          INPUT_PATH: site-public/
+        run: |
+          tar --dereference --hard-dereference --directory "$INPUT_PATH" -cvf "$RUNNER_TEMP/artifact.tar" .
+      - name: Upload sealed Pages artifact
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: github-pages
+          path: ${{ runner.temp }}/artifact.tar
+          retention-days: 1
+          if-no-files-found: error
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy sealed artifact to Pages
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5
