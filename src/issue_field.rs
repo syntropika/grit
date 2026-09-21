@@ -245,7 +245,7 @@ fn update_online(
     field: IssueField,
     desired: IssueFieldValue,
 ) -> Result<IssueFieldUpdateResult, IssueFieldUpdateError> {
-    let before = client.fetch_issue(issue.repository(), issue.number())?;
+    let before = client.fetch_issue_for_update(issue.repository(), issue.number())?;
     let base = IssueFieldValue::from_issue(field, &before)?;
     let mut remote_changed = false;
     if base != desired {

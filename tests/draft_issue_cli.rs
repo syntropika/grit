@@ -86,6 +86,65 @@ fn offline_create_returns_a_stable_draft_identity_and_participates_in_next() {
 }
 
 #[test]
+fn multistep_draft_rollouts_follow_stable_ids_instead_of_synthetic_numbers() {
+    let state = TempDir::new().expect("state directory");
+    let mut github = Server::new();
+    seed_empty_replica(&mut github, &state);
+    for title in ["First", "Second", "Third"] {
+        queue_draft(&state, &github.url(), title);
+    }
+    let path = state.path().join("repositories/acme/widgets/outbox.json");
+    let mut outbox: Value =
+        serde_json::from_slice(&fs::read(&path).expect("outbox")).expect("JSON");
+    let identities = [
+        (
+            "70000000-0000-4000-8000-000000000001",
+            0xf000000000004000_u64,
+        ),
+        (
+            "80000000-0000-4000-8000-000000000002",
+            0x8000000000004000_u64,
+        ),
+        (
+            "90000000-0000-4000-8000-000000000003",
+            0x9000000000004000_u64,
+        ),
+    ];
+    for (operation, (temporary_id, synthetic_number)) in outbox["operations"]
+        .as_array_mut()
+        .expect("operations")
+        .iter_mut()
+        .zip(identities)
+    {
+        operation["temporary_id"] = json!(temporary_id);
+        operation["synthetic_number"] = json!(synthetic_number);
+    }
+    fs::write(path, serde_json::to_vec(&outbox).expect("outbox JSON")).expect("save identities");
+    let output = grit(&state, &github.url())
+        .env_remove("GH_TOKEN")
+        .args(["next", "--repo", "acme/widgets", "--horizon", "3", "--json"])
+        .output()
+        .expect("rank Draft sequence");
+    assert_success(&output);
+    let ranked: Value = serde_json::from_slice(&output.stdout).expect("next JSON");
+    let actual: Vec<_> = ranked["recommendation"]["rollout"]["steps"]
+        .as_array()
+        .expect("steps")
+        .iter()
+        .map(|step| {
+            step["issue"]["temporary_id"]
+                .as_str()
+                .expect("Draft identity")
+        })
+        .collect();
+    assert_eq!(actual, identities.map(|(id, _)| id));
+    assert_eq!(
+        ranked["comparison_to_runner_up"]["component"],
+        "stable_node_key"
+    );
+}
+
+#[test]
 fn two_related_drafts_map_to_two_github_issues_and_one_native_dependency() {
     let state = TempDir::new().expect("state directory");
     let mut seed = Server::new();
@@ -627,6 +686,16 @@ fn mock_inventory(
     mocks.push(
         github
             .mock("GET", "/repos/acme/widgets/labels")
+            .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("[]")
+            .expect(expected.labels)
+            .create(),
+    );
+    mocks.push(
+        github
+            .mock("GET", "/repos/acme/widgets/issues/events")
             .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
             .with_status(200)
             .with_header("content-type", "application/json")

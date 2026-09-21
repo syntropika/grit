@@ -712,6 +712,16 @@ fn mock_inventory(
             .expect(inventories)
             .create(),
     );
+    mocks.push(
+        github
+            .mock("GET", "/repos/acme/widgets/issues/events")
+            .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("[]")
+            .expect(inventories)
+            .create(),
+    );
     let issue_inventory = Arc::clone(&remote);
     mocks.push(
         github
@@ -859,6 +869,13 @@ fn apply_patch(issue: &mut Value, patch: &Value) {
 }
 
 fn seed_replica(github: &mut Server, state: &TempDir) {
+    let events = github
+        .mock("GET", "/repos/acme/widgets/issues/events")
+        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("[]")
+        .create();
     let labels = github
         .mock("GET", "/repos/acme/widgets/labels")
         .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
@@ -901,6 +918,7 @@ fn seed_replica(github: &mut Server, state: &TempDir) {
         .expect("seed Local replica");
     assert_success(&output);
     labels.assert();
+    events.assert();
     issues.assert();
     comments.assert();
     dependencies.assert();
