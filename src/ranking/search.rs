@@ -1,6 +1,22 @@
-use std::{cmp::Ordering, collections::BTreeMap, collections::BTreeSet, num::NonZeroUsize};
+mod frontier;
+mod policy;
+mod probe;
+mod scoring;
+mod snapshot;
+mod state;
 
-use serde::Serialize;
+use std::{
+    cell::RefCell,
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    num::NonZeroUsize,
+};
+
+use frontier::*;
+pub(super) use policy::SearchRestriction;
+use policy::*;
+use snapshot::*;
+use state::*;
 
 use super::{
     CandidateData, CriticalRouteOutcome, EvaluatedCandidate, EvaluatedStep, StepSelection,
@@ -9,7 +25,8 @@ use super::{
     priority,
 };
 use crate::{
-    operational::{ExecutionScope, RolloutState},
+    model::BlockerScope,
+    operational::{ExecutionScope, OneStepAnalysis, RolloutState},
     priority::{PriorityComparison, PriorityState},
     working_graph::WorkingGraph,
 };
@@ -22,98 +39,31 @@ pub(super) struct SearchResult<'a> {
     pub(super) provenance_numbers: BTreeSet<u64>,
 }
 
-#[derive(Clone, Copy, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum SearchRestriction {
-    StateBudget,
-}
-
-impl SearchRestriction {
-    pub(super) fn as_str(self) -> &'static str {
-        match self {
-            Self::StateBudget => "state_budget",
-        }
-    }
-}
-
-struct PartialRollout<'a> {
-    steps: Vec<EvaluatedStep<'a>>,
-    unlocks: BTreeSet<u64>,
-    unlock_curve: Vec<usize>,
-    p0_curve: Vec<usize>,
-}
-
-struct PartialCheckpoint {
-    depth: usize,
-    added_unlocks: Vec<u64>,
-}
-
-impl<'a> PartialRollout<'a> {
-    fn apply(
-        &mut self,
-        step: EvaluatedStep<'a>,
-        newly_ready: &[u64],
-        graph: &crate::operational::OperationalGraph<'a>,
-        working: &WorkingGraph<'_>,
-    ) -> PartialCheckpoint {
-        self.steps.push(step);
-        let mut added_unlocks = Vec::new();
-        for number in newly_ready {
-            if self.unlocks.insert(*number) {
-                added_unlocks.push(*number);
-            }
-        }
-        self.unlock_curve.push(self.unlocks.len());
-        let unlocked_p0 = self
-            .unlocks
-            .iter()
-            .filter_map(|number| graph.issue(*number))
-            .filter(|issue| priority(working, issue) == PriorityComparison::P0)
-            .count();
-        self.p0_curve.push(unlocked_p0);
-        PartialCheckpoint {
-            depth: self.steps.len(),
-            added_unlocks,
-        }
-    }
-
-    fn undo(&mut self, checkpoint: PartialCheckpoint) {
-        assert_eq!(
-            self.steps.len(),
-            checkpoint.depth,
-            "partial rollout checkpoints must be undone in LIFO order"
-        );
-        self.p0_curve.pop();
-        self.unlock_curve.pop();
-        for number in checkpoint.added_unlocks {
-            self.unlocks.remove(&number);
-        }
-        self.steps.pop();
-    }
-}
-
 struct Search<'graph, 'issues, 'scope, 'pagerank, 'working> {
-    working: &'working WorkingGraph<'issues>,
-    provenance_numbers: BTreeSet<u64>,
-    state: RolloutState<'graph, 'issues, 'scope>,
+    working: &'working WorkingGraph<'working>,
+    provenance_numbers: RefCell<BTreeSet<u64>>,
+    root: RolloutState<'graph, 'issues, 'scope>,
     pagerank: Option<&'pagerank PageRank>,
     horizon: u8,
     state_budget: usize,
     expanded_states: usize,
-    state_budget_exhausted: bool,
-    p0_targets: Vec<u64>,
+    probe_work: usize,
+    p0_targets: BTreeSet<u64>,
+    potential_targets: Vec<u64>,
+    feasible_closures: BTreeMap<u64, Option<Vec<u64>>>,
+    restrictions: Restrictions,
     best_by_first: BTreeMap<u64, EvaluatedCandidate<'issues>>,
 }
 
 pub(super) fn evaluate<'graph, 'issues, 'scope, 'pagerank>(
-    working: &WorkingGraph<'issues>,
+    working: &WorkingGraph<'_>,
     graph: &'graph crate::operational::OperationalGraph<'issues>,
     scope: ExecutionScope<'scope>,
     pagerank: Option<&'pagerank PageRank>,
     horizon: u8,
     state_budget: usize,
 ) -> SearchResult<'issues> {
-    let state = graph.rollout_state(scope);
+    let root = graph.rollout_state(scope);
     let p0_targets = graph
         .open_numbers()
         .iter()
@@ -123,9 +73,28 @@ pub(super) fn evaluate<'graph, 'issues, 'scope, 'pagerank>(
                 .issue(*number)
                 .is_some_and(|issue| priority(working, issue) == PriorityComparison::P0)
         })
-        .collect::<Vec<_>>();
-    let first_frontier = frontier(&state, horizon as usize, &p0_targets, working);
-    let mut provenance_numbers: BTreeSet<_> = graph
+        .collect::<BTreeSet<_>>();
+    let potential_targets = if horizon == 1 {
+        Vec::new()
+    } else {
+        graph
+            .open_numbers()
+            .iter()
+            .copied()
+            .filter(|number| !root.is_ready(*number))
+            .collect()
+    };
+    let feasible_closures = potential_targets
+        .iter()
+        .map(|number| {
+            (
+                *number,
+                root.feasible_prerequisite_closure(*number, horizon as usize)
+                    .map(|closure| closure.into_iter().collect()),
+            )
+        })
+        .collect();
+    let provenance_numbers = graph
         .open_numbers()
         .iter()
         .copied()
@@ -137,99 +106,128 @@ pub(super) fn evaluate<'graph, 'issues, 'scope, 'pagerank>(
             })
         })
         .collect();
-    track_frontier(&first_frontier, &mut provenance_numbers);
-    let initial_mode = first_frontier.mode;
-    let candidate_count = first_frontier.steps.len();
-    let first_steps_count_against_budget = horizon > 1;
-    let mut search = Search {
+    let search = Search {
         working,
-        provenance_numbers,
-        state,
+        provenance_numbers: RefCell::new(provenance_numbers),
+        root,
         pagerank,
         horizon,
         state_budget,
-        expanded_states: if first_steps_count_against_budget {
-            candidate_count.min(state_budget)
-        } else {
-            0
-        },
-        state_budget_exhausted: first_steps_count_against_budget && candidate_count > state_budget,
+        expanded_states: 0,
+        probe_work: 0,
         p0_targets,
+        potential_targets,
+        feasible_closures,
+        restrictions: Restrictions::default(),
         best_by_first: BTreeMap::new(),
     };
-    for first_step in first_frontier.steps {
-        let mut partial = PartialRollout {
-            steps: Vec::with_capacity(horizon as usize),
-            unlocks: BTreeSet::new(),
-            unlock_curve: Vec::with_capacity(horizon as usize),
-            p0_curve: Vec::with_capacity(horizon as usize),
-        };
-        search.explore(first_step, &mut partial, false);
-    }
-    SearchResult {
-        mode: initial_mode,
-        candidate_count,
-        candidates: search.best_by_first.into_values().collect(),
-        provenance_numbers: search.provenance_numbers,
-        truncated_by: search
-            .state_budget_exhausted
-            .then_some(SearchRestriction::StateBudget)
-            .into_iter()
-            .collect(),
-    }
+    search.run()
 }
 
 impl<'graph, 'issues, 'scope, 'pagerank, 'working>
     Search<'graph, 'issues, 'scope, 'pagerank, 'working>
 {
-    fn explore(
-        &mut self,
-        step: EvaluatedStep<'issues>,
-        partial: &mut PartialRollout<'issues>,
-        counts_against_budget: bool,
-    ) {
-        if counts_against_budget {
-            if self.expanded_states >= self.state_budget {
-                self.state_budget_exhausted = true;
-                return;
-            }
-            self.expanded_states += 1;
+    fn priority(&self, issue: &crate::model::Issue) -> PriorityComparison {
+        if self.working.priority_is_pending(issue.number) {
+            self.provenance_numbers.borrow_mut().insert(issue.number);
         }
-        let completion = self
-            .state
-            .complete(step.issue.number)
-            .expect("search frontiers contain only Executable Issues");
-        self.provenance_numbers
-            .extend(completion.newly_ready().iter().copied());
-        let checkpoint = partial.apply(
-            step,
-            completion.newly_ready(),
-            self.state.graph(),
-            self.working,
-        );
-        self.record(partial);
+        priority(self.working, issue)
+    }
 
-        if partial.steps.len() < self.horizon as usize && !self.state_budget_exhausted {
-            let remaining_steps = self.horizon as usize - partial.steps.len();
-            let next_frontier =
-                frontier(&self.state, remaining_steps, &self.p0_targets, self.working);
-            track_frontier(&next_frontier, &mut self.provenance_numbers);
-            for next_step in next_frontier.steps {
-                self.explore(next_step, partial, true);
-                if self.state_budget_exhausted && self.expanded_states >= self.state_budget {
+    fn track_partial(&self, partial: &PartialRollout<'_>) {
+        if self.working.is_pending() {
+            self.provenance_numbers.borrow_mut().extend(
+                partial
+                    .steps
+                    .iter()
+                    .map(|step| step.issue.number)
+                    .chain(partial.unlocks.iter().copied())
+                    .filter(|number| self.working.priority_is_pending(*number)),
+            );
+        }
+    }
+
+    fn run(mut self) -> SearchResult<'issues> {
+        let one_step_analysis = (self.horizon == 1).then(|| self.root.one_step_analysis());
+        let first_frontier = if let Some(analysis) = &one_step_analysis {
+            one_step_frontier(analysis, &self.p0_targets, self.working)
+        } else {
+            frontier(
+                &self.root,
+                self.horizon as usize,
+                &self.p0_targets,
+                self.working,
+            )
+        };
+        let mode = first_frontier.mode;
+        if self.horizon == 1 {
+            let candidate_count = first_frontier.steps.len();
+            let mut partial = SearchState::root(self.root.clone(), self.horizon).partial;
+            for step in first_frontier.steps {
+                let newly_ready = one_step_analysis
+                    .as_ref()
+                    .map(|analysis| analysis.unlocks_for(step.issue.number))
+                    .unwrap_or(&[]);
+                let checkpoint = partial.apply(step, newly_ready, self.root.graph(), self.working);
+                self.record(&partial);
+                partial.undo(checkpoint);
+            }
+            return self.finish(mode, candidate_count);
+        }
+
+        let root = SearchState::root(self.root.clone(), self.horizon);
+        let first_steps = self.select_first_steps(&root, first_frontier);
+        let candidate_count = first_steps.len();
+        let mut beam = Vec::with_capacity(candidate_count);
+        for scored in first_steps {
+            if let Some(state) = self.materialize(&root, scored.step, scored.joint_plan, true) {
+                self.record(&state.partial);
+                beam.push(state);
+            } else {
+                break;
+            }
+        }
+        beam = self.retain_beam(beam);
+
+        while beam
+            .first()
+            .is_some_and(|state| state.partial.steps.len() < self.horizon as usize)
+            && !self.restrictions.contains(SearchRestriction::StateBudget)
+        {
+            let mut successors = Vec::new();
+            for state in &beam {
+                let remaining = self.horizon as usize - state.partial.steps.len();
+                let next_frontier =
+                    frontier(&state.rollout, remaining, &self.p0_targets, self.working);
+                let branches = self.select_branches(state, next_frontier);
+                for scored in branches {
+                    if let Some(successor) =
+                        self.materialize(state, scored.step, scored.joint_plan, true)
+                    {
+                        self.record(&successor.partial);
+                        successors.push(successor);
+                    } else {
+                        break;
+                    }
+                }
+                if self.restrictions.contains(SearchRestriction::StateBudget) {
                     break;
                 }
             }
+            if successors.is_empty() {
+                break;
+            }
+            beam = self.retain_beam(successors);
         }
 
-        partial.undo(checkpoint);
-        self.state.undo(completion);
+        self.finish(mode, candidate_count)
     }
 
     fn record(&mut self, partial: &PartialRollout<'issues>) {
+        self.track_partial(partial);
         let candidate = snapshot(
             partial,
-            self.state.graph(),
+            self.root.graph(),
             self.pagerank,
             self.horizon,
             self.working,
@@ -243,300 +241,227 @@ impl<'graph, 'issues, 'scope, 'pagerank, 'working>
             self.best_by_first.insert(first_number, candidate);
         }
     }
-}
 
-struct Frontier<'a> {
-    mode: RankingMode,
-    steps: Vec<EvaluatedStep<'a>>,
-}
-
-fn frontier<'issues>(
-    state: &RolloutState<'_, 'issues, '_>,
-    remaining_steps: usize,
-    p0_targets: &[u64],
-    working: &WorkingGraph<'_>,
-) -> Frontier<'issues> {
-    let executable: BTreeMap<_, _> = state
-        .executable()
-        .into_iter()
-        .map(|issue| (issue.number, issue))
-        .collect();
-    let executable_p0: Vec<_> = executable
-        .values()
-        .copied()
-        .filter(|issue| priority(working, issue) == PriorityComparison::P0)
-        .collect();
-    if !executable_p0.is_empty() {
-        return Frontier {
-            mode: RankingMode::P0Ready,
-            steps: executable_p0
-                .into_iter()
-                .map(|issue| EvaluatedStep {
-                    issue,
-                    selection: StepSelection::P0Ready,
-                })
-                .collect(),
-        };
+    fn finish(self, mode: RankingMode, candidate_count: usize) -> SearchResult<'issues> {
+        SearchResult {
+            mode,
+            candidate_count,
+            candidates: self.best_by_first.into_values().collect(),
+            truncated_by: self.restrictions.into_vec(),
+            provenance_numbers: self.provenance_numbers.into_inner(),
+        }
     }
 
-    let mut route_by_step = BTreeMap::<u64, RouteMembership>::new();
-    for target in p0_targets {
-        let Some(closure) = state.feasible_prerequisite_closure(*target, remaining_steps) else {
-            continue;
-        };
-        if closure.is_empty() {
-            continue;
+    fn materialize(
+        &mut self,
+        parent: &SearchState<'graph, 'issues, 'scope>,
+        step: EvaluatedStep<'issues>,
+        joint_plan: Option<PartialRollout<'issues>>,
+        counts_against_budget: bool,
+    ) -> Option<SearchState<'graph, 'issues, 'scope>> {
+        if counts_against_budget {
+            if self.expanded_states >= self.state_budget {
+                self.restrictions.insert(SearchRestriction::StateBudget);
+                return None;
+            }
+            self.expanded_states += 1;
         }
-        let distance = NonZeroUsize::new(closure.len()).expect("non-empty P0 closure");
-        for step_number in closure {
-            if executable.contains_key(&step_number) {
-                route_by_step
-                    .entry(step_number)
-                    .and_modify(|membership| membership.include(distance))
-                    .or_insert_with(|| RouteMembership::new(distance));
+        let mut rollout = parent.rollout.clone();
+        let completion = rollout
+            .complete(step.issue.number)
+            .expect("search frontiers contain only Executable Issues");
+        let mut partial = parent.partial.clone();
+        partial.apply(
+            step.clone(),
+            completion.newly_ready(),
+            rollout.graph(),
+            self.working,
+        );
+        let mut causal = parent.causal.clone();
+        causal.advance(step.issue.number, completion.newly_ready(), rollout.graph());
+        let remaining = self.horizon as usize - partial.steps.len();
+        let upper = self.potential_key(&rollout, &partial, remaining, STATE_POTENTIAL_VISITS);
+        Some(SearchState {
+            rollout,
+            partial,
+            causal,
+            joint_plan,
+            upper,
+        })
+    }
+
+    fn select_first_steps(
+        &mut self,
+        root: &SearchState<'graph, 'issues, 'scope>,
+        frontier: Frontier<'issues>,
+    ) -> Vec<ScoredStep<'issues>> {
+        let mode = frontier.mode;
+        let mut scored = self.score_steps(root, frontier, !mode.is_p0(), INITIAL_POTENTIAL_VISITS);
+        if mode.is_p0() {
+            let ranked = ranked_indices(&scored, |left, right| {
+                self.compare_p0_discovery(left, right)
+            });
+            if ranked.len() > FIRST_STEP_LIMIT {
+                self.restrictions.insert(SearchRestriction::P0Frontier);
+            }
+            return take_selected(scored, &ranked[..ranked.len().min(FIRST_STEP_LIMIT)]);
+        }
+
+        let immediate = ranked_indices(&scored, |left, right| self.compare_immediate(left, right));
+        let structural = ranked_indices(&scored, |left, right| {
+            left.structural
+                .count
+                .cmp(&right.structural.count)
+                .then_with(|| {
+                    left.structural
+                        .priority_profile
+                        .cmp(&right.structural.priority_profile)
+                })
+                .then_with(|| self.compare_immediate(left, right))
+        });
+        let by_priority = ranked_indices(&scored, |left, right| {
+            StepPriority::from(self.priority(left.step.issue))
+                .cmp(&StepPriority::from(self.priority(right.step.issue)))
+                .then_with(|| self.compare_immediate(left, right))
+        });
+        let by_pagerank = if self.pagerank.is_some() {
+            ranked_indices(&scored, |left, right| self.compare_pagerank(left, right))
+        } else {
+            Vec::new()
+        };
+        let probe_pool = quota_union(
+            &[
+                (&immediate, 128),
+                (&structural, 64),
+                (&by_priority, 32),
+                (&by_pagerank, 32),
+            ],
+            256,
+        );
+        if probe_pool.len() < scored.len() {
+            self.restrictions.insert(SearchRestriction::ProbePool);
+        }
+        for index in probe_pool {
+            scored[index].joint_plan = self.probe(root, scored[index].step.clone());
+        }
+        let joint = ranked_indices_filtered(
+            &scored,
+            |step| step.joint_plan.is_some(),
+            |left, right| self.compare_joint(left, right),
+        );
+        let shortlist = quota_union(
+            &[
+                (&immediate, 32),
+                (&structural, 16),
+                (&joint, 16),
+                (&by_priority, 16),
+                (&by_pagerank, 16),
+            ],
+            FIRST_STEP_LIMIT,
+        );
+        if shortlist.len() < scored.len() {
+            self.restrictions
+                .insert(SearchRestriction::FirstStepShortlist);
+        }
+        take_selected(scored, &shortlist)
+    }
+
+    fn select_branches(
+        &mut self,
+        parent: &SearchState<'graph, 'issues, 'scope>,
+        frontier: Frontier<'issues>,
+    ) -> Vec<ScoredStep<'issues>> {
+        let mode = frontier.mode;
+        let mut scored = self.score_steps(parent, frontier, false, STATE_POTENTIAL_VISITS);
+        let immediate = ranked_indices(&scored, |left, right| self.compare_immediate(left, right));
+        let upper = ranked_indices(&scored, |left, right| self.compare_upper_steps(left, right));
+        let causal_immediate = ranked_indices_filtered(
+            &scored,
+            |step| mode.is_p0() || parent.causal.contains(step.step.issue.number),
+            |left, right| self.compare_immediate(left, right),
+        );
+        let causal_upper = ranked_indices_filtered(
+            &scored,
+            |step| mode.is_p0() || parent.causal.contains(step.step.issue.number),
+            |left, right| self.compare_upper_steps(left, right),
+        );
+        let probe_pool = quota_union(
+            &[
+                (&immediate, 8),
+                (&upper, 8),
+                (&causal_immediate, 8),
+                (&causal_upper, 8),
+            ],
+            32,
+        );
+        if probe_pool.len() < scored.len() {
+            self.restrictions.insert(SearchRestriction::ProbePool);
+        }
+        for index in probe_pool {
+            scored[index].joint_plan = self.probe(parent, scored[index].step.clone());
+        }
+        let joint = ranked_indices_filtered(
+            &scored,
+            |step| step.joint_plan.is_some(),
+            |left, right| self.compare_joint(left, right),
+        );
+        let selected = quota_union(&[(&immediate, 16), (&joint, 8), (&upper, 8)], BRANCH_LIMIT);
+        if selected.len() < scored.len() {
+            self.restrictions.insert(SearchRestriction::BranchWidth);
+        }
+        take_selected(scored, &selected)
+    }
+
+    fn retain_beam(
+        &mut self,
+        mut states: Vec<SearchState<'graph, 'issues, 'scope>>,
+    ) -> Vec<SearchState<'graph, 'issues, 'scope>> {
+        if states.len() <= BEAM_LIMIT {
+            return states;
+        }
+        self.restrictions.insert(SearchRestriction::BeamWidth);
+        let realized_ranked =
+            ranked_indices(&states, |left, right| self.compare_states(left, right));
+        let upper_ranked =
+            ranked_indices(&states, |left, right| self.compare_state_upper(left, right));
+        let first_issue = |state: &SearchState<'_, '_, '_>| {
+            state
+                .partial
+                .steps
+                .first()
+                .expect("beam states have a first step")
+                .issue
+                .number
+        };
+        let realized_probe = diversify(&states, realized_ranked.clone(), first_issue);
+        let upper_probe = diversify(&states, upper_ranked.clone(), first_issue);
+        let probe_pool = quota_union(&[(&realized_probe, 32), (&upper_probe, 32)], 64);
+        if probe_pool.len() < states.len() {
+            self.restrictions.insert(SearchRestriction::ProbePool);
+        }
+        for index in probe_pool {
+            if states[index].joint_plan.is_none()
+                && states[index].partial.steps.len() < self.horizon as usize
+            {
+                let state = states[index].clone();
+                states[index].joint_plan = self.probe_from_state(state);
             }
         }
+        let realized = diversify(&states, realized_ranked, first_issue);
+        let joint = diversify(
+            &states,
+            ranked_indices_filtered(
+                &states,
+                |state| state.joint_plan.is_some(),
+                |left, right| self.compare_state_joint(left, right),
+            ),
+            first_issue,
+        );
+        let upper = diversify(&states, upper_ranked, first_issue);
+        let selected = quota_union(&[(&realized, 32), (&joint, 16), (&upper, 16)], BEAM_LIMIT);
+        take_selected(states, &selected)
     }
-
-    if !route_by_step.is_empty() {
-        Frontier {
-            mode: RankingMode::P0Route,
-            steps: route_by_step
-                .into_iter()
-                .map(|(number, membership)| EvaluatedStep {
-                    issue: executable
-                        .get(&number)
-                        .copied()
-                        .expect("route membership contains only Executable Issues"),
-                    selection: StepSelection::P0Route {
-                        feasible_distance: membership.minimum_distance,
-                        qualifying_p0_count: membership.qualifying_p0_count,
-                    },
-                })
-                .collect(),
-        }
-    } else {
-        let mode = if executable.is_empty() {
-            RankingMode::None
-        } else {
-            RankingMode::Normal
-        };
-        Frontier {
-            mode,
-            steps: executable
-                .into_values()
-                .map(|issue| EvaluatedStep {
-                    issue,
-                    selection: StepSelection::Normal,
-                })
-                .collect(),
-        }
-    }
-}
-
-fn track_frontier(frontier: &Frontier<'_>, provenance_numbers: &mut BTreeSet<u64>) {
-    provenance_numbers.extend(frontier.steps.iter().map(|step| step.issue.number));
-}
-
-struct RouteMembership {
-    minimum_distance: NonZeroUsize,
-    qualifying_p0_count: NonZeroUsize,
-}
-
-impl RouteMembership {
-    fn new(distance: NonZeroUsize) -> Self {
-        Self {
-            minimum_distance: distance,
-            qualifying_p0_count: NonZeroUsize::MIN,
-        }
-    }
-
-    fn include(&mut self, distance: NonZeroUsize) {
-        self.minimum_distance = self.minimum_distance.min(distance);
-        self.qualifying_p0_count = self
-            .qualifying_p0_count
-            .checked_add(1)
-            .expect("P0 route membership count fits usize");
-    }
-}
-
-fn snapshot<'a>(
-    partial: &PartialRollout<'a>,
-    graph: &crate::operational::OperationalGraph<'a>,
-    pagerank: Option<&PageRank>,
-    horizon: u8,
-    working: &WorkingGraph<'_>,
-) -> EvaluatedCandidate<'a> {
-    let issue = partial
-        .steps
-        .first()
-        .expect("a recorded rollout has a first step")
-        .issue;
-    let unlocks: Vec<_> = partial
-        .unlocks
-        .iter()
-        .filter_map(|number| graph.issue(*number))
-        .collect();
-    let mut priority_profile = PriorityProfile::default();
-    for unlocked in &unlocks {
-        let unlocked_priority = priority(working, unlocked);
-        if unlocked_priority != PriorityComparison::P0 {
-            priority_profile.record(unlocked_priority);
-        }
-    }
-    let mut unlock_curve = partial.unlock_curve.clone();
-    unlock_curve.resize(horizon as usize, unlock_curve.last().copied().unwrap_or(0));
-    let mut p0_curve = partial.p0_curve.clone();
-    p0_curve.resize(horizon as usize, p0_curve.last().copied().unwrap_or(0));
-    let mut step_priorities: Vec<_> = partial
-        .steps
-        .iter()
-        .map(|step| StepPriority::from(priority(working, step.issue)))
-        .collect();
-    step_priorities.resize(horizon as usize, StepPriority::NoStep);
-    let candidate = CandidateData {
-        issue,
-        steps: partial.steps.clone(),
-        unlocks,
-        priority_profile,
-        unlock_curve,
-        p0_curve,
-        step_priorities,
-        pagerank_bucket: pagerank.and_then(|pagerank| pagerank.bucket(issue.number)),
-    };
-    match partial.steps.first().map(|step| step.selection) {
-        Some(StepSelection::P0Route {
-            feasible_distance,
-            qualifying_p0_count,
-        }) => EvaluatedCandidate::CriticalRoute {
-            route: CriticalRouteOutcome {
-                feasible_distance,
-                realized_distance: candidate
-                    .p0_curve
-                    .iter()
-                    .position(|count| *count > 0)
-                    .and_then(|index| NonZeroUsize::new(index + 1)),
-                qualifying_p0_count,
-            },
-            candidate,
-        },
-        Some(StepSelection::P0Ready) => EvaluatedCandidate::P0Ready(candidate),
-        Some(StepSelection::Normal) => EvaluatedCandidate::Normal(candidate),
-        None => unreachable!("a recorded rollout has a first step"),
-    }
-}
-
-fn compare_same_first(left: &EvaluatedCandidate<'_>, right: &EvaluatedCandidate<'_>) -> Ordering {
-    let outcome = super::decision::compare(left, right).ordering;
-    if outcome != Ordering::Equal {
-        return outcome;
-    }
-    let left_sequence: Vec<_> = left
-        .data()
-        .steps
-        .iter()
-        .map(|step| step.issue.number)
-        .collect();
-    let right_sequence: Vec<_> = right
-        .data()
-        .steps
-        .iter()
-        .map(|step| step.issue.number)
-        .collect();
-    right_sequence.cmp(&left_sequence)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        model::{BlockerIdentity, BlockerScope, Dependency, IssueIdentity, Label, LocalReplica},
-        operational::OperationalGraph,
-    };
-
-    #[test]
-    fn dense_p0_routes_complete_the_bounded_end_to_end_evaluation() {
-        const ROUTE_COUNT: u64 = 5_000;
-        let mut issues = Vec::with_capacity((ROUTE_COUNT * 2) as usize);
-        let mut dependencies = Vec::with_capacity(ROUTE_COUNT as usize);
-        for root in 1..=ROUTE_COUNT {
-            let target = ROUTE_COUNT + root;
-            issues.push(issue(root, false));
-            issues.push(issue(target, true));
-            dependencies.push(dependency(target, root));
-        }
-        let replica = LocalReplica {
-            schema_version: "grit.local-replica/v1".to_owned(),
-            repository: "acme/dense-p0".to_owned(),
-            synced_at: "2026-08-07T00:00:00Z".to_owned(),
-            input_hash: "fixture".to_owned(),
-            repository_labels: Some(Vec::new()),
-            sync: Default::default(),
-            issues,
-            dependencies,
-        };
-        let graph = OperationalGraph::prepare(&replica);
-        let outbox = serde_json::from_value(serde_json::json!({
-            "schema_version": "grit.pending-mutations/v1",
-            "repository": replica.repository,
-            "operations": []
-        }))
-        .expect("empty outbox");
-        let working = WorkingGraph::project(&replica, &outbox).expect("synchronized Working graph");
-        let result = evaluate(&working, &graph, ExecutionScope::Available, None, 3, 8_192);
-
-        assert_eq!(result.mode, RankingMode::P0Route);
-        assert_eq!(result.candidate_count, ROUTE_COUNT as usize);
-        assert_eq!(result.candidates.len(), ROUTE_COUNT as usize);
-        assert_eq!(result.truncated_by.len(), 1);
-        assert_eq!(result.truncated_by[0].as_str(), "state_budget");
-    }
-
-    fn issue(number: u64, p0: bool) -> crate::model::Issue {
-        crate::model::Issue {
-            id: number,
-            node_id: format!("I_{number}"),
-            number,
-            url: format!("https://github.com/acme/dense-p0/issues/{number}"),
-            title: format!("Issue {number}"),
-            body: String::new(),
-            state: "open".to_owned(),
-            state_reason: None,
-            author: None,
-            assignees: Vec::new(),
-            labels: p0
-                .then(|| Label {
-                    id: None,
-                    node_id: None,
-                    name: "priority:p0".to_owned(),
-                    color: None,
-                    description: None,
-                })
-                .into_iter()
-                .collect(),
-            comments: Vec::new(),
-            created_at: "2026-08-01T00:00:00Z".to_owned(),
-            updated_at: "2026-08-01T00:00:00Z".to_owned(),
-            closed_at: None,
-        }
-    }
-
-    fn dependency(blocked: u64, blocker: u64) -> Dependency {
-        Dependency {
-            blocked: IssueIdentity {
-                repository: "acme/dense-p0".to_owned(),
-                number: blocked,
-                id: blocked,
-                node_id: format!("I_{blocked}"),
-            },
-            blocker: BlockerIdentity {
-                repository: "acme/dense-p0".to_owned(),
-                number: blocker,
-                state: "open".to_owned(),
-                scope: BlockerScope::Internal,
-                id: Some(blocker),
-                node_id: Some(format!("I_{blocker}")),
-            },
-        }
-    }
-}
+mod tests;

@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
 
 use crate::model::{BlockerScope, Dependency, Issue, LocalReplica};
-pub(crate) use rollout::RolloutState;
+pub(crate) use rollout::{OneStepAnalysis, RolloutState};
 use scc::{cyclic_issue_numbers, strongly_connected_components};
 
 #[derive(Clone, Copy)]
@@ -156,6 +156,13 @@ impl<'a> OperationalGraph<'a> {
 
     pub(crate) fn dependencies_for(&self, number: u64) -> &[&'a Dependency] {
         self.dependencies_by_blocked
+            .get(&number)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    pub(crate) fn dependents_for(&self, number: u64) -> &[u64] {
+        self.dependents_by_blocker
             .get(&number)
             .map(Vec::as_slice)
             .unwrap_or(&[])
