@@ -16,7 +16,10 @@ recommendations from
 from [Issue #23](https://github.com/syntropika/grit/issues/23). It also generates
 and explores the static graph from
 [Issue #8](https://github.com/syntropika/grit/issues/8) and
-[Issue #12](https://github.com/syntropika/grit/issues/12).
+[Issue #12](https://github.com/syntropika/grit/issues/12), including the
+relationship filters and isolation tools from
+[Issue #16](https://github.com/syntropika/grit/issues/16) and the dense-graph
+guardrail from [Issue #17](https://github.com/syntropika/grit/issues/17).
 
 ## Build and test
 
@@ -26,6 +29,7 @@ Grit requires a stable Rust toolchain with Edition 2024 support.
 cargo build
 cargo test
 cargo clippy --all-targets --all-features -- -D warnings
+node --test tests/network_view.test.js
 ```
 
 The browser acceptance test is intentionally gated because the ordinary Rust
@@ -35,6 +39,9 @@ binary (Google Chrome by default):
 ```bash
 GRIT_BROWSER=google-chrome cargo test --test graph_cli \
   generated_site_is_a_keyboard_accessible_offline_graph_explorer -- --ignored --exact
+
+GRIT_BROWSER=google-chrome cargo test --release \
+  graph::benchmark::dense_graph_browser_benchmark -- --ignored --exact --nocapture
 ```
 
 The test launches an ephemeral headless profile with background networking
@@ -116,8 +123,9 @@ grit graph --repo OWNER/REPO --output site/ --json
 grit graph --repo OWNER/REPO --output site/ --assignee LOGIN --horizon 3
 ```
 
-The target contains `index.html`, `app.css`, `app.js`, `graph.json`, and
-`graph.schema.json`. The versioned JSON uses explicit `blocked` and `blocker`
+The target contains `index.html`, `app.css`, `graph-query.js`, `network-view.js`, `app.js`,
+`graph.json`, and `graph.schema.json`. The versioned JSON uses explicit
+`blocked` and `blocker`
 edge roles, normalized Issue fields, precomputed layered positions,
 operational counts, hashes, and provenance. Bodies, comments, raw API records,
 and Operation markers are not part of the artifact.
@@ -138,6 +146,27 @@ Issue table. Its detail panel shows readiness, blockers, dependents, and the
 canonical GitHub link. Labels appear only on hover, focus, or selection, and
 the zoom controls never recalculate layout or ranking. All assets are local;
 the browser does not contact GitHub or any other network service.
+
+Readiness, state, Declared priority, area-label, assignee, and disconnected
+component filters compose over the static data. Area, multi-component, and
+optional Project controls are omitted when their source data is absent; the
+current Issues-only artifact has no Project membership and therefore renders
+no Project filter. Root-and-depth isolation follows Dependencies in both
+directions to bound the visible
+neighborhood while preserving every precomputed position and metric. Separate
+actions highlight transitive upstream blockers, transitive downstream
+dependents, or the shortest directed path between two selected nodes. The
+table mirrors the filtered nodes and relationship annotations, including all
+matching results outside a constrained network window. `Clear view` restores
+the initial graph view.
+
+The measured full-network range is 5,000 nodes and 20,000 edges. Larger
+artifacts open with an at-most-500-node overview seeded from Ready Issues.
+Search and the complete accessible table remain available; selecting a result
+opens its bounded neighborhood, while rendering the full network requires an
+explicit action. Every view reuses positions produced by the binary. The
+browser does not run layout or ranking. See the reproducible measurements and
+environment in [`docs/benchmarks/graph-browser.md`](docs/benchmarks/graph-browser.md).
 
 Generation validates the closed artifact model in a staging directory before
 replacing the target. Regenerating from the same effective Local replica is

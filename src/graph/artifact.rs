@@ -130,6 +130,8 @@ pub(super) enum ArtifactNode {
         title: String,
         assignees: Vec<String>,
         labels: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        projects: Option<Vec<String>>,
         priority: PriorityState,
         #[serde(skip_serializing_if = "Option::is_none")]
         pagerank_bucket: Option<u64>,
@@ -181,6 +183,13 @@ pub(super) enum LayerRole {
 }
 
 impl ArtifactNode {
+    pub(super) fn projects(&self) -> Option<&[String]> {
+        match self {
+            Self::Issue { projects, .. } => projects.as_deref(),
+            Self::ExternalBlocker { .. } => None,
+        }
+    }
+
     pub(super) fn key(&self) -> &NodeKey {
         &self.common().key
     }
@@ -464,6 +473,7 @@ pub(super) fn build(
             priority: PriorityState::from_issue_labels(&issue.labels),
             pagerank_bucket: pagerank_buckets.get(&issue.number).copied(),
             unlock_count,
+            projects: None,
         });
     }
 
@@ -658,6 +668,9 @@ fn validate(artifact: &GraphArtifact) -> Result<(), GraphError> {
             }
             ArtifactNode::Issue { .. } | ArtifactNode::ExternalBlocker { .. } => {}
         }
+        if !valid_projects(node) {
+            return Err(GraphError::InvalidField("nodes.projects"));
+        }
         validate_element_provenance(node.provenance(), &pending_ids)?;
     }
     for edge in &artifact.edges {
@@ -677,6 +690,17 @@ fn validate(artifact: &GraphArtifact) -> Result<(), GraphError> {
         return Err(GraphError::ArtifactHashMismatch);
     }
     Ok(())
+}
+
+fn valid_projects(node: &ArtifactNode) -> bool {
+    let Some(projects) = node.projects() else {
+        return true;
+    };
+    !projects.is_empty()
+        && projects.iter().all(|project| !project.trim().is_empty())
+        && projects
+            .windows(2)
+            .all(|pair| pair[0].to_ascii_lowercase() < pair[1].to_ascii_lowercase())
 }
 
 fn validate_element_provenance(
@@ -756,4 +780,66 @@ fn unresolved_position() -> Position {
 fn sort_and_deduplicate(values: &mut Vec<String>) {
     values.sort_by_key(|value| value.to_ascii_lowercase());
     values.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn optional_project_membership_is_valid_and_rendered_only_when_present() {
+        let issue = crate::model::Issue {
+            id: 1,
+            node_id: "I_1".to_owned(),
+            number: 1,
+            url: "https://github.com/acme/widgets/issues/1".to_owned(),
+            title: "Project work".to_owned(),
+            body: String::new(),
+            state: "open".to_owned(),
+            state_reason: None,
+            author: None,
+            assignees: Vec::new(),
+            labels: Vec::new(),
+            comments: Vec::new(),
+            created_at: "2026-08-01T00:00:00Z".to_owned(),
+            updated_at: "2026-08-01T00:00:00Z".to_owned(),
+            closed_at: None,
+        };
+        let replica = LocalReplica::build(
+            "acme/widgets".to_owned(),
+            "2026-08-07T00:00:00Z".to_owned(),
+            Vec::new(),
+            vec![issue],
+            Vec::new(),
+        )
+        .expect("Project fixture");
+        let mut artifact = build(
+            &replica,
+            ExecutionScope::Available,
+            ranking::DEFAULT_HORIZON,
+        )
+        .expect("Project artifact");
+        if let ArtifactNode::Issue { projects, .. } = &mut artifact.nodes[0] {
+            *projects = Some(vec!["Platform".to_owned(), "Roadmap".to_owned()]);
+        }
+        artifact.artifact_hash = calculate_hash(&artifact).expect("artifact hash");
+        validate(&artifact).expect("valid artifact with Project membership");
+        validate_serialized(&serde_json::to_vec(&artifact).expect("serialized artifact"))
+            .expect("serialized Project artifact");
+        let html =
+            crate::graph::render::html(&artifact, &crate::graph::presentation::build(&artifact))
+                .expect("rendered Project artifact");
+        assert!(html.contains("<th scope=\"col\">Projects</th>"));
+        assert!(html.contains("<td>Platform, Roadmap</td>"));
+
+        if let ArtifactNode::Issue { projects, .. } = &mut artifact.nodes[0] {
+            *projects = None;
+        }
+        artifact.artifact_hash = calculate_hash(&artifact).expect("artifact hash without Projects");
+        validate(&artifact).expect("valid artifact without Project membership");
+        let html =
+            crate::graph::render::html(&artifact, &crate::graph::presentation::build(&artifact))
+                .expect("rendered artifact without Projects");
+        assert!(!html.contains("<th scope=\"col\">Projects</th>"));
+    }
 }
