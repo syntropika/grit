@@ -88,6 +88,81 @@ fn offline_priority_survives_restart_and_changes_analysis_without_remote_writes(
 }
 
 #[test]
+fn offline_priority_orders_later_rollout_steps_and_preserves_operation_provenance() {
+    let fixture = synchronized_fixture_with(
+        &[(1, "priority:p1"), (2, "priority:p3"), (3, "priority:p4")],
+        1,
+    );
+    let mut unavailable = Server::new();
+    let unavailable_mocks = mock_unavailable(&mut unavailable, 3, "priority:p4", 2, 3);
+
+    let first = update_command(&fixture.state, &unavailable.url(), 3, "p2")
+        .output()
+        .expect("queue later-step P2");
+    assert_success(&first);
+    let first: Value = serde_json::from_slice(&first.stdout).expect("first operation");
+    let after_first = next_command(&fixture.state, &unavailable.url())
+        .output()
+        .expect("rank first projected rollout");
+    assert_success(&after_first);
+    let after_first: Value = serde_json::from_slice(&after_first.stdout).expect("first rollout");
+
+    let second = update_command(&fixture.state, &unavailable.url(), 3, "p1")
+        .output()
+        .expect("queue later-step P1");
+    assert_success(&second);
+    let second: Value = serde_json::from_slice(&second.stdout).expect("second operation");
+    let outbox_path = fixture
+        .state
+        .path()
+        .join("repositories/acme/offline/outbox.json");
+    let outbox_before = fs::read(&outbox_path).expect("queued mutations");
+    let ranked = next_command(&fixture.state, &unavailable.url())
+        .output()
+        .expect("rank final projected rollout");
+    let repeated = next_command(&fixture.state, &unavailable.url())
+        .output()
+        .expect("repeat after process restart");
+    assert_success(&ranked);
+    assert_success(&repeated);
+    assert_eq!(ranked.stdout, repeated.stdout);
+    let ranked: Value = serde_json::from_slice(&ranked.stdout).expect("final rollout");
+    let operation_ids = json!([first["operation"]["id"], second["operation"]["id"]]);
+    assert_eq!(ranked["parameters"]["horizon"], 3);
+    assert_eq!(ranked["mode"], "normal");
+    assert_eq!(ranked["search_complete"], true);
+    assert_eq!(ranked["global_optimum_claimed"], true);
+    assert_eq!(ranked["runner_up_scope"], "global");
+    assert_eq!(ranked["truncated_by"], json!([]));
+    assert_ne!(ranked["input_hash"], after_first["input_hash"]);
+    assert_eq!(ranked["pending_operation_ids"], operation_ids);
+    assert_eq!(ranked["recommendation"]["operation_ids"], operation_ids);
+    let steps = ranked["recommendation"]["rollout"]["steps"]
+        .as_array()
+        .expect("three-step rollout");
+    assert_eq!(
+        steps
+            .iter()
+            .map(|step| step["issue"]["number"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!(1), json!(3), json!(2)]
+    );
+    assert_eq!(steps[0]["issue"]["pending"], false);
+    assert_eq!(steps[1]["issue"]["priority"]["value"], "p1");
+    assert_eq!(steps[1]["issue"]["operation_ids"], operation_ids);
+    assert_eq!(
+        ranked["comparison_to_runner_up"]["operation_ids"],
+        operation_ids
+    );
+    assert_eq!(
+        fs::read(outbox_path).expect("unchanged mutations"),
+        outbox_before
+    );
+    fixture.assert_replica_unchanged();
+    unavailable_mocks.assert();
+}
+
+#[test]
 fn ordered_concrete_then_none_updates_project_deterministically_across_restarts() {
     let fixture = synchronized_fixture();
     let mut unavailable = Server::new();

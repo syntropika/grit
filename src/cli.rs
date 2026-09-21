@@ -45,8 +45,8 @@ enum Command {
         /// Select Ready work assigned to this GitHub login.
         #[arg(long)]
         assignee: Option<String>,
-        /// Number of completions to evaluate; this slice implements exactly one.
-        #[arg(long, default_value_t = ranking::HORIZON)]
+        /// Number of completions to evaluate, from one through the default three.
+        #[arg(long, default_value_t = ranking::DEFAULT_HORIZON)]
         horizon: u8,
         /// Emit versioned machine-readable output.
         #[arg(long)]
@@ -281,7 +281,7 @@ fn next(
     horizon: u8,
     json: bool,
 ) -> Result<(), CliError> {
-    if horizon != ranking::HORIZON {
+    if !(ranking::MIN_HORIZON..=ranking::MAX_HORIZON).contains(&horizon) {
         return Err(CliError::UnsupportedNextHorizon(horizon));
     }
     let (replica, source) = refresh_or_local(repository)?;
@@ -290,7 +290,7 @@ fn next(
     let scope = assignee
         .map(ExecutionScope::Assignee)
         .unwrap_or(ExecutionScope::Available);
-    let analysis = ranking::analyze(&working, scope);
+    let analysis = ranking::analyze(&working, scope, horizon);
     let warnings = analysis_warnings(&working, source);
     if json {
         let output = NextOutput {
@@ -315,6 +315,9 @@ fn next(
         match analysis.recommendation() {
             Some(recommendation) => println!("{}", recommendation.human_summary()),
             None => println!("{}", analysis.summary().human_empty_summary()),
+        }
+        if let Some(warning) = analysis.truncation_warning() {
+            eprintln!("warning: {warning}");
         }
         for warning in &warnings {
             print_warning(warning);
@@ -774,7 +777,7 @@ pub(crate) enum CliError {
     },
     #[error("could not encode command JSON output: {0}")]
     EncodeOutput(serde_json::Error),
-    #[error("this implementation supports only next/v1 horizon 1, not horizon {0}")]
+    #[error("next/v1 horizon must be between 1 and 3, not {0}")]
     UnsupportedNextHorizon(u8),
     #[error("GitHub refresh failed ({refresh}); no valid Local replica is available ({replica})")]
     RefreshAndReplicaUnavailable { refresh: String, replica: String },
