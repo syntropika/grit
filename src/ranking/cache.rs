@@ -23,6 +23,7 @@ use crate::{
 const CACHE_SCHEMA_VERSION: &str = "grit.ranking-cache/v1";
 const CACHE_FILE_NAME: &str = "ranking-next-v1-cache.json";
 
+#[derive(Default)]
 pub(crate) struct RankingCache {
     path: Option<PathBuf>,
     memory: Option<CacheDocument>,

@@ -1,3 +1,4 @@
+use crate::model::{Issue, StableNodeKey, TemporaryIssueId};
 use std::fmt;
 
 use schemars::JsonSchema;
@@ -6,42 +7,77 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 #[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(super) struct NodeKey {
     repository: String,
-    number: u64,
+    identity: StableNodeKey,
 }
 
 impl NodeKey {
     pub(super) fn new(repository: &str, number: u64) -> Self {
         Self {
             repository: repository.to_owned(),
-            number,
+            identity: StableNodeKey::GitHub(number),
+        }
+    }
+
+    pub(super) fn for_issue(repository: &str, issue: &Issue) -> Self {
+        Self {
+            repository: repository.to_owned(),
+            identity: issue.stable_node_key(),
         }
     }
 
     pub(super) fn parse(value: &str) -> Result<Self, String> {
-        let (repository, number) = value
+        let (repository, identity) = value
             .rsplit_once('#')
             .ok_or_else(|| format!("invalid Stable node key {value}"))?;
-        let number: u64 = number
-            .parse()
-            .map_err(|_| format!("invalid Stable node key {value}"))?;
-        if repository.is_empty() || number == 0 {
+        if repository.is_empty() {
             return Err(format!("invalid Stable node key {value}"));
         }
-        Ok(Self::new(repository, number))
+        let identity = if let Some(temporary_id) = identity.strip_prefix("draft:") {
+            StableNodeKey::Draft(
+                temporary_id
+                    .parse()
+                    .map_err(|_| format!("invalid Stable node key {value}"))?,
+            )
+        } else {
+            let number = identity
+                .parse::<u64>()
+                .map_err(|_| format!("invalid Stable node key {value}"))?;
+            if number == 0 {
+                return Err(format!("invalid Stable node key {value}"));
+            }
+            StableNodeKey::GitHub(number)
+        };
+        Ok(Self {
+            repository: repository.to_owned(),
+            identity,
+        })
     }
 
     pub(super) fn repository(&self) -> &str {
         &self.repository
     }
 
-    pub(super) fn number(&self) -> u64 {
-        self.number
+    pub(super) fn number(&self) -> Option<u64> {
+        match self.identity {
+            StableNodeKey::GitHub(number) => Some(number),
+            StableNodeKey::Draft(_) => None,
+        }
+    }
+
+    pub(super) fn temporary_id(&self) -> Option<TemporaryIssueId> {
+        match self.identity {
+            StableNodeKey::GitHub(_) => None,
+            StableNodeKey::Draft(id) => Some(id),
+        }
     }
 }
 
 impl fmt::Display for NodeKey {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}#{}", self.repository, self.number)
+        match self.identity {
+            StableNodeKey::GitHub(number) => write!(formatter, "{}#{number}", self.repository),
+            StableNodeKey::Draft(id) => write!(formatter, "{}#draft:{id}", self.repository),
+        }
     }
 }
 

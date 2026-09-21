@@ -216,6 +216,12 @@ enum Command {
         /// Target directory for the complete static site.
         #[arg(long)]
         output: PathBuf,
+        /// Select Ready work assigned to this GitHub login.
+        #[arg(long)]
+        assignee: Option<String>,
+        /// Ranking horizon embedded in the static analysis.
+        #[arg(long, default_value_t = ranking::DEFAULT_HORIZON)]
+        horizon: u8,
         /// Emit versioned machine-readable output.
         #[arg(long)]
         json: bool,
@@ -346,6 +352,8 @@ pub(crate) fn execute() -> Result<(), CliError> {
         Command::Graph {
             repo,
             output,
+            assignee,
+            horizon,
             json,
             public,
             public_label_prefix,
@@ -353,12 +361,13 @@ pub(crate) fn execute() -> Result<(), CliError> {
         } => graph(
             &Repository::parse(&repo)?,
             &output,
+            assignee.as_deref(),
+            horizon,
             json,
-            public,
-            PublicGraphOptions {
+            public.then_some(PublicGraphOptions {
                 label_prefixes: public_label_prefix,
                 include_assignees: public_include_assignees,
-            },
+            }),
         ),
         Command::Next {
             repo,
@@ -451,6 +460,69 @@ pub(crate) fn execute() -> Result<(), CliError> {
     }
 }
 
+fn graph(
+    repository: &Repository,
+    output: &std::path::Path,
+    assignee: Option<&str>,
+    horizon: u8,
+    json: bool,
+    public_options: Option<PublicGraphOptions>,
+) -> Result<(), CliError> {
+    if !(ranking::MIN_HORIZON..=ranking::MAX_HORIZON).contains(&horizon) {
+        return Err(CliError::UnsupportedNextHorizon(horizon));
+    }
+    let (replica, source, site) = if let Some(public_options) = public_options {
+        let client = github_client()?;
+        let metadata = client.fetch_repository_metadata(repository)?;
+        let confirmed = confirm_public_repository(repository.full_name(), metadata)?;
+        let (replica, source) = refresh_or_local_with_client(repository, &client)?;
+        let site =
+            crate::graph::publish_public_site(&replica, &confirmed, &public_options, output)?;
+        (replica, source, site)
+    } else {
+        let (replica, source) = refresh_or_local(repository)?;
+        let scope = assignee
+            .map(ExecutionScope::Assignee)
+            .unwrap_or(ExecutionScope::Available);
+        let outbox = OutboxStore::discover(repository)?.load(repository)?;
+        let working = WorkingGraph::project(&replica, &outbox)?;
+        let site = publish_site(&working, scope, horizon, output)?;
+        (replica, source, site)
+    };
+    let output_path = output.display().to_string();
+    let result = GraphOutput {
+        schema_version: GRAPH_SCHEMA_VERSION,
+        command: "graph",
+        repository: &replica.repository,
+        source,
+        synced_at: &replica.synced_at,
+        input_hash: &site.input_hash,
+        output: &output_path,
+        artifact: GraphArtifactSummary {
+            schema_version: site.schema_version,
+            node_count: site.node_count,
+            edge_count: site.edge_count,
+            artifact_hash: &site.artifact_hash,
+        },
+    };
+    if json {
+        serde_json::to_writer(std::io::stdout().lock(), &result).map_err(CliError::EncodeOutput)?;
+        println!();
+    } else {
+        println!(
+            "Generated {} nodes and {} Dependencies in {}",
+            site.node_count, site.edge_count, output_path
+        );
+        if source.is_fallback() {
+            eprintln!(
+                "warning: GitHub refresh failed; generated from Local replica at {}",
+                replica.synced_at
+            );
+        }
+    }
+    Ok(())
+}
+
 fn plan(
     repository: &Repository,
     assignee: Option<&str>,
@@ -473,10 +545,9 @@ fn plan(
     let prepared = PreparedRepository::prepare(&working);
     let store = ReplicaStore::discover(repository)?;
     let mut cache = ranking::RankingCache::at(store.repository_directory());
-    let decision = ranking::analyze_prepared(&prepared, scope, horizon, &mut cache)
-        .analysis
-        .into_plan_decision();
-    let structural = crate::plan::analyze(&prepared, scope);
+    let bundle = ranking::analyze_prepared_bundle(&prepared, scope, horizon, &mut cache);
+    let structural = crate::plan::analyze_with_ready(&prepared, scope, &bundle.ready);
+    let decision = bundle.run.analysis.into_plan_decision();
     let parallel_now = structural.parallel_now;
     let dependency_layers = structural.dependency_layers;
     let warnings = analysis_warnings(&working, source);
@@ -503,8 +574,8 @@ fn plan(
             "plan/v1 for {} (synced_at {}):",
             replica.repository, replica.synced_at
         );
-        match decision.recommendation() {
-            Some(recommendation) => println!("{}", recommendation.human_summary()),
+        match decision.human_recommendation_summary() {
+            Some(recommendation) => println!("{recommendation}"),
             None => println!("{}", decision.summary().human_empty_summary()),
         }
         println!("parallel_now:");
@@ -964,61 +1035,6 @@ fn print_reconciliation(
     }
     Ok(())
 }
-
-fn graph(
-    repository: &Repository,
-    output: &std::path::Path,
-    json: bool,
-    public: bool,
-    public_options: PublicGraphOptions,
-) -> Result<(), CliError> {
-    let (replica, source, site) = if public {
-        let client = github_client()?;
-        let metadata = client.fetch_repository_metadata(repository)?;
-        let confirmed = confirm_public_repository(repository.full_name(), metadata)?;
-        let (replica, source) = refresh_or_local_with_client(repository, &client)?;
-        let site =
-            crate::graph::publish_public_site(&replica, &confirmed, &public_options, output)?;
-        (replica, source, site)
-    } else {
-        let (replica, source) = refresh_or_local(repository)?;
-        let site = publish_site(&replica, output)?;
-        (replica, source, site)
-    };
-    let output_path = output.display().to_string();
-    let result = GraphOutput {
-        schema_version: GRAPH_SCHEMA_VERSION,
-        command: "graph",
-        repository: &replica.repository,
-        source,
-        synced_at: &replica.synced_at,
-        input_hash: &site.input_hash,
-        output: &output_path,
-        artifact: GraphArtifactSummary {
-            schema_version: site.schema_version,
-            node_count: site.node_count,
-            edge_count: site.edge_count,
-            artifact_hash: &site.artifact_hash,
-        },
-    };
-    if json {
-        serde_json::to_writer(std::io::stdout().lock(), &result).map_err(CliError::EncodeOutput)?;
-        println!();
-    } else {
-        println!(
-            "Generated {} nodes and {} Dependencies in {}",
-            site.node_count, site.edge_count, output_path
-        );
-        if source.is_fallback() {
-            eprintln!(
-                "warning: GitHub refresh failed; generated from Local replica at {}",
-                replica.synced_at
-            );
-        }
-    }
-    Ok(())
-}
-
 fn initialize(repository: &Repository, json: bool) -> Result<(), CliError> {
     let client = github_client()?;
     let labels = client.fetch_labels(repository)?;
@@ -1347,8 +1363,8 @@ fn next(
             "next/v1 recommendation in {} (synced_at {}):",
             replica.repository, replica.synced_at
         );
-        match analysis.recommendation() {
-            Some(recommendation) => println!("{}", recommendation.human_summary()),
+        match analysis.human_recommendation_summary() {
+            Some(recommendation) => println!("{recommendation}"),
             None => println!("{}", analysis.summary().human_empty_summary()),
         }
         if let Some(warning) = analysis.truncation_warning() {
@@ -1979,8 +1995,8 @@ struct PlanOutput<'a> {
     replica_snapshot_hash: &'a str,
     execution_scope: ExecutionScopeOutput<'a>,
     decision: PlanDecision,
-    parallel_now: Vec<PlanIssue<'a>>,
-    dependency_layers: DependencyLayers<'a>,
+    parallel_now: Vec<PlanIssue>,
+    dependency_layers: DependencyLayers,
     warnings: Vec<ReadyWarning>,
 }
 

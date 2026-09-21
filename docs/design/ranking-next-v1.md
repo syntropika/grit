@@ -299,6 +299,8 @@ Minimum reason codes:
 
 Output marks `close_call: true` when the two best distinct first Issues differ only by PageRank or Stable node key. It does not present a `0.731` versus `0.729` difference as scheduling certainty.
 
+`comparison_to_runner_up` is the canonical typed decisive reason whenever a distinct runner-up exists and carries its human presentation message. The recommendation's `reasons` array contains only mode-specific supporting facts, each with its canonical message; consumers must not infer the decisive comparison from array position. With one candidate, `only_executable_candidate` is the decisive mode reason and its serialized message is the presentation source.
+
 PageRank is calculated with the fixed parameters above, and output exposes both its state and `pagerank_bucket`. It is a global stage: either every candidate receives a bucket or PageRank disappears from every key. If it fails, expires, or is omitted, the stable fallback is used; it is never replaced with uniform values or missing for only some nodes.
 
 Results based on a Working graph mark affected edges, Issues, and reasons as `pending`. A Priority conflict appears in `warnings` even though the Issue remains eligible with neutral priority. The explanation breaks down assigned and unassigned members of the Unlock set even though both count equally in v1.

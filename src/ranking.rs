@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     num::NonZeroUsize,
     time::{Duration, Instant},
 };
@@ -17,7 +18,7 @@ mod search;
 
 use crate::{
     model::Issue,
-    operational::{ExecutionScope, PreparedRepository},
+    operational::{ExecutionScope, PreparedRepository, ReadyAnalysis},
     priority::PriorityComparison,
     working_graph::WorkingGraph,
 };
@@ -151,6 +152,22 @@ pub(crate) fn analyze_prepared(
     horizon: u8,
     cache: &mut RankingCache,
 ) -> AnalysisRun {
+    analyze_prepared_bundle(prepared, scope, horizon, cache).run
+}
+
+pub(crate) struct AnalysisBundle<'a> {
+    pub(crate) run: AnalysisRun,
+    pub(crate) ready: ReadyAnalysis<'a>,
+    pub(crate) candidate_unlock_counts: BTreeMap<u64, usize>,
+    pub(crate) pagerank_buckets: BTreeMap<u64, u64>,
+}
+
+pub(crate) fn analyze_prepared_bundle<'a>(
+    prepared: &'a PreparedRepository<'a>,
+    scope: ExecutionScope<'_>,
+    horizon: u8,
+    cache: &mut RankingCache,
+) -> AnalysisBundle<'a> {
     let total_started = Instant::now();
     let working = prepared.working();
     let graph = prepared.graph();
@@ -189,9 +206,23 @@ pub(crate) fn analyze_prepared(
         (pagerank, search)
     };
     let output_started = Instant::now();
+    let pagerank_buckets = pagerank
+        .as_ref()
+        .map(|metric| metric.buckets().clone())
+        .unwrap_or_default();
     let mode = search.mode;
     let candidate_count = search.candidate_count;
     let search_complete = search.truncated_by.is_empty();
+    let candidate_unlock_counts = search
+        .candidates
+        .iter()
+        .map(|candidate| {
+            (
+                candidate.data().issue.number,
+                candidate.data().unlocks.len(),
+            )
+        })
+        .collect();
     let truncated_by = search.truncated_by;
     let work = search.work;
     let ranking_provenance_context: Vec<_> = search.provenance_numbers.into_iter().collect();
@@ -215,7 +246,6 @@ pub(crate) fn analyze_prepared(
     let close_call = decisive
         .as_ref()
         .is_some_and(decision::DecisiveComparison::is_close_call);
-    let mut comparison_reason = decisive.map(explanation::reason);
     let executable_p0_count = ready
         .executable
         .iter()
@@ -224,12 +254,8 @@ pub(crate) fn analyze_prepared(
 
     let mut ranked_results = evaluated.into_iter().enumerate().map(|(index, candidate)| {
         let mut reasons = explanation::mode_reasons(executable_p0_count, &candidate);
-        if index == 0 {
-            if let Some(reason) = comparison_reason.take() {
-                reasons.push(reason);
-            } else if candidate_count == 1 && reasons.is_empty() {
-                reasons.push(explanation::only_candidate_reason(candidate_count));
-            }
+        if index == 0 && candidate_count == 1 {
+            reasons.push(explanation::only_candidate_reason(candidate_count));
         }
         output::candidate_output(candidate, working, &ranking_provenance_context, reasons)
     });
@@ -254,20 +280,25 @@ pub(crate) fn analyze_prepared(
         work,
     });
     let output_assembly = output_started.elapsed();
-    AnalysisRun {
-        analysis,
-        profile: AnalysisProfile {
-            graph_preparation: Duration::ZERO,
-            scc_detection: Duration::ZERO,
-            readiness,
-            cache_lookup,
-            pagerank: pagerank_duration,
-            search: search_duration,
-            output_assembly,
-            cache_publication,
-            total: total_started.elapsed(),
-            cache_hit,
-            cache_published,
+    AnalysisBundle {
+        ready,
+        candidate_unlock_counts,
+        pagerank_buckets,
+        run: AnalysisRun {
+            analysis,
+            profile: AnalysisProfile {
+                graph_preparation: Duration::ZERO,
+                scc_detection: Duration::ZERO,
+                readiness,
+                cache_lookup,
+                pagerank: pagerank_duration,
+                search: search_duration,
+                output_assembly,
+                cache_publication,
+                total: total_started.elapsed(),
+                cache_hit,
+                cache_published,
+            },
         },
     }
 }

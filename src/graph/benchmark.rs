@@ -23,7 +23,12 @@ fn dense_graph_browser_benchmark() {
     ] {
         let replica = synthetic_replica(node_count, edge_count);
         let artifact_started = Instant::now();
-        let artifact = artifact::build(&replica).expect("synthetic graph artifact");
+        let artifact = artifact::build(
+            &replica,
+            crate::operational::ExecutionScope::Available,
+            crate::ranking::DEFAULT_HORIZON,
+        )
+        .expect("synthetic graph artifact");
         let artifact_build = artifact_started.elapsed();
 
         let mut positioned_nodes = artifact.nodes.clone();

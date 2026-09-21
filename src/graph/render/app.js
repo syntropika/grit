@@ -3,7 +3,19 @@
 
   const applicationStartedAt = performance.now();
   const svgNamespace = "http://www.w3.org/2000/svg";
-  const graph = JSON.parse(document.querySelector("#graph-data").textContent);
+  const artifact = JSON.parse(document.querySelector("#graph-data").textContent);
+  const graph = {
+    ...artifact,
+    nodes: artifact.nodes.map((node) => ({
+      ...node,
+      ...node.common,
+      assignees: node.assignees || [],
+      labels: node.labels || [],
+      state: lifecycleForStatus(node.status),
+      readiness: node.status
+    }))
+  };
+  const analysis = graph.analysis;
   const presentation = JSON.parse(
     document.querySelector("#graph-presentation-data").textContent
   );
@@ -16,6 +28,11 @@
   const layerLabels = document.querySelector("#layer-labels");
   const search = document.querySelector("#graph-search");
   const searchStatus = document.querySelector("#search-status");
+  const sizeMetric = document.querySelector("#node-size-metric");
+  const colorMetric = document.querySelector("#node-color-metric");
+  const recommendationStatus = document.querySelector("#recommendation-status");
+  const recommendationEvidence = document.querySelector("#recommendation-evidence");
+  const recommendationSelect = document.querySelector("#recommendation-select");
   const viewStatus = document.querySelector("#view-status");
   const detailPanel = document.querySelector("#issue-details");
   const tableBody = document.querySelector("tbody");
@@ -35,12 +52,18 @@
     depth: document.querySelector("#root-depth"),
     pathTarget: document.querySelector("#path-target")
   };
-  const view = { isolatedKeys: null, highlightedNodes: new Map(), highlightedEdges: new Map() };
+  const view = {
+    isolatedKeys: null,
+    highlightedNodes: new Map(),
+    highlightedEdges: new Map(),
+    recommendationSelected: false
+  };
   let zoom = 1;
 
   const initialRenderStartedAt = performance.now();
   renderGraph(networkView.current(), "initial overview");
   const initialRenderDuration = performance.now() - initialRenderStartedAt;
+  renderAnalysis();
   populateControls();
   bindControls();
   applyView();
@@ -49,6 +72,12 @@
   document.documentElement.dataset.gritRenderMs = initialRenderDuration.toFixed(3);
   document.documentElement.dataset.gritTimeToInteractiveMs = performance.now().toFixed(3);
   document.documentElement.dataset.gritNetworkMode = presentation.mode;
+
+  function lifecycleForStatus(status) {
+    if (status === "ready" || status === "blocked" || status === "external_open") return "open";
+    if (status === "closed" || status === "external_closed") return "closed";
+    return "unknown";
+  }
 
   function renderGraph(keys, description) {
     graphElementsByKey.clear();
@@ -151,6 +180,8 @@
     for (const [key, className] of view.highlightedEdges) {
       edgeElementsByKey.get(key)?.classList.add(className);
     }
+    applyVisualMetrics();
+    if (view.recommendationSelected) applyRecommendationHighlights();
     updateNetworkStatus(description);
   }
 
@@ -269,6 +300,116 @@
     });
     document.querySelector("#highlight-path").addEventListener("click", highlightPath);
     document.querySelector("#clear-view").addEventListener("click", clearView);
+    sizeMetric.addEventListener("change", applyVisualMetrics);
+    colorMetric.addEventListener("change", applyVisualMetrics);
+    recommendationSelect.addEventListener("click", selectRecommendation);
+  }
+
+  function issueLabel(issue) {
+    return issue.number == null ? issue.key : `#${issue.number}`;
+  }
+
+  function renderAnalysis() {
+    const decision = analysis.next;
+    const recommendation = decision.recommendation;
+    if (!recommendation) {
+      recommendationStatus.textContent = "No Issue is executable in this scope.";
+      recommendationSelect.hidden = true;
+    } else {
+      recommendationStatus.textContent = `Do ${issueLabel(recommendation.first_issue)} ${recommendation.first_issue.title}${recommendation.pending ? " [pending]" : ""}`;
+    }
+    const runnerUp = decision.comparison_to_runner_up?.runner_up;
+    const onlyCandidate = recommendation?.reasons.find(
+      (reason) => reason.reason.code === "only_executable_candidate"
+    );
+    appendEvidence(
+      "Reason",
+      decision.comparison_to_runner_up?.message
+        || onlyCandidate?.message
+        || "No executable recommendation"
+    );
+    appendEvidence("Runner-up", runnerUp ? `${issueLabel(runnerUp)} ${runnerUp.title}` : "None");
+    appendEvidence("Search", decision.search_complete ? "Complete" : `Restricted: ${decision.truncated_by.join(", ")}`);
+    appendEvidence(
+      "Parallel now",
+      analysis.plan.parallel_now.map(issueLabel).join(", ") || "None"
+    );
+    appendEvidence("Unresolved", String(analysis.plan.dependency_layers.unresolved.length));
+    appendEvidence("Cycles", String(decision.summary.cyclic_issue_count));
+    appendEvidence(
+      "Unknown External blockers",
+      String(graph.nodes.filter((node) => node.readiness === "external_unknown").length)
+    );
+  }
+
+  function appendEvidence(term, value) {
+    const dt = document.createElement("dt");
+    dt.textContent = term;
+    const dd = document.createElement("dd");
+    dd.textContent = value;
+    recommendationEvidence.append(dt, dd);
+  }
+
+  function selectRecommendation() {
+    const recommendation = analysis.next.recommendation;
+    if (!recommendation) return;
+    view.recommendationSelected = true;
+    selectNode(recommendation.first_issue.key);
+    applyRecommendationHighlights();
+  }
+
+  function applyRecommendationHighlights() {
+    const recommendation = analysis.next.recommendation;
+    const rolloutKeys = new Set(recommendation.rollout.steps.map((step) => step.issue.key));
+    const unlockedKeys = new Set(recommendation.outcome.unlocks.map((unlock) => unlock.issue.key));
+    const relevantKeys = new Set([...rolloutKeys, ...unlockedKeys]);
+    for (const key of [...relevantKeys]) {
+      for (const blocker of query.blockersByKey.get(key) || []) relevantKeys.add(blocker);
+    }
+    for (const [key, element] of graphElementsByKey) {
+      element.classList.toggle("causal-path", rolloutKeys.has(key));
+      element.classList.toggle("unlocked-outcome", unlockedKeys.has(key));
+      element.classList.toggle("relevant-blocker", relevantKeys.has(key) && !rolloutKeys.has(key) && !unlockedKeys.has(key));
+    }
+    for (const [key, row] of tableRowsByKey) {
+      row.classList.toggle("causal-evidence", relevantKeys.has(key));
+    }
+    for (const edge of edgeLayer.children) {
+      edge.classList.toggle(
+        "causal-path",
+        relevantKeys.has(edge.dataset.blocker) && relevantKeys.has(edge.dataset.blocked)
+      );
+    }
+  }
+
+  function applyVisualMetrics() {
+    const metric = sizeMetric.value;
+    const values = graph.nodes.map((node) => Number(node[metric] || 0));
+    const maximum = Math.max(1, ...values);
+    for (const node of graph.nodes) {
+      const element = graphElement(node.key);
+      if (!element) continue;
+      const circle = element.querySelector("circle");
+      const value = Number(node[metric] || 0);
+      const radius = metric === "uniform" ? 9 : 7 + 10 * Math.sqrt(value / maximum);
+      circle.setAttribute("r", radius.toFixed(2));
+      element.dataset.sizeMetric = metric;
+      element.dataset.sizeValue = String(value);
+      for (const className of [...element.classList]) {
+        if (className.startsWith("color-")) element.classList.remove(className);
+      }
+      element.classList.add(colorClass(node, colorMetric.value));
+    }
+  }
+
+  function colorClass(node, metric) {
+    if (metric === "state") return `color-state-${node.state}`;
+    if (metric === "priority") {
+      if (!node.priority) return "color-priority-none";
+      if (node.priority.state === "declared") return `color-priority-${node.priority.value}`;
+      return `color-priority-${node.priority.state}`;
+    }
+    return `color-readiness-${node.readiness}`;
   }
 
   function applyView() {
@@ -377,14 +518,12 @@
     badge.textContent = node.readiness;
     const details = document.createElement("dl");
     appendDetail(details, "State", node.state);
-    appendDetail(
-      details,
-      "Priority",
-      node.kind === "issue" ? query.declaredPriority(node) : "—"
-    );
     appendDetail(details, "Layer", node.position.layer === null ? "unresolved / SCC" : String(node.position.layer));
-    appendDetail(details, "Assignees", node.assignees.join(", ") || "—");
-    appendDetail(details, "Labels", node.labels.join(", ") || "—");
+    appendDetail(details, "Assignees", (node.assignees || []).join(", ") || "—");
+    appendDetail(details, "Labels", (node.labels || []).join(", ") || "—");
+    appendDetail(details, "Declared priority", priorityLabel(node.priority));
+    appendDetail(details, "Unlock behavior", node.unlock_count == null ? "—" : String(node.unlock_count));
+    appendDetail(details, "PageRank bucket", node.pagerank_bucket == null ? "—" : String(node.pagerank_bucket));
     const projects = query.projectsFor(node);
     if (projects.length > 0) appendDetail(details, "Projects", projects.join(", "));
     detailPanel.append(heading, key, badge, details);
@@ -519,6 +658,8 @@
     controls.pathTarget.selectedIndex = 0;
     clearRelationshipHighlights();
     clearSelection();
+    view.recommendationSelected = false;
+    for (const row of tableRowsByKey.values()) row.classList.remove("causal-evidence");
     renderGraph(networkView.reset(), "initial overview");
     setZoom(1);
     applyView();
@@ -570,6 +711,12 @@
 
   function nodeLabel(node) {
     return `${node.key}: ${node.title || "External blocker"}; ${node.readiness}`;
+  }
+
+  function priorityLabel(priority) {
+    if (!priority) return "—";
+    if (priority.state === "declared") return priority.value;
+    return priority.state;
   }
 
   function svgElement(name) {

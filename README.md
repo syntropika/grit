@@ -167,7 +167,7 @@ grit next --repo OWNER/REPO --assignee LOGIN --horizon 3 --json
 grit next --repo OWNER/REPO --profile --json
 ```
 
-The `next/v1` policy first enforces Executable P0 and one-step P0-route gates.
+The `next/v1` policy first enforces Executable P0 and feasible P0-route gates within the remaining Planning horizon.
 Every later step is selected from the Executable frontier produced by its
 predecessors. The policy compares distinct AND-aware transitions to Ready,
 downstream Priority composition, the cumulative Unlock curve, the completed
@@ -185,7 +185,8 @@ reported in `truncated_by`; a restricted result sets `search_complete` and
 
 Robot output reports both snapshot and effective-input hashes, metric states,
 deterministic main-search and probe work counts, the runner-up comparison,
-structured reasons, and whether the result is a close structural tie. Pending
+canonical presentation messages, mode-specific supporting reasons, and whether
+the result is a close structural tie. Pending
 recommendations, Issue references, comparison evidence, and reasons carry
 operation provenance. If no
 Issue is Executable, the command succeeds with a null recommendation and
@@ -381,6 +382,7 @@ browser-side GitHub client:
 ```bash
 grit graph --repo OWNER/REPO --output site/
 grit graph --repo OWNER/REPO --output site/ --json
+grit graph --repo OWNER/REPO --output site/ --assignee LOGIN --horizon 3
 ```
 
 The target contains `index.html`, `app.css`, `graph-query.js`, `network-view.js`, `app.js`,
@@ -390,7 +392,22 @@ edge roles, normalized Issue fields, precomputed layered positions,
 operational counts, hashes, and provenance. Bodies, comments, raw API records,
 and Operation markers are not part of the artifact.
 
-The browser explorer searches by Issue number or title, renders the precomputed
+The `grit.graph-artifact/v2` artifact also carries the exact precomputed `next/v1` analysis and the
+matching structural `plan` for its Execution scope and horizon. Its summary
+shows the recommendation, decisive reason, distinct runner-up, search
+completeness, immediate parallel work, unresolved cycles, and unknown External
+blockers. Selecting the recommendation highlights its rollout, relevant
+blockers, and unlocked outcomes. Node size can display ranked Unlock behavior
+or PageRank buckets; node color can display readiness, state, or Declared
+priority. The browser only presents values produced by the binary and never
+recalculates ranking or PageRank.
+
+Private graphs project Pending priorities, Dependencies, Draft Issues, field edits,
+and comment provenance from the same Working input as `next` and `plan`. Drafts
+use stable `OWNER/REPO#draft:TEMPORARY_ID` keys and acquire GitHub links only after
+reconciliation assigns a canonical identity. Bodies and comment text remain excluded.
+
+The browser explorer searches by Issue number, Draft key, or title, renders the precomputed
 dependency layers, and keeps graph selection synchronized with an accessible
 Issue table. Its detail panel shows readiness, blockers, dependents, and the
 canonical GitHub link. Labels appear only on hover, focus, or selection, and
@@ -419,8 +436,7 @@ browser does not run layout or ranking. See the reproducible measurements and
 environment in [`docs/benchmarks/graph-browser.md`](docs/benchmarks/graph-browser.md).
 
 Generation validates the closed artifact model in a staging directory before
-replacing the target. Regenerating from the same effective Local replica is
-byte-stable. `synced_at` is the only time field and changes only when the input
+replacing the target. Regenerating from the same Working input is byte-stable. `synced_at` is the only time field and changes only when the input
 replica itself has a different synchronization timestamp.
 
 ### Generate an allowlisted public graph
@@ -473,6 +489,7 @@ commit SHAs, and one cancelable concurrency group prevents an older run from
 replacing a newer bundle. The Repository must be publicly visible: generation
 fails before publication when GitHub reports private, internal, unknown, or
 unreachable visibility.
+
 
 ## Product decisions
 

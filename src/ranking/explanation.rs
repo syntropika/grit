@@ -1,4 +1,5 @@
-use serde::Serialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
@@ -8,24 +9,8 @@ use super::{
 };
 use crate::working_graph::{PendingProvenance, WorkingGraph};
 
-#[derive(Serialize)]
-#[serde(untagged)]
-pub(super) enum Reason {
-    Mode(ModeReason),
-    Comparison(ComparisonReason),
-}
-
-impl Reason {
-    pub(super) fn human_message(&self) -> &'static str {
-        match self {
-            Self::Mode(reason) => reason.human_message(),
-            Self::Comparison(reason) => reason.human_message,
-        }
-    }
-}
-
-#[derive(Serialize)]
-#[serde(tag = "code", rename_all = "snake_case")]
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
+#[serde(tag = "code", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum ModeReason {
     OnlyExecutableCandidate { candidate_count: usize },
     ReadyP0 { executable_p0_count: usize },
@@ -35,7 +20,7 @@ pub(super) enum ModeReason {
 }
 
 impl ModeReason {
-    fn human_message(&self) -> &'static str {
+    pub(super) fn human_message(&self) -> &'static str {
         match self {
             Self::OnlyExecutableCandidate { .. } => "it is the only executable candidate",
             Self::ReadyP0 { .. } => "it is an executable P0",
@@ -46,29 +31,30 @@ impl ModeReason {
             Self::SharedP0Prerequisite { .. } => "it is shared by multiple blocked P0 Issues",
         }
     }
+
+    pub(super) fn is_only_candidate(&self) -> bool {
+        matches!(self, Self::OnlyExecutableCandidate { .. })
+    }
 }
 
-#[derive(Serialize)]
-pub(super) struct ComparisonReason {
-    #[serde(rename = "code")]
-    reason_code: &'static str,
-    component: &'static str,
-    winner_value: Value,
-    runner_up_value: Value,
-    #[serde(skip)]
-    human_message: &'static str,
-}
-
-#[derive(Serialize)]
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct ComparisonEvidence {
     #[serde(flatten)]
     provenance: PendingProvenance,
-    reason_code: &'static str,
-    component: &'static str,
+    reason_code: String,
+    component: String,
     winner: IssueReference,
     runner_up: IssueReference,
     winner_value: Value,
     runner_up_value: Value,
+    message: String,
+}
+
+impl ComparisonEvidence {
+    pub(super) fn human_message(&self) -> &str {
+        &self.message
+    }
 }
 
 pub(super) fn evidence(
@@ -92,47 +78,37 @@ pub(super) fn evidence(
     );
     ComparisonEvidence {
         provenance,
-        reason_code: descriptor.reason_code,
-        component: descriptor.component,
+        reason_code: descriptor.reason_code.to_owned(),
+        component: descriptor.component.to_owned(),
         winner: issue_reference(working, winner.data().issue),
         runner_up: issue_reference(working, runner_up.data().issue),
         winner_value: descriptor.winner_value,
         runner_up_value: descriptor.runner_up_value,
+        message: descriptor.human_message.to_owned(),
     }
-}
-
-pub(super) fn reason(decision: DecisiveComparison) -> Reason {
-    let descriptor = decision.descriptor();
-    Reason::Comparison(ComparisonReason {
-        reason_code: descriptor.reason_code,
-        component: descriptor.component,
-        winner_value: descriptor.winner_value,
-        runner_up_value: descriptor.runner_up_value,
-        human_message: descriptor.human_message,
-    })
 }
 
 pub(super) fn mode_reasons(
     executable_p0_count: usize,
     candidate: &EvaluatedCandidate<'_>,
-) -> Vec<Reason> {
+) -> Vec<ModeReason> {
     let mut reasons = match candidate {
-        EvaluatedCandidate::P0Ready(_) => vec![Reason::Mode(ModeReason::ReadyP0 {
+        EvaluatedCandidate::P0Ready(_) => vec![ModeReason::ReadyP0 {
             executable_p0_count,
-        })],
+        }],
         EvaluatedCandidate::CriticalRoute { route, .. } => {
-            vec![Reason::Mode(ModeReason::ShortestP0Route {
+            vec![ModeReason::ShortestP0Route {
                 critical_distance: route.distance().get(),
-            })]
+            }]
         }
         EvaluatedCandidate::Normal(_) => Vec::new(),
     };
     if let EvaluatedCandidate::CriticalRoute { route, .. } = candidate
         && route.qualifying_p0_count.get() > 1
     {
-        reasons.push(Reason::Mode(ModeReason::SharedP0Prerequisite {
+        reasons.push(ModeReason::SharedP0Prerequisite {
             qualifying_p0_count: route.qualifying_p0_count.get(),
-        }));
+        });
     }
     let critical_step_count = candidate
         .data()
@@ -142,13 +118,13 @@ pub(super) fn mode_reasons(
         .filter(|step| step.selection.mode().is_p0())
         .count();
     if critical_step_count > 0 {
-        reasons.push(Reason::Mode(ModeReason::P0GateContinues {
+        reasons.push(ModeReason::P0GateContinues {
             critical_step_count,
-        }));
+        });
     }
     reasons
 }
 
-pub(super) fn only_candidate_reason(candidate_count: usize) -> Reason {
-    Reason::Mode(ModeReason::OnlyExecutableCandidate { candidate_count })
+pub(super) fn only_candidate_reason(candidate_count: usize) -> ModeReason {
+    ModeReason::OnlyExecutableCandidate { candidate_count }
 }

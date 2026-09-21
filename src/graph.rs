@@ -15,7 +15,7 @@ use std::{io, path::Path};
 
 use thiserror::Error;
 
-use crate::model::LocalReplica;
+use crate::{model::LocalReplica, operational::ExecutionScope, working_graph::WorkingGraph};
 
 pub(crate) use artifact::ARTIFACT_SCHEMA_VERSION;
 pub(crate) use public::{ConfirmedPublicRepository, PublicGraphOptions, confirm_public_repository};
@@ -29,10 +29,12 @@ pub(crate) struct SiteSummary {
 }
 
 pub(crate) fn publish_site(
-    replica: &LocalReplica,
+    working: &WorkingGraph<'_>,
+    scope: ExecutionScope<'_>,
+    horizon: u8,
     output: &Path,
 ) -> Result<SiteSummary, GraphError> {
-    let artifact = artifact::build(replica)?;
+    let artifact = artifact::build_working(working, scope, horizon)?;
     let presentation = presentation::build(&artifact);
     let graph_bytes = render::graph_json(&artifact)?;
     artifact::validate_serialized(&graph_bytes)?;
@@ -57,7 +59,7 @@ pub(crate) fn publish_site(
 
     Ok(SiteSummary {
         schema_version: ARTIFACT_SCHEMA_VERSION,
-        input_hash: replica.input_hash.clone(),
+        input_hash: working.replica().input_hash.clone(),
         node_count: artifact.nodes.len(),
         edge_count: artifact.edges.len(),
         artifact_hash: artifact.artifact_hash,

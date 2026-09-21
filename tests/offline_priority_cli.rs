@@ -269,7 +269,11 @@ fn pending_runner_marks_recommendation_while_normal_mode_stays_stable() {
         ranked["recommendation"]["operation_ids"],
         json!([operation_id])
     );
-    assert_eq!(ranked["recommendation"]["reasons"][0]["pending"], true);
+    assert_eq!(ranked["recommendation"]["reasons"], json!([]));
+    assert_eq!(
+        ranked["comparison_to_runner_up"]["operation_ids"],
+        ranked["recommendation"]["operation_ids"]
+    );
     assert_eq!(ranked["comparison_to_runner_up"]["pending"], true);
 
     fixture.assert_replica_unchanged();
@@ -360,7 +364,11 @@ fn pending_former_winner_marks_recommendation_after_falling_below_runner_up() {
         ranked["recommendation"]["operation_ids"],
         json!([operation_id])
     );
-    assert_eq!(ranked["recommendation"]["reasons"][0]["pending"], true);
+    assert_eq!(ranked["recommendation"]["reasons"], json!([]));
+    assert_eq!(
+        ranked["comparison_to_runner_up"]["operation_ids"],
+        ranked["recommendation"]["operation_ids"]
+    );
     assert_eq!(ranked["comparison_to_runner_up"]["pending"], true);
 
     fixture.assert_replica_unchanged();

@@ -6,10 +6,10 @@ const result = document.querySelector("#result");
 const exercise = () => {
   try {
     const doc = frame.contentDocument;
-    const data = JSON.parse(doc.querySelector("#graph-data").textContent);
+    const data = readGraph(doc);
     const harness = createHarness(doc, data);
     const projectDoc = projectFrame.contentDocument;
-    const projectData = JSON.parse(projectDoc.querySelector("#graph-data").textContent);
+    const projectData = readGraph(projectDoc);
     const projectHarness = createHarness(projectDoc, projectData);
     const presentation = JSON.parse(doc.querySelector("#graph-presentation-data").textContent);
     const checks = {
@@ -26,6 +26,7 @@ const exercise = () => {
       ...exerciseRelationships(harness),
       ...exerciseKeyboardAndZoom(harness),
       ...exerciseHostileText(harness),
+      ...exerciseRecommendation(harness),
       ...exerciseProjectFilter(projectHarness),
       accessible_table_matches_visible_graph: harness.tableMatchesGraph(),
       project_filter_absent_without_data: !doc.querySelector("#project-filter")
@@ -46,7 +47,7 @@ function exerciseConstrainedMode(doc) {
     .sort();
   const initial = !doc.querySelector("#network-mode").hidden
     && visibleGraphKeys().join(",") === "acme/widgets#1"
-    && visibleTableKeys().length === 6;
+    && visibleTableKeys().length === 8;
 
   search.value = "#5";
   search.dispatchEvent(new Event("input", { bubbles: true }));
@@ -56,7 +57,7 @@ function exerciseConstrainedMode(doc) {
   search.dispatchEvent(new Event("input", { bubbles: true }));
   const neighborhood = visibleGraphKeys().join(",") === "acme/widgets#4,acme/widgets#5";
   const node = doc.querySelector('.graph-node[data-node-key="acme/widgets#5"]');
-  const data = JSON.parse(doc.querySelector("#graph-data").textContent);
+  const data = readGraph(doc);
   const source = data.nodes.find((candidate) => candidate.key === "acme/widgets#5");
   const precomputed = node.dataset.sourceX === String(source.position.x)
     && node.dataset.sourceY === String(source.position.y);
@@ -98,7 +99,26 @@ function exerciseConstrainedMode(doc) {
   const cleared = visibleGraphKeys().join(",") === "acme/widgets#1"
     && visibleTableKeys().length === data.nodes.length
     && doc.querySelectorAll(".relationship-upstream, .relationship-root").length === 0;
+  doc.querySelector('tr[data-node-key="acme/widgets#5"] button').click();
+  const sizeControl = doc.querySelector("#node-size-metric");
+  sizeControl.value = "pagerank_bucket";
+  sizeControl.dispatchEvent(new Event("change", { bubbles: true }));
+  const colorControl = doc.querySelector("#node-color-metric");
+  colorControl.value = "priority";
+  colorControl.dispatchEvent(new Event("change", { bubbles: true }));
+  doc.querySelector("#recommendation-select").click();
+  const recommendation = doc.querySelector('.graph-node[data-node-key="acme/widgets#1"]');
+  const recommendationOpens = recommendation.classList.contains("causal-path")
+    && recommendation.classList.contains("color-priority-p1")
+    && recommendation.dataset.sizeMetric === "pagerank_bucket"
+    && doc.querySelector('tr[data-node-key="acme/widgets#7"]').classList.contains("causal-evidence");
+  doc.querySelector("#show-full-network").click();
+  const outcomeAppears = doc.querySelector('.graph-node[data-node-key="acme/widgets#7"]')
+    .classList.contains("unlocked-outcome");
+  doc.querySelector("#clear-view").click();
+  const clearedRecommendation = doc.querySelectorAll(".causal-path, .unlocked-outcome, .causal-evidence").length === 0;
   return {
+    constrained_recommendation_preserves_metrics_and_evidence: recommendationOpens && outcomeAppears && clearedRecommendation,
     constrained_mode_opens_bounded: initial,
     constrained_search_keeps_table: searchable,
     selected_result_opens_neighborhood: neighborhood && precomputed,
@@ -200,7 +220,7 @@ function exerciseSearchAndSelection(harness) {
 function exerciseFilters(harness) {
   const { select, visibleGraphKeys, tableMatchesGraph } = harness;
   select("#readiness-filter", "value:ready");
-  const readiness = visibleGraphKeys().join(",") === "acme/widgets#1" && tableMatchesGraph();
+  const readiness = visibleGraphKeys().join(",") === "acme/widgets#1,acme/widgets#6" && tableMatchesGraph();
   select("#readiness-filter", "sentinel:all");
   select("#state-filter", "value:closed");
   const state = visibleGraphKeys().join(",") === "acme/widgets#3" && tableMatchesGraph();
@@ -230,7 +250,7 @@ function exerciseFilters(harness) {
   const assigneeNamedAll = visibleGraphKeys().join(",") === "acme/widgets#5"
     && tableMatchesGraph();
   select("#assignee-filter", "sentinel:unassigned");
-  const unassigned = visibleGraphKeys().join(",") === "acme/widgets#1,acme/widgets#3"
+  const unassigned = visibleGraphKeys().join(",") === "acme/widgets#1,acme/widgets#3,acme/widgets#6,acme/widgets#7"
     && tableMatchesGraph();
   select("#assignee-filter", "sentinel:all");
   select("#component-filter", "value:component-3");
@@ -276,7 +296,7 @@ function exerciseIsolation(harness) {
   select("#root-node", "acme/widgets#1");
   doc.querySelector("#root-depth").value = "1";
   doc.querySelector("#isolate-root").click();
-  const isolated = visibleGraphKeys().join(",") === "acme/widgets#1,acme/widgets#2"
+  const isolated = visibleGraphKeys().join(",") === "acme/widgets#1,acme/widgets#2,acme/widgets#7"
     && tableMatchesGraph()
     && JSON.stringify(data) === canonicalArtifact
     && graphNode.dataset.sourceX === String(sourceNode.position.x)
@@ -366,3 +386,64 @@ function exerciseWhenReady() {
 }
 
 exerciseWhenReady();
+
+function readGraph(doc) {
+  const artifact = JSON.parse(doc.querySelector("#graph-data").textContent);
+  return { ...artifact, nodes: artifact.nodes.map((node) => ({ ...node, ...node.common })) };
+}
+
+function exerciseRecommendation({ doc, data }) {
+    const recommendation = data.analysis.next.recommendation;
+    const recommendationText = doc.querySelector("#recommendation-status").textContent;
+    const evidenceText = doc.querySelector("#recommendation-evidence").textContent;
+    const summaryMatches = recommendation.first_issue.number === 1
+      && recommendationText.includes("#1")
+      && data.analysis.next.comparison_to_runner_up.message.length > 0
+      && evidenceText.includes(`Reason${data.analysis.next.comparison_to_runner_up.message}`)
+      && evidenceText.includes("SearchComplete")
+      && evidenceText.includes("Parallel now#1, #6");
+    const distinctRunnerUp = data.analysis.next.comparison_to_runner_up.runner_up.number === 6
+      && evidenceText.includes("Runner-up#6 Runner-up");
+    const operationalDiagnostics = evidenceText.includes("Unresolved3")
+      && evidenceText.includes("Cycles2")
+      && evidenceText.includes("Unknown External blockers1");
+
+    doc.querySelector("#recommendation-select").click();
+    const causalPath = doc.querySelector('[data-node-key="acme/widgets#1"]')
+      .classList.contains("causal-path")
+      && doc.querySelector('[data-node-key="acme/widgets#7"]')
+        .classList.contains("unlocked-outcome")
+      && doc.querySelector('.graph-edge[data-blocker="acme/widgets#1"][data-blocked="acme/widgets#7"]')
+        .classList.contains("causal-path")
+      && doc.querySelectorAll("tbody tr.causal-evidence").length >= 2;
+
+    const sizeControl = doc.querySelector("#node-size-metric");
+    sizeControl.value = "unlock_count";
+    sizeControl.dispatchEvent(new Event("change", { bubbles: true }));
+    const recommendationNode = doc.querySelector('[data-node-key="acme/widgets#1"]');
+    const unlockSizeControl = recommendationNode.dataset.sizeMetric === "unlock_count"
+      && recommendationNode.dataset.sizeValue === String(
+        data.nodes.find((node) => node.number === 1).unlock_count
+      );
+    sizeControl.value = "pagerank_bucket";
+    sizeControl.dispatchEvent(new Event("change", { bubbles: true }));
+    const pagerankSizeControl = recommendationNode.dataset.sizeMetric === "pagerank_bucket"
+      && recommendationNode.dataset.sizeValue === String(
+        data.nodes.find((node) => node.number === 1).pagerank_bucket
+      );
+
+    const colorControl = doc.querySelector("#node-color-metric");
+    colorControl.value = "priority";
+    colorControl.dispatchEvent(new Event("change", { bubbles: true }));
+    const priorityColorControl = recommendationNode.classList.contains("color-priority-p1");
+
+  return {
+    recommendation_summary: summaryMatches,
+    distinct_runner_up: distinctRunnerUp,
+    operational_diagnostics: operationalDiagnostics,
+    causal_path: causalPath,
+    unlock_size_control: unlockSizeControl,
+    pagerank_size_control: pagerankSizeControl,
+    priority_color_control: priorityColorControl
+  };
+}

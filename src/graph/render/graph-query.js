@@ -210,10 +210,12 @@
   function matchesSearch(node, query, numberQuery) {
     return !query
       || (numberQuery !== null && String(node.number) === numberQuery)
+      || (numberQuery === null && (node.key || "").toLocaleLowerCase().includes(query))
       || (node.title || "").toLocaleLowerCase().includes(query);
   }
 
   function declaredPriority(node) {
+    if (node.priority) return node.priority.state === "declared" ? node.priority.value : node.priority.state;
     const priorities = new Set(
       node.labels
         .map((label) => normalize(label).match(/^priority:(p[0-4])$/)?.[1])

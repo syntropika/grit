@@ -23,12 +23,33 @@
       </div>
     </header>
     <main>
+      <section class="recommendation-summary" aria-labelledby="recommendation-heading">
+        <div>
+          <p class="eyebrow">Precomputed next/v1 analysis</p>
+          <h2 id="recommendation-heading">Operational recommendation</h2>
+          <p id="recommendation-status" aria-live="polite"></p>
+        </div>
+        <dl id="recommendation-evidence"></dl>
+        <button id="recommendation-select" type="button">Show causal path</button>
+      </section>
       <section class="control-panel" aria-label="Graph exploration controls">
         <div class="toolbar">
           <label for="graph-search">Search Issues</label>
           <input id="graph-search" type="search" autocomplete="off" placeholder="Issue number or title" aria-describedby="search-help search-status">
           <span id="search-help" class="visually-hidden">Type a number or title. Press Enter to select the first result.</span>
           <output id="search-status" role="status" aria-live="polite"></output>
+        <label for="node-size-metric">Size</label>
+        <select id="node-size-metric">
+          <option value="uniform">Uniform</option>
+          <option value="unlock_count">Unlock behavior</option>
+          <option value="pagerank_bucket">PageRank</option>
+        </select>
+        <label for="node-color-metric">Color</label>
+        <select id="node-color-metric">
+          <option value="readiness">Readiness</option>
+          <option value="state">Issue state</option>
+          <option value="priority">Declared priority</option>
+        </select>
           <div class="zoom-controls" role="group" aria-label="Zoom controls">
             <button id="zoom-out" type="button" aria-label="Zoom out">−</button>
             <button id="zoom-reset" type="button">100%</button>
@@ -125,6 +146,9 @@
                 <th scope="col">Title</th>
                 <th scope="col">State</th>
                 <th scope="col">Readiness</th>
+                <th scope="col">Priority</th>
+                <th scope="col">Unlocks</th>
+                <th scope="col">PageRank bucket</th>
                 <th scope="col">Layer</th>
                 <th scope="col">Assignees</th>
                 <th scope="col">Labels</th>

@@ -3,8 +3,11 @@ use std::collections::BTreeMap;
 use schemars::schema_for;
 
 use super::{
-    GraphError, artifact::GraphArtifact, presentation::GraphPresentation,
-    serialization::pretty_json, text::escape_html,
+    GraphError,
+    artifact::{ArtifactNode, GraphArtifact},
+    presentation::GraphPresentation,
+    serialization::pretty_json,
+    text::escape_html,
 };
 
 pub(super) fn graph_json(artifact: &GraphArtifact) -> Result<Vec<u8>, GraphError> {
@@ -19,7 +22,7 @@ pub(super) fn html(
     artifact: &GraphArtifact,
     presentation: &GraphPresentation,
 ) -> Result<String, GraphError> {
-    let show_projects = artifact.nodes.iter().any(|node| node.projects.is_some());
+    let show_projects = artifact.nodes.iter().any(|node| node.projects().is_some());
     let mut blockers = BTreeMap::<String, Vec<String>>::new();
     let mut dependents = BTreeMap::<String, Vec<String>>::new();
     for edge in &artifact.edges {
@@ -34,17 +37,39 @@ pub(super) fn html(
 
     let mut rows = String::new();
     for node in &artifact.nodes {
-        let key = node.key.to_string();
+        let key = node.key().to_string();
         let escaped_key = escape_html(&key);
-        let title = escape_html(node.title.as_deref().unwrap_or(&key));
+        let (title, url, priority, unlock_count, pagerank, assignees, labels) = match node {
+            ArtifactNode::Issue {
+                title,
+                url,
+                priority,
+                unlock_count,
+                pagerank_bucket,
+                assignees,
+                labels,
+                ..
+            } => (
+                title.as_str(),
+                Some(url.as_str()),
+                priority.display_name(),
+                unlock_count.map(|value| value.to_string()),
+                pagerank_bucket.map(|value| value.to_string()),
+                assignees.as_slice(),
+                labels.as_slice(),
+            ),
+            ArtifactNode::ExternalBlocker { .. } => {
+                (key.as_str(), None, "—", None, None, &[][..], &[][..])
+            }
+        };
+        let title = escape_html(title);
         let layer = node
-            .position
+            .position()
             .layer
             .map(|value| value.to_string())
             .unwrap_or_else(|| "unresolved / SCC".to_owned());
-        let github_link = node
-            .url
-            .as_deref()
+        let github_link = url
+            .filter(|url| !url.is_empty())
             .map(|url| {
                 format!(
                     " <a class=\"canonical-link\" href=\"{}\" aria-label=\"Open {} on GitHub\">GitHub</a>",
@@ -54,8 +79,7 @@ pub(super) fn html(
             .unwrap_or_default();
         let project_cell = if show_projects {
             let projects = node
-                .projects
-                .as_ref()
+                .projects()
                 .map(|values| values.join(", "))
                 .unwrap_or_else(|| "—".to_owned());
             format!("<td>{}</td>", escape_html(&projects))
@@ -63,11 +87,14 @@ pub(super) fn html(
             String::new()
         };
         rows.push_str(&format!(
-            "<tr data-node-key=\"{escaped_key}\"><td><button type=\"button\" class=\"table-node\" data-node-key=\"{escaped_key}\" aria-pressed=\"false\">{escaped_key}</button>{github_link}</td><td>{title}</td><td>{state}</td><td>{readiness}</td><td>{layer}</td><td>{assignees}</td><td>{labels}</td>{project_cell}<td class=\"blockers-cell\">{blockers}</td><td class=\"dependents-cell\">{dependents}</td><td class=\"relationship-cell\">—</td></tr>",
-            state = escape_html(&node.state),
-            readiness = node.readiness.as_str(),
-            assignees = escape_html(&node.assignees.join(", ")),
-            labels = escape_html(&node.labels.join(", ")),
+            "<tr data-node-key=\"{escaped_key}\"><td><button type=\"button\" class=\"table-node\" data-node-key=\"{escaped_key}\" aria-pressed=\"false\">{escaped_key}</button>{github_link}</td><td>{title}</td><td>{state}</td><td>{readiness}</td><td>{priority}</td><td>{unlock_count}</td><td>{pagerank}</td><td>{layer}</td><td>{assignees}</td><td>{labels}</td>{project_cell}<td class=\"blockers-cell\">{blockers}</td><td class=\"dependents-cell\">{dependents}</td><td class=\"relationship-cell\">—</td></tr>",
+            state = escape_html(node.lifecycle()),
+            readiness = node.status(),
+            priority = priority,
+            unlock_count = unlock_count.unwrap_or_else(|| "—".to_owned()),
+            pagerank = pagerank.unwrap_or_else(|| "—".to_owned()),
+            assignees = escape_html(&assignees.join(", ")),
+            labels = escape_html(&labels.join(", ")),
             blockers = escape_html(&joined_relations(&blockers, &key)),
             dependents = escape_html(&joined_relations(&dependents, &key)),
         ));

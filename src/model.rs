@@ -1,4 +1,5 @@
 use chrono::{DateTime, Duration, FixedOffset, SecondsFormat, Utc};
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -7,6 +8,18 @@ use uuid::Uuid;
 use crate::repository::IssueReference;
 
 pub(crate) const REPLICA_SCHEMA_VERSION: &str = "grit.local-replica/v1";
+
+pub(crate) fn strip_operation_markers(value: &str) -> String {
+    let mut sanitized = crate::operation_marker::strip(value);
+    while let Some(start) = sanitized.find("<!-- grit:operation") {
+        let Some(relative_end) = sanitized[start..].find("-->") else {
+            sanitized.truncate(start);
+            break;
+        };
+        sanitized.replace_range(start..start + relative_end + 3, "");
+    }
+    sanitized
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct LocalReplica {
@@ -339,9 +352,11 @@ impl Issue {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, Hash, JsonSchema, Ord, PartialEq, PartialOrd, Serialize,
+)]
 #[serde(transparent)]
-pub(crate) struct TemporaryIssueId(Uuid);
+pub(crate) struct TemporaryIssueId(#[schemars(with = "String")] Uuid);
 
 impl TemporaryIssueId {
     pub(crate) fn new() -> Self {
@@ -374,7 +389,7 @@ impl std::fmt::Display for TemporaryIssueId {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) enum StableNodeKey {
     GitHub(u64),
     Draft(TemporaryIssueId),

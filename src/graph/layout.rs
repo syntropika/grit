@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use super::{
     GraphError,
-    artifact::{ArtifactEdge, ArtifactNode, NodeKind},
+    artifact::{ArtifactEdge, ArtifactNode, LayerRole},
     model::{NodeKey, Position},
 };
 
@@ -48,15 +48,15 @@ pub(super) fn assign_artifact_dependency_layers(
     let indexes: HashMap<_, _> = nodes
         .iter()
         .enumerate()
-        .map(|(index, node)| (node.key.clone(), index))
+        .map(|(index, node)| (node.key().clone(), index))
         .collect();
     let mut layout_nodes: Vec<_> = nodes
         .iter()
         .map(|node| {
-            if node.kind == NodeKind::Issue && node.state == "open" {
-                LayoutNode::eligible(node.key.clone(), false)
+            if node.is_open_issue() {
+                LayoutNode::eligible(node.key().clone(), false)
             } else {
-                LayoutNode::excluded(node.key.clone())
+                LayoutNode::excluded(node.key().clone())
             }
         })
         .collect();
@@ -68,27 +68,27 @@ pub(super) fn assign_artifact_dependency_layers(
         let blocker_index = *indexes
             .get(&edge.blocker)
             .ok_or_else(|| GraphError::DanglingEndpoint(edge.blocker.to_string()))?;
-        if nodes[blocked_index].kind != NodeKind::Issue || nodes[blocked_index].state != "open" {
+        if !nodes[blocked_index].is_open_issue() {
             continue;
         }
         let blocker = &nodes[blocker_index];
-        match (blocker.kind, blocker.state.as_str()) {
-            (_, "closed") => {}
-            (NodeKind::Issue, "open") => dependencies.push(LayoutDependency::new(
+        match blocker.layer_role() {
+            LayerRole::Satisfied => {}
+            LayerRole::OpenIssue => dependencies.push(LayoutDependency::new(
                 edge.blocked.clone(),
                 edge.blocker.clone(),
             )),
-            (NodeKind::Issue | NodeKind::ExternalBlocker, _) => {
+            LayerRole::Opaque => {
                 layout_nodes[blocked_index].opaque_boundary = true;
             }
         }
     }
     let positions = dependency_positions(&layout_nodes, &dependencies)?;
     for node in nodes {
-        node.position = positions
-            .get(&node.key)
+        *node.position_mut() = positions
+            .get(node.key())
             .cloned()
-            .ok_or_else(|| GraphError::DanglingEndpoint(node.key.to_string()))?;
+            .ok_or_else(|| GraphError::DanglingEndpoint(node.key().to_string()))?;
     }
     Ok(())
 }

@@ -3,7 +3,8 @@ use std::{
     collections::{BTreeMap, BTreeSet},
 };
 
-use serde::Serialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -20,9 +21,12 @@ use crate::{
 pub(crate) struct WorkingGraph<'a> {
     replica: Cow<'a, LocalReplica>,
     priority_overrides: BTreeMap<u64, LogicalPriority>,
+    pending_priority_numbers: BTreeSet<u64>,
+    creation_operation_ids: BTreeMap<u64, Vec<(usize, String)>>,
     operation_ids: Vec<String>,
     operation_ids_by_issue: BTreeMap<u64, Vec<(usize, String)>>,
     topology_operation_ids: Vec<(usize, String)>,
+    dependency_operation_ids: BTreeMap<DependencyEdgeKey, Vec<(usize, String)>>,
     input_hash: String,
 }
 
@@ -34,6 +38,8 @@ impl<'a> WorkingGraph<'a> {
         Self::validate_references(replica, outbox)?;
         let mut effective_replica = Cow::Borrowed(replica);
         let mut priority_overrides = BTreeMap::new();
+        let mut pending_priority_numbers = BTreeSet::new();
+        let mut creation_operation_ids = BTreeMap::<u64, Vec<(usize, String)>>::new();
         let mut dependency_intents = Vec::new();
         let mut field_updates = Vec::new();
         let mut label_updates = Vec::new();
@@ -41,6 +47,8 @@ impl<'a> WorkingGraph<'a> {
         let mut operation_ids = Vec::with_capacity(outbox.operations().len());
         let mut operation_ids_by_issue = BTreeMap::<u64, Vec<(usize, String)>>::new();
         let mut topology_operation_ids = Vec::new();
+        let mut dependency_operation_ids =
+            BTreeMap::<DependencyEdgeKey, Vec<(usize, String)>>::new();
         for (index, operation) in outbox.operations().iter().enumerate() {
             let affected_issue_numbers = operation.affected_issue_numbers();
             if let Some(priority) = operation.effective_priority() {
@@ -72,10 +80,23 @@ impl<'a> WorkingGraph<'a> {
             if !operation.is_pending_intent() {
                 continue;
             }
+            if operation.effective_priority().is_some() {
+                pending_priority_numbers.insert(operation.issue_number());
+            }
             let operation_id = operation.id().to_owned();
+            if operation.issue_create_view().is_some() {
+                creation_operation_ids
+                    .entry(operation.issue_number())
+                    .or_default()
+                    .push((index, operation_id.clone()));
+            }
             operation_ids.push(operation_id.clone());
-            if operation.dependency_values().is_some() {
+            if let Some((edge, _)) = operation.dependency_values() {
                 topology_operation_ids.push((index, operation_id.clone()));
+                dependency_operation_ids
+                    .entry(edge.clone())
+                    .or_default()
+                    .push((index, operation_id.clone()));
             }
             for issue_number in affected_issue_numbers {
                 operation_ids_by_issue
@@ -121,9 +142,12 @@ impl<'a> WorkingGraph<'a> {
         Ok(Self {
             replica: effective_replica,
             priority_overrides,
+            pending_priority_numbers,
+            creation_operation_ids,
             operation_ids,
             operation_ids_by_issue,
             topology_operation_ids,
+            dependency_operation_ids,
             input_hash,
         })
     }
@@ -152,7 +176,7 @@ impl<'a> WorkingGraph<'a> {
     }
 
     pub(crate) fn priority_is_pending(&self, issue_number: u64) -> bool {
-        self.operation_ids_by_issue.contains_key(&issue_number)
+        self.pending_priority_numbers.contains(&issue_number)
     }
 
     pub(crate) fn priority(&self, issue: &Issue) -> PriorityState {
@@ -171,6 +195,24 @@ impl<'a> WorkingGraph<'a> {
                 .map(|(_, operation_id)| operation_id.clone())
                 .collect(),
         )
+    }
+
+    pub(crate) fn provenance_for_dependency(&self, edge: &DependencyEdgeKey) -> PendingProvenance {
+        let mut operations = self
+            .dependency_operation_ids
+            .get(edge)
+            .cloned()
+            .unwrap_or_default();
+        for number in [edge.blocked_number(), edge.blocker_number()] {
+            operations.extend(
+                self.creation_operation_ids
+                    .get(&number)
+                    .into_iter()
+                    .flatten()
+                    .cloned(),
+            );
+        }
+        PendingProvenance::from_indexed(operations)
     }
 
     pub(crate) fn ranking_provenance_for_issues(
@@ -412,10 +454,11 @@ fn project_dependency_intents(
     Ok(())
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct PendingProvenance {
     pending: bool,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     operation_ids: Vec<String>,
 }
 
@@ -429,6 +472,10 @@ impl PendingProvenance {
 
     pub(crate) fn is_pending(&self) -> bool {
         self.pending
+    }
+
+    pub(crate) fn operation_ids(&self) -> &[String] {
+        &self.operation_ids
     }
 
     fn from_indexed(mut indexed_operation_ids: Vec<(usize, String)>) -> Self {

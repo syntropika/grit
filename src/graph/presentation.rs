@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use serde::Serialize;
 
 use super::{
-    artifact::{GraphArtifact, NodeKind, Readiness},
+    artifact::{ArtifactNode, GraphArtifact, IssueNodeStatus},
     model::NodeKey,
 };
 
@@ -107,9 +107,15 @@ fn initial_nodes(artifact: &GraphArtifact, limit: usize) -> Vec<NodeKey> {
     let mut selected = BTreeSet::new();
     let mut queue = VecDeque::new();
     for node in &artifact.nodes {
-        if node.kind == NodeKind::Issue && node.readiness == Readiness::Ready {
-            if selected.insert(node.key.clone()) {
-                queue.push_back(node.key.clone());
+        if matches!(
+            node,
+            ArtifactNode::Issue {
+                status: IssueNodeStatus::Ready,
+                ..
+            }
+        ) {
+            if selected.insert(node.key().clone()) {
+                queue.push_back(node.key().clone());
             }
             if selected.len() == limit {
                 return selected.into_iter().collect();
@@ -119,8 +125,8 @@ fn initial_nodes(artifact: &GraphArtifact, limit: usize) -> Vec<NodeKey> {
     if queue.is_empty()
         && let Some(first) = artifact.nodes.first()
     {
-        selected.insert(first.key.clone());
-        queue.push_back(first.key.clone());
+        selected.insert(first.key().clone());
+        queue.push_back(first.key().clone());
     }
 
     while let Some(current) = queue.pop_front() {
@@ -134,7 +140,7 @@ fn initial_nodes(artifact: &GraphArtifact, limit: usize) -> Vec<NodeKey> {
         }
     }
     for node in &artifact.nodes {
-        selected.insert(node.key.clone());
+        selected.insert(node.key().clone());
         if selected.len() == limit {
             break;
         }
@@ -161,7 +167,12 @@ mod tests {
             Vec::new(),
         )
         .expect("synthetic replica");
-        let artifact = crate::graph::artifact::build(&replica).expect("graph artifact");
+        let artifact = crate::graph::artifact::build(
+            &replica,
+            crate::operational::ExecutionScope::Available,
+            crate::ranking::DEFAULT_HORIZON,
+        )
+        .expect("graph artifact");
         let presentation = build_with_limits(&artifact, 3, usize::MAX, 2);
         let value = serde_json::to_value(presentation).expect("presentation JSON");
 
@@ -233,7 +244,12 @@ mod tests {
             dependencies,
         )
         .expect("synthetic replica");
-        crate::graph::artifact::build(&replica).expect("graph artifact")
+        crate::graph::artifact::build(
+            &replica,
+            crate::operational::ExecutionScope::Available,
+            crate::ranking::DEFAULT_HORIZON,
+        )
+        .expect("graph artifact")
     }
 
     fn keys(values: Vec<NodeKey>) -> Vec<String> {

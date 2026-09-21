@@ -1,44 +1,95 @@
-use serde::Serialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 use super::{
     ALTERNATIVE_LIMIT, EvaluatedCandidate,
     decision::{PriorityProfile, RankingMode, StepPriority},
-    explanation::{ComparisonEvidence, Reason},
+    explanation::{ComparisonEvidence, ModeReason},
     pagerank,
     search::SearchRestriction,
 };
 use crate::{
-    model::{Issue, TemporaryIssueId},
+    model::{Issue, TemporaryIssueId, strip_operation_markers},
     operational::{OperationalGraph, ReadyAnalysis},
     priority::PriorityState,
     working_graph::{PendingProvenance, WorkingGraph},
 };
 
-#[derive(Serialize)]
+#[derive(Clone, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PresentedModeReason {
+    #[serde(flatten)]
+    provenance: PendingProvenance,
+    reason: ModeReason,
+    message: String,
+}
+
+impl PresentedModeReason {
+    fn new(reason: ModeReason, provenance: PendingProvenance) -> Self {
+        let message = reason.human_message().to_owned();
+        Self {
+            reason,
+            message,
+            provenance,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PresentedModeReason {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            #[serde(flatten)]
+            provenance: PendingProvenance,
+            reason: ModeReason,
+            message: String,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        if wire.message != wire.reason.human_message() {
+            return Err(serde::de::Error::custom("invalid mode-reason message"));
+        }
+        Ok(Self {
+            provenance: wire.provenance,
+            reason: wire.reason,
+            message: wire.message,
+        })
+    }
+}
+
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
+#[schemars(deny_unknown_fields)]
 pub(crate) struct NextAnalysis {
     #[serde(flatten)]
     decision: DecisionCore<NextParameters>,
     alternatives: Vec<CandidateResult>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
+#[schemars(deny_unknown_fields)]
 pub(crate) struct PlanDecision {
     #[serde(flatten)]
     decision: DecisionCore<PlanParameters>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
+#[schemars(deny_unknown_fields)]
 struct DecisionCore<P> {
     parameters: P,
     #[serde(flatten)]
     result: DecisionResult,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
 struct DecisionResult {
     input_hash: String,
     pending: bool,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pending_operation_ids: Vec<String>,
     mode: RankingMode,
     metrics: MetricStates,
@@ -61,16 +112,35 @@ impl<P> DecisionCore<P> {
         }
     }
 
-    fn recommendation(&self) -> Option<&CandidateResult> {
-        self.result.recommendation.as_ref()
-    }
-
     fn summary(&self) -> &NextSummary {
         &self.result.summary
     }
 
     fn truncation_warning(&self) -> Option<String> {
         truncation_warning(self.result.search_complete, &self.result.truncated_by)
+    }
+
+    fn input_hash(&self) -> &str {
+        &self.result.input_hash
+    }
+
+    fn human_recommendation_summary(&self) -> Option<String> {
+        self.result.recommendation.as_ref().map(|recommendation| {
+            let reason = self
+                .result
+                .comparison_to_runner_up
+                .as_ref()
+                .map(ComparisonEvidence::human_message)
+                .or_else(|| {
+                    recommendation
+                        .reasons
+                        .iter()
+                        .find(|reason| reason.reason.is_only_candidate())
+                        .map(|reason| reason.message.as_str())
+                })
+                .unwrap_or("it is the deterministic best executable first step");
+            recommendation.human_summary(reason)
+        })
     }
 }
 
@@ -139,16 +209,20 @@ impl NextAnalysis {
         }
     }
 
-    pub(crate) fn recommendation(&self) -> Option<&CandidateResult> {
-        self.decision.recommendation()
-    }
-
     pub(crate) fn summary(&self) -> &NextSummary {
         self.decision.summary()
     }
 
     pub(crate) fn truncation_warning(&self) -> Option<String> {
         self.decision.truncation_warning()
+    }
+
+    pub(crate) fn input_hash(&self) -> &str {
+        self.decision.input_hash()
+    }
+
+    pub(crate) fn human_recommendation_summary(&self) -> Option<String> {
+        self.decision.human_recommendation_summary()
     }
 
     pub(crate) fn into_plan_decision(self) -> PlanDecision {
@@ -161,16 +235,20 @@ impl NextAnalysis {
 }
 
 impl PlanDecision {
-    pub(crate) fn recommendation(&self) -> Option<&CandidateResult> {
-        self.decision.recommendation()
-    }
-
     pub(crate) fn summary(&self) -> &NextSummary {
         self.decision.summary()
     }
 
     pub(crate) fn truncation_warning(&self) -> Option<String> {
         self.decision.truncation_warning()
+    }
+
+    pub(crate) fn input_hash(&self) -> &str {
+        self.decision.input_hash()
+    }
+
+    pub(crate) fn human_recommendation_summary(&self) -> Option<String> {
+        self.decision.human_recommendation_summary()
     }
 }
 
@@ -205,58 +283,66 @@ pub(super) struct NextResult {
     pub(super) work: super::search::SearchWork,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
 struct WorkCounts {
     materialized_successors: usize,
     probed_successors: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
+#[schemars(deny_unknown_fields)]
 struct NextParameters {
     #[serde(flatten)]
     common: CommonParameters,
     alternative_limit: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
+#[schemars(deny_unknown_fields)]
 struct PlanParameters {
     #[serde(flatten)]
     common: CommonParameters,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
 struct CommonParameters {
     horizon: u8,
     state_budget: usize,
     pagerank: PageRankParameters,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
 struct PageRankParameters {
     damping: f64,
     iterations: usize,
     bucket_scale: u64,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
 struct MetricStates {
     unlock_profile: MetricState,
     pagerank: PageRankMetricState,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
 struct MetricState {
     state: MetricAvailability,
 }
 
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Copy, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum MetricAvailability {
     Available,
     Omitted,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
 struct PageRankMetricState {
     state: MetricAvailability,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -267,7 +353,8 @@ struct PageRankMetricState {
     bucket_scale: Option<u64>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CandidateResult {
     #[serde(flatten)]
     provenance: PendingProvenance,
@@ -278,16 +365,11 @@ pub(crate) struct CandidateResult {
     pagerank_bucket: Option<u64>,
     rollout: Rollout,
     outcome: Outcome,
-    reasons: Vec<ReasonEvidence>,
+    reasons: Vec<PresentedModeReason>,
 }
 
 impl CandidateResult {
-    pub(crate) fn human_summary(&self) -> String {
-        let reason = self
-            .reasons
-            .last()
-            .map(|evidence| evidence.reason.human_message())
-            .unwrap_or("it is the deterministic best executable first step");
+    fn human_summary(&self, reason: &str) -> String {
         let pending = if self.provenance.is_pending() {
             " [pending]"
         } else {
@@ -305,7 +387,8 @@ impl CandidateResult {
     }
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct IssueReference {
     #[serde(flatten)]
     provenance: PendingProvenance,
@@ -320,26 +403,28 @@ pub(super) struct IssueReference {
     availability: Availability,
 }
 
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Copy, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum Availability {
     Available,
     Assigned,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
 struct Rollout {
     steps: Vec<RolloutStep>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
 struct RolloutStep {
     position: u8,
     mode: StepMode,
     issue: IssueReference,
 }
 
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Copy, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum StepMode {
     P0Ready,
@@ -347,14 +432,16 @@ enum StepMode {
     Normal,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
 struct Outcome {
     unlock_profile: UnlockProfile,
     unlocks: Vec<Unlock>,
     unlock_availability: UnlockAvailability,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
 struct UnlockProfile {
     count: usize,
     priority_profile: PriorityProfile,
@@ -363,33 +450,28 @@ struct UnlockProfile {
     step_priorities: Vec<StepPriority>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
 struct Unlock {
     issue: IssueReference,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
 struct UnlockAvailability {
     available: usize,
     assigned: usize,
 }
 
-#[derive(Serialize)]
-struct ReasonEvidence {
-    #[serde(flatten)]
-    reason: Reason,
-    #[serde(flatten)]
-    provenance: PendingProvenance,
-}
-
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Copy, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum RunnerUpScope {
     Global,
     Explored,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct NextSummary {
     operational_issue_count: usize,
     ready_count: usize,
@@ -434,7 +516,7 @@ pub(super) fn candidate_output(
     candidate: EvaluatedCandidate<'_>,
     working: &WorkingGraph<'_>,
     ranking_provenance_context: &[u64],
-    reasons: Vec<Reason>,
+    reasons: Vec<ModeReason>,
 ) -> CandidateResult {
     let (candidate, critical_route) = candidate.into_parts();
     let first_issue = issue_reference(working, candidate.issue);
@@ -491,10 +573,7 @@ pub(super) fn candidate_output(
         },
         reasons: reasons
             .into_iter()
-            .map(|reason| ReasonEvidence {
-                reason,
-                provenance: provenance.clone(),
-            })
+            .map(|reason| PresentedModeReason::new(reason, provenance.clone()))
             .collect(),
     }
 }
@@ -506,7 +585,7 @@ pub(super) fn issue_reference(working: &WorkingGraph<'_>, issue: &Issue) -> Issu
         number: (!issue.is_draft()).then_some(issue.number),
         temporary_id: issue.temporary_id(),
         url: issue.url.clone(),
-        title: issue.title.clone(),
+        title: strip_operation_markers(&issue.title),
         priority: working.priority(issue),
         availability: if issue.assignees.is_empty() {
             Availability::Available

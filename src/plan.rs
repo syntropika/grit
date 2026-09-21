@@ -1,21 +1,27 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use serde::Serialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 use crate::{
-    model::{Issue, StableNodeKey, TemporaryIssueId},
-    operational::{BlockerResolution, ExecutionScope, OperationalGraph, PreparedRepository},
+    model::{Issue, StableNodeKey, TemporaryIssueId, strip_operation_markers},
+    operational::{
+        BlockerResolution, ExecutionScope, OperationalGraph, PreparedRepository, ReadyAnalysis,
+    },
     priority::PriorityState,
     working_graph::{PendingProvenance, WorkingGraph},
 };
 
-pub(crate) struct StructuralPlan<'a> {
-    pub(crate) parallel_now: Vec<PlanIssue<'a>>,
-    pub(crate) dependency_layers: DependencyLayers<'a>,
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StructuralPlan {
+    pub(crate) parallel_now: Vec<PlanIssue>,
+    pub(crate) dependency_layers: DependencyLayers,
 }
 
-#[derive(Serialize)]
-pub(crate) struct PlanIssue<'a> {
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PlanIssue {
     #[serde(flatten)]
     provenance: PendingProvenance,
     pub(crate) key: String,
@@ -24,18 +30,18 @@ pub(crate) struct PlanIssue<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     temporary_id: Option<TemporaryIssueId>,
     #[serde(skip)]
-    ordering_key: StableNodeKey,
-    pub(crate) url: &'a str,
-    pub(crate) title: &'a str,
+    ordering_key: Option<StableNodeKey>,
+    pub(crate) url: String,
+    pub(crate) title: String,
     pub(crate) ready_now: bool,
     pub(crate) assigned: bool,
     pub(crate) execution_scope_eligible: bool,
     pub(crate) executable: bool,
     pub(crate) priority: PriorityState,
-    pub(crate) assignees: Vec<&'a str>,
+    pub(crate) assignees: Vec<String>,
 }
 
-impl PlanIssue<'_> {
+impl PlanIssue {
     pub(crate) fn display_reference(&self) -> String {
         self.number
             .map(|number| format!("#{number}"))
@@ -43,14 +49,15 @@ impl PlanIssue<'_> {
     }
 }
 
-#[derive(Serialize)]
-pub(crate) struct DependencyLayers<'a> {
-    interpretation: &'static str,
-    layers: Vec<DependencyLayer<'a>>,
-    unresolved: Vec<UnresolvedIssue<'a>>,
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DependencyLayers {
+    interpretation: String,
+    layers: Vec<DependencyLayer>,
+    unresolved: Vec<UnresolvedIssue>,
 }
 
-impl DependencyLayers<'_> {
+impl DependencyLayers {
     pub(crate) fn human_lines(&self) -> Vec<String> {
         let mut lines: Vec<_> = self
             .layers
@@ -89,19 +96,21 @@ impl DependencyLayers<'_> {
     }
 }
 
-#[derive(Serialize)]
-struct DependencyLayer<'a> {
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DependencyLayer {
     index: usize,
-    issues: Vec<PlanIssue<'a>>,
+    issues: Vec<PlanIssue>,
 }
 
-#[derive(Serialize)]
-struct UnresolvedIssue<'a> {
-    issue: PlanIssue<'a>,
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
+struct UnresolvedIssue {
+    issue: PlanIssue,
     reasons: Vec<UnresolvedReason>,
 }
 
-#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Copy, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum UnresolvedReason {
     Cycle,
@@ -110,13 +119,13 @@ enum UnresolvedReason {
     DependsOnUnresolved,
 }
 
-pub(crate) fn analyze<'a>(
-    prepared: &PreparedRepository<'a>,
+pub(crate) fn analyze_with_ready(
+    prepared: &PreparedRepository<'_>,
     scope: ExecutionScope<'_>,
-) -> StructuralPlan<'a> {
+    ready: &ReadyAnalysis<'_>,
+) -> StructuralPlan {
     let graph = prepared.graph();
     let working = prepared.working();
-    let ready = graph.analyze_ready(scope);
     let parallel_now = ready
         .executable
         .iter()
@@ -128,11 +137,11 @@ pub(crate) fn analyze<'a>(
     }
 }
 
-fn dependency_layers<'a>(
+fn dependency_layers(
     working: &WorkingGraph<'_>,
-    graph: &OperationalGraph<'a>,
+    graph: &OperationalGraph<'_>,
     scope: ExecutionScope<'_>,
-) -> DependencyLayers<'a> {
+) -> DependencyLayers {
     let mut unresolved = initial_unresolved(graph);
     propagate_unresolved(graph, &mut unresolved);
 
@@ -188,7 +197,7 @@ fn dependency_layers<'a>(
         }
     }
 
-    let mut by_layer = BTreeMap::<usize, Vec<PlanIssue<'a>>>::new();
+    let mut by_layer = BTreeMap::<usize, Vec<PlanIssue>>::new();
     for (number, layer) in finite_layers {
         let issue = graph
             .issue(number)
@@ -217,7 +226,7 @@ fn dependency_layers<'a>(
 
     unresolved.sort_by_key(|entry| entry.issue.ordering_key);
     DependencyLayers {
-        interpretation: "counterfactual_dependency_layers",
+        interpretation: "counterfactual_dependency_layers".to_owned(),
         layers,
         unresolved,
     }
@@ -271,12 +280,12 @@ fn propagate_unresolved(
     }
 }
 
-fn plan_issue<'a>(
+fn plan_issue(
     working: &WorkingGraph<'_>,
-    graph: &OperationalGraph<'a>,
-    issue: &'a Issue,
+    graph: &OperationalGraph<'_>,
+    issue: &Issue,
     scope: ExecutionScope<'_>,
-) -> PlanIssue<'a> {
+) -> PlanIssue {
     let ready_now = graph.is_ready(issue.number);
     let execution_scope_eligible = scope.contains(issue);
     PlanIssue {
@@ -284,9 +293,9 @@ fn plan_issue<'a>(
         key: issue.display_key(&working.replica().repository),
         number: (!issue.is_draft()).then_some(issue.number),
         temporary_id: issue.temporary_id(),
-        ordering_key: issue.stable_node_key(),
-        url: &issue.url,
-        title: &issue.title,
+        ordering_key: Some(issue.stable_node_key()),
+        url: issue.url.clone(),
+        title: strip_operation_markers(&issue.title),
         ready_now,
         assigned: !issue.assignees.is_empty(),
         execution_scope_eligible,
@@ -295,7 +304,7 @@ fn plan_issue<'a>(
         assignees: issue
             .assignees
             .iter()
-            .map(|actor| actor.login.as_str())
+            .map(|actor| actor.login.clone())
             .collect(),
     }
 }
