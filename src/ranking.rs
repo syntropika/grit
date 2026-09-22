@@ -329,9 +329,12 @@ fn priority(working: &WorkingGraph<'_>, issue: &Issue) -> PriorityComparison {
     working.priority(issue).comparison()
 }
 
-fn effective_input_hash(working: &WorkingGraph<'_>, scope: ExecutionScope<'_>) -> String {
+pub(crate) fn effective_input_hash(
+    working: &WorkingGraph<'_>,
+    scope: ExecutionScope<'_>,
+) -> String {
     let (mode, assignee) = scope.hash_key();
-    let input = json!({
+    let mut input = json!({
         "schema_version": "hyfa.working-input/v1",
         "working_graph_hash": working.input_hash(),
         "execution_scope": {
@@ -339,6 +342,12 @@ fn effective_input_hash(working: &WorkingGraph<'_>, scope: ExecutionScope<'_>) -
             "assignee": assignee,
         },
     });
+    if let ExecutionScope::Selected { selection, .. } = scope
+        && !selection.is_empty()
+    {
+        input["execution_scope"]["selection"] =
+            serde_json::to_value(selection).expect("selection is serializable");
+    }
     let canonical = serde_json::to_vec(&input).expect("effective input hash is serializable");
     hex::encode(Sha256::digest(canonical))
 }

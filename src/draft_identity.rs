@@ -19,6 +19,22 @@ use crate::{
 
 const SCHEMA_VERSION: &str = "hyfa.draft-identities/v1";
 
+pub(crate) fn resolve_reference(
+    reference: &crate::repository::PendingIssueReference,
+) -> Result<crate::repository::PendingIssueReference, DraftIdentityError> {
+    let Some(temporary_id) = reference.temporary_id() else {
+        return Ok(reference.clone());
+    };
+    let store = DraftIdentityStore::discover(reference.repository())?;
+    let transaction = store.begin_transaction(reference.repository())?;
+    Ok(match transaction.resolve(temporary_id) {
+        Some(identity) => crate::repository::PendingIssueReference::GitHub(
+            reference.github_reference(identity.issue_number),
+        ),
+        None => reference.clone(),
+    })
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct DraftIdentity {
     pub(crate) temporary_id: TemporaryIssueId,

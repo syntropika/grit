@@ -340,7 +340,7 @@ fn graph_generates_a_deterministic_valid_offline_site_without_raw_records() {
                 && variant["properties"].get("state").is_none()
                 && variant["properties"].get("readiness").is_none())
     );
-    let scope_variants = schema["$defs"]["ArtifactExecutionScope"]["oneOf"]
+    let scope_variants = schema["$defs"]["ScopeDescription"]["oneOf"]
         .as_array()
         .expect("execution-scope variants");
     assert_eq!(scope_variants.len(), 2);

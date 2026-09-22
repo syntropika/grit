@@ -6,15 +6,15 @@ description: Use the Hyfa CLI to choose executable GitHub Issue work, inspect de
 # Hyfa
 
 Use `hyfa` directly; no GitHub CLI is required. Preserve the user's chosen
-repository, assignee scope, and existing authorization. Selecting work does
+repository, execution scope, and existing authorization. Selecting work does
 not itself assign an Issue, post a comment, or authorize unrelated changes.
 
 Use `hyfa --version` and `hyfa COMMAND --help` to check the installed interface.
 Use `--json` where supported and parse its versioned output. Pass an explicit
 `--repo OWNER/REPO`; quote Issue references such as `'OWNER/REPO#42'`.
 For additional options, consult the
-[usage guide](https://github.com/syntropika/hyfa/blob/v0.2.1/docs/usage.md) and
-[installation guide](https://github.com/syntropika/hyfa/blob/v0.2.1/docs/installation.md).
+[usage guide](https://github.com/syntropika/hyfa/blob/v0.3.0/docs/usage.md) and
+[installation guide](https://github.com/syntropika/hyfa/blob/v0.3.0/docs/installation.md).
 
 ## Authentication and first use
 
@@ -42,6 +42,8 @@ GitHub is authoritative; do not edit replica or outbox files directly.
 hyfa ready --repo OWNER/REPO --json
 hyfa next --repo OWNER/REPO --json
 hyfa next --repo OWNER/REPO --assignee LOGIN --horizon 3 --json
+hyfa next --repo OWNER/REPO --children-of 'OWNER/REPO#10' --label ready-for-agent --exclude-label deferred --json
+hyfa view 'OWNER/REPO#42' --json
 hyfa plan --repo OWNER/REPO --json
 hyfa triage --repo OWNER/REPO --json
 ```
@@ -53,6 +55,12 @@ hyfa triage --repo OWNER/REPO --json
   Ready work assigned to that login; it does not assign anything. Assignment
   and Dependency readiness are separate. Closed Issues may satisfy
   Dependencies but are never recommendations. Unknown blockers prevent readiness.
+- `--label` requires every listed label; `--exclude-label` excludes any match.
+  `--children-of` selects direct children, excludes the parent itself, and needs
+  a synchronized relationship inventory for offline use. These combine with
+  assignment scope on `ready`, `next`, `plan`, `triage`, and the full graph.
+  Labels have no implicit workflow meaning: choose filters from the task's
+  instructions. Excluded blockers still block; unlocked outcomes count globally.
 - Horizons are 1, 2, or 3; the default is 3. Report search restrictions from
   `truncated_by` and `search_complete` without claiming a global optimum when
   it was not established. A null recommendation is a valid result. Use
@@ -63,10 +71,11 @@ hyfa triage --repo OWNER/REPO --json
   the previous `synced_at`. Surface stale input and `pending` provenance
   when they affect the answer. Analysis never replays queued remote writes.
 
-Read the Issue's actual specification before implementation. Hyfa has no
-individual Issue-view command; use its canonical GitHub URL or a suitable
-GitHub read tool for full bodies and comments. The generated explorer shows
-readiness and relationships but excludes body and comment text.
+Read the Issue's actual specification before implementation with `hyfa view
+'OWNER/REPO#42' --json`. It includes the effective body, comments, labels,
+assignments, and relationships, including pending local changes. `--offline`
+skips the refresh; check `synced_at`, `pending`, and `relationships_complete`.
+The generated explorer still excludes body and comment text.
 
 ## Make authorized changes
 
@@ -113,9 +122,9 @@ hyfa resolve OPERATION --repo OWNER/REPO --local --json
 `create` always creates a local Draft, even online. Keep the returned
 `draft.key`, such as `OWNER/REPO#draft:TEMPORARY_ID`, and its operation ID.
 Use that quoted key for Draft title, body, state, and assignee edits, comments,
-generic labels, and relationships. For priority changes, reconcile the Draft
-first and use its permanent Issue number. Never invent a GitHub number or
-expose an internal synthetic number.
+generic labels, relationships, `view`, and `update --priority`. Draft priority
+intents wait for creation and preserve their order during reconciliation.
+Never invent a GitHub number or expose an internal synthetic number.
 Reconciliation creates the GitHub Issue and returns its permanent identity.
 To fulfill an authorized request to create a GitHub Issue, complete that
 reconciliation and report the confirmed remote reference.

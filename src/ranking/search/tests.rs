@@ -25,6 +25,7 @@ fn wide_p0_routes_complete_the_bounded_end_to_end_evaluation() {
         dependencies.push(dependency(target, root));
     }
     let replica = LocalReplica {
+        relationships: Default::default(),
         schema_version: "hyfa.local-replica/v1".to_owned(),
         repository: "acme/dense-p0".to_owned(),
         synced_at: "2026-08-07T00:00:00Z".to_owned(),
@@ -368,6 +369,7 @@ fn candidate_signature(candidate: &EvaluatedCandidate<'_>) -> (u64, Vec<u64>, Ve
 
 fn replica(issues: Vec<crate::model::Issue>, dependencies: Vec<Dependency>) -> LocalReplica {
     LocalReplica {
+        relationships: Default::default(),
         schema_version: "hyfa.local-replica/v1".to_owned(),
         repository: "acme/dense-p0".to_owned(),
         synced_at: "2026-08-07T00:00:00Z".to_owned(),

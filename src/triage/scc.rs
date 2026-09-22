@@ -164,6 +164,7 @@ mod tests {
 
     fn replica(issues: Vec<Issue>, dependencies: Vec<Dependency>) -> LocalReplica {
         LocalReplica {
+            relationships: Default::default(),
             schema_version: REPLICA_SCHEMA_VERSION.to_owned(),
             repository: "owner/repo".to_owned(),
             synced_at: "2026-08-07T00:00:00Z".to_owned(),

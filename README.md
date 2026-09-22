@@ -27,7 +27,7 @@ Download a Linux or macOS binary for x86_64 or ARM64 from
 verification. With Rust 1.94.0 or newer installed, you can also install from crates.io:
 
 ```bash
-cargo install hyfa --locked --version 0.2.1
+cargo install hyfa --locked --version 0.3.0
 ```
 
 Sign in through your browser, then replace `OWNER/REPO` with the repository

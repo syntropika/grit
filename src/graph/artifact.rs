@@ -102,7 +102,7 @@ struct OperationalCounts {
 #[serde(deny_unknown_fields)]
 struct GraphAnalysis {
     policy_version: AnalysisPolicyVersion,
-    execution_scope: ArtifactExecutionScope,
+    execution_scope: crate::execution_scope::ScopeDescription,
     next: NextAnalysis,
     plan: ArtifactPlan,
 }
@@ -111,13 +111,6 @@ struct GraphAnalysis {
 enum AnalysisPolicyVersion {
     #[serde(rename = "next/v1")]
     NextV1,
-}
-
-#[derive(Clone, Deserialize, JsonSchema, Serialize)]
-#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
-enum ArtifactExecutionScope {
-    Available,
-    Assignee { assignee: String },
 }
 
 #[derive(Clone, Deserialize, JsonSchema, Serialize)]
@@ -407,12 +400,7 @@ pub(super) fn build_working(
     let effective_input_hash = next.input_hash().to_owned();
     let decision = next.clone().into_plan_decision();
     let structural = crate::plan::analyze_with_ready(&prepared, scope, &ready);
-    let execution_scope = match scope {
-        ExecutionScope::Available => ArtifactExecutionScope::Available,
-        ExecutionScope::Assignee(assignee) => ArtifactExecutionScope::Assignee {
-            assignee: assignee.to_owned(),
-        },
-    };
+    let execution_scope = scope.description();
     let analysis = GraphAnalysis {
         policy_version: AnalysisPolicyVersion::NextV1,
         execution_scope,

@@ -91,6 +91,7 @@ mod tests {
     #[test]
     fn condenses_cycles_deduplicates_component_edges_and_uses_the_fixed_iterations() {
         let replica = LocalReplica {
+            relationships: Default::default(),
             schema_version: REPLICA_SCHEMA_VERSION.to_owned(),
             repository: "owner/repo".to_owned(),
             synced_at: "2026-08-07T00:00:00Z".to_owned(),

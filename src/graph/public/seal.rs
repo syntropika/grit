@@ -63,6 +63,17 @@ pub(super) fn prohibited_values(
             collect(&mut prohibited, node_id);
         }
     }
+    for (key, inventory) in &replica.relationships {
+        for reference in std::iter::once(key)
+            .chain(inventory.parent.iter())
+            .chain(inventory.children.iter())
+        {
+            collect(&mut prohibited, reference);
+            if let Some((owner, _)) = reference.split_once('#') {
+                collect(&mut prohibited, owner);
+            }
+        }
+    }
     let mut prohibited = expand_prohibited_values(prohibited);
     let intentional = intentional_public_patterns(artifact, repository)?;
     prohibited.retain(|pattern| !intentional.contains(pattern));

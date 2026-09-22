@@ -48,6 +48,16 @@ The default Execution scope selects Issues without an assignee. Within that scop
 
 An explicit assignee filter changes the Execution scope to Ready Issues assigned to that person. Issues assigned outside the filter are not simulated as steps. In either case, a candidate that passes the gate is an Executable Issue.
 
+Optional required-label, excluded-label, and direct-child selectors intersect
+that ownership scope at every simulated step. Required labels are conjunctive;
+any excluded label removes a candidate. The parent itself and grandchildren do
+not enter a direct-child scope. These selectors never delete graph nodes or
+Dependencies: an out-of-scope prerequisite still blocks, and Hyfa cannot
+simulate it as a step. The Unlock set, Priority propagation, P0 outcome gates,
+and PageRank retain their repository-wide meaning. Selection constrains
+execution, not the measurement of downstream outcomes. Canonical selection
+parameters are part of the effective input and ranking cache identity.
+
 Assignment does not prevent an Issue from being counted in the Unlock set: making already-committed work Ready is still a graph outcome. Execution scope selects who can execute a step; readiness describes which work becomes enabled.
 
 If there are no candidates, the command succeeds with `recommendation: null` and a summary of how many Issues are blocked, assigned, cyclic, or affected by unknown state. A sync failure without a valid Local replica remains an error.

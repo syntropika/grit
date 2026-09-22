@@ -766,6 +766,53 @@ impl GitHubClient {
             .collect())
     }
 
+    pub(crate) fn fetch_issue_relationships(
+        &self,
+        issue: &IssueReference,
+    ) -> Result<crate::model::IssueRelationships, GitHubError> {
+        let path = format!(
+            "repos/{}/{}/issues/{}",
+            issue.repository().owner(),
+            issue.repository().name(),
+            issue.number()
+        );
+        let raw_children: Vec<GitHubRelatedIssue> = self.paginate(
+            self.endpoint(&format!("{path}/sub_issues"))?,
+            &[("per_page", "100")],
+        )?;
+        let mut children = BTreeSet::new();
+        for child in raw_children {
+            let key = child.key()?;
+            if key == issue.stable_key().to_ascii_lowercase() || !children.insert(key) {
+                return Err(GitHubError::InvalidRelationship);
+            }
+        }
+        let response = self
+            .client
+            .get(self.endpoint(&format!("{path}/parent"))?)
+            .send()
+            .map_err(GitHubError::Request)?;
+        let parent = if response.status() == StatusCode::NOT_FOUND {
+            None
+        } else {
+            if response.status() != StatusCode::OK {
+                return Err(api_status_error(response.status(), response.headers()));
+            }
+            let parent = response
+                .json::<GitHubRelatedIssue>()
+                .map_err(GitHubError::Decode)?
+                .key()?;
+            if parent == issue.stable_key().to_ascii_lowercase() {
+                return Err(GitHubError::InvalidRelationship);
+            }
+            Some(parent)
+        };
+        Ok(crate::model::IssueRelationships {
+            parent,
+            children: children.into_iter().collect(),
+        })
+    }
+
     pub(crate) fn fetch_repository_metadata(
         &self,
         repository: &Repository,
@@ -1365,6 +1412,34 @@ struct GitHubIssueLocator {
 }
 
 #[derive(Deserialize)]
+struct GitHubRelatedIssue {
+    number: u64,
+    repository_url: String,
+    pull_request: Option<serde_json::Value>,
+}
+
+impl GitHubRelatedIssue {
+    fn key(self) -> Result<String, GitHubError> {
+        let url = Url::parse(&self.repository_url).map_err(|_| GitHubError::InvalidRelationship)?;
+        let parts: Vec<_> = url
+            .path_segments()
+            .ok_or(GitHubError::InvalidRelationship)?
+            .collect();
+        if self.pull_request.is_some() || parts.len() < 3 || parts[parts.len() - 3] != "repos" {
+            return Err(GitHubError::InvalidRelationship);
+        }
+        IssueReference::parse(&format!(
+            "{}/{}#{}",
+            parts[parts.len() - 2],
+            parts[parts.len() - 1],
+            self.number
+        ))
+        .map(|issue| issue.stable_key().to_ascii_lowercase())
+        .map_err(|_| GitHubError::InvalidRelationship)
+    }
+}
+
+#[derive(Deserialize)]
 struct GitHubCreatedIssue {
     id: u64,
     node_id: String,
@@ -1637,6 +1712,8 @@ struct SubIssueRequest {
 
 #[derive(Debug, Error)]
 pub(crate) enum GitHubError {
+    #[error("GitHub returned an invalid or incomplete Issue relationship inventory")]
+    InvalidRelationship,
     #[error("the GitHub token cannot be represented as an HTTP header")]
     InvalidToken,
     #[error("could not build the GitHub HTTP client: {0}")]
@@ -1716,6 +1793,7 @@ impl GitHubError {
             | Self::CrossOriginPagination
             | Self::InvalidUrl { .. }
             | Self::InvalidRepositoryUrl
+            | Self::InvalidRelationship
             | Self::InvalidLabelUrl
             | Self::IssueIdentityMismatch
             | Self::InvalidIssueFieldValue
