@@ -111,6 +111,8 @@ fn pending_draft_exploration_preserves_identity_filters_and_recommendation_evide
         "recommendation_names_draft",
         "draft_key_is_searchable",
         "pending_title_and_no_github_link",
+        "pending_impact_explanation",
+        "impact_outcome_opens_blocked_details",
         "edited_title_is_searchable",
         "pending_priority_filter",
         "pending_dependency_isolation",

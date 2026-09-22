@@ -882,6 +882,12 @@ tbody tr.causal-evidence {
   font-size: 0.78rem;
   margin: 1.4rem 0 0.5rem;
 }
+.dependency-impact p,
+.detail-panel li p {
+  font-size: 0.8rem;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
 .detail-panel ul {
   display: grid;
   gap: 0.3rem;

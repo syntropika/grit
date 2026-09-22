@@ -1,3 +1,4 @@
+pub(crate) mod impact;
 mod rollout;
 mod scc;
 

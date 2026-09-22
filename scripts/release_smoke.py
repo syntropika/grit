@@ -104,4 +104,13 @@ def smoke(binary: Path, version: str) -> None:
         run("sub-issue", parent, "--add", draft)
         children = run("ready", "--repo", "release/smoke", "--children-of", parent)
         assert [issue["key"] for issue in children["issues"]] == [draft]
+        run("block", parent, "--by", draft)
+        impact = run("view", draft, "--offline")["issue"]["impact"]
+        assert impact["downstream"] == {"count": 1, "complete": True}
+        assert impact["immediate_unlocks"]["examples"] == [parent]
+        assert impact["chain_depth"] == {"state": "finite", "edges": 1}
+        run("graph", "--repo", "release/smoke", "--label", "priority:p1", "--output", str(site))
+        graph = json.loads((site / "graph.json").read_text())
+        assert graph["schema_version"] == "hyfa.graph-artifact/v4"
+        assert next(node for node in graph["nodes"] if node["common"]["key"] == draft)["impact"] == impact
     print("Extracted binary passed version, bundled skill, local sync, scoped selection, Draft priority, Issue view, next, plan, and graph checks.")

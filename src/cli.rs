@@ -611,6 +611,11 @@ fn view_issue(value: &str, offline: bool, json: bool) -> Result<(), CliError> {
         if !issue.blocks.is_empty() {
             println!("Blocks: {}", issue.blocks.join(", "));
         }
+        if let Some(impact) = &issue.impact {
+            for line in impact.human_lines() {
+                println!("{line}");
+            }
+        }
         println!("\n{}", issue.body);
         for comment in &issue.comments {
             println!(

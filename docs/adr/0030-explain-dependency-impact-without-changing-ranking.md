@@ -1,0 +1,3 @@
+# Explain Dependency impact independently of ranking
+
+Hyfa will expose Dependency impact in the complete Issue reader and private graph as a shared, precomputed explanation of direct dependents, distinct open downstream work, immediate completion outcomes, and downstream chain depth. Only Ready Issues receive immediate-outcome claims, all remaining blockers retain AND semantics, and bounded downstream traversal reports lower bounds explicitly while finite depth is calculated independently over the complete Operational graph. These diagnostics preserve the existing ranking policy and public export contract; centrality scores and raw descendant counts do not establish business value, executable work, or delivery time.

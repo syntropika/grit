@@ -659,7 +659,6 @@
     appendDetail(details, "Assignees", (node.assignees || []).join(", ") || "—");
     appendDetail(details, "Labels", (node.labels || []).join(", ") || "—");
     appendDetail(details, "Declared priority", priorityLabel(node.priority));
-    appendDetail(details, "Unlock behavior", node.unlock_count == null ? "—" : String(node.unlock_count));
     appendDetail(details, "PageRank bucket", node.pagerank_bucket == null ? "—" : String(node.pagerank_bucket));
     const projects = query.projectsFor(node);
     if (projects.length > 0) appendDetail(details, "Projects", projects.join(", "));
@@ -670,6 +669,7 @@
     close.setAttribute("aria-label", "Close Issue details");
     close.addEventListener("click", () => { clearSelection(); canvas.focus({ preventScroll: true }); });
     detailPanel.append(close, heading, key, badge, details);
+    appendImpact(node.impact);
     appendRelations("Blockers", query.blockersByKey.get(node.key) || []);
     appendRelations("Dependents", query.dependentsByKey.get(node.key) || []);
     if (node.url) {
@@ -678,6 +678,57 @@
       link.textContent = "Open canonical GitHub Issue";
       link.rel = "noopener noreferrer";
       detailPanel.append(link);
+    }
+  }
+
+  function appendImpact(impact) {
+    if (!impact) return;
+    const section = document.createElement("section");
+    section.className = "dependency-impact";
+    section.setAttribute("aria-label", "Dependency impact");
+    const heading = document.createElement("h3");
+    heading.textContent = "Dependency impact";
+    const explanation = document.createElement("p");
+    explanation.textContent = impact.explanation;
+    const metrics = document.createElement("dl");
+    appendDetail(metrics, "Direct open dependents", String(impact.direct_dependents));
+    appendDetail(metrics, "Longest downstream chain", impact.chain_depth.state === "finite"
+      ? `${impact.chain_depth.edges} dependency steps (not a duration)`
+      : "Unavailable: a downstream cycle is reachable");
+    section.append(heading, explanation, metrics);
+    if (impact.pending) {
+      const pending = document.createElement("p");
+      pending.className = "detail-prompt";
+      pending.textContent = "Includes pending local changes.";
+      section.append(pending);
+    }
+    if (!impact.downstream.complete) {
+      const partial = document.createElement("p");
+      partial.textContent = "Downstream counts are lower bounds; some work was not inspected.";
+      section.append(partial);
+    }
+    detailPanel.append(section);
+    if (impact.immediate_unlocks?.count > 0) {
+      appendRelations(`Would become ready (showing ${impact.immediate_unlocks.examples.length} of ${impact.immediate_unlocks.count})`, impact.immediate_unlocks.examples);
+    }
+    if (impact.still_blocked?.examples.length > 0) {
+      const title = document.createElement("h3");
+      title.textContent = "Why other work would remain blocked";
+      const list = document.createElement("ul");
+      for (const outcome of impact.still_blocked.examples) {
+        const item = document.createElement("li");
+        const button = relationButton(outcome.key);
+        const reason = document.createElement("p");
+        const blockers = outcome.blockers.map(blocker =>
+          `${blocker.key || "Unknown internal Issue"}${blocker.external ? " (external)" : ""}${blocker.unknown ? " (unknown state)" : ""}`);
+        reason.textContent = `Still needs: ${blockers.join(", ")}.${outcome.blocker_count > blockers.length ? ` Showing ${blockers.length} of ${outcome.blocker_count} blockers.` : ""}${outcome.cyclic ? " Part of a dependency cycle." : ""}`;
+        item.append(button, reason);
+        list.append(item);
+      }
+      const shown = document.createElement("p");
+      shown.className = "detail-prompt";
+      shown.textContent = `Showing ${impact.still_blocked.examples.length} of ${impact.still_blocked.total.complete ? "" : "at least "}${impact.still_blocked.total.count} remaining blocked Issues.`;
+      detailPanel.append(title, shown, list);
     }
   }
 
@@ -700,16 +751,20 @@
     } else {
       for (const key of keys) {
         const item = document.createElement("li");
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = "relation-button";
-        button.textContent = key;
-        button.addEventListener("click", () => selectNode(key));
-        item.append(button);
+        item.append(relationButton(key));
         list.append(item);
       }
     }
     detailPanel.append(heading, list);
+  }
+
+  function relationButton(key) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "relation-button";
+    button.textContent = key;
+    button.addEventListener("click", () => selectNode(key));
+    return button;
   }
 
   function isolateRoot() {

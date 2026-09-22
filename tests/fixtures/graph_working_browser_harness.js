@@ -32,6 +32,15 @@ function exercise() {
     checks.pending_title_and_no_github_link = doc.querySelector("#detail-heading").textContent === "Edited local Draft"
       && doc.querySelector("#issue-details .detail-key").textContent === key
       && !doc.querySelector("#issue-details a[href^='https://github.com/']");
+    checks.pending_impact_explanation = draft.impact.downstream.count === 1
+      && draft.impact.immediate_unlocks.count === 1
+      && draft.impact.chain_depth.edges === 1
+      && doc.querySelector(".dependency-impact").textContent.includes(draft.impact.explanation)
+      && doc.querySelector(".dependency-impact").textContent.includes("Includes pending local changes.");
+    const impactHeading = [...doc.querySelectorAll("#issue-details h3")].find(heading => heading.textContent.startsWith("Would become ready"));
+    impactHeading.nextElementSibling.querySelector("button").click();
+    checks.impact_outcome_opens_blocked_details = doc.querySelector("#issue-details .detail-key").textContent === "acme/widgets#2"
+      && doc.querySelector(".dependency-impact").textContent.includes("This Issue is blocked");
     search("Edited local Draft");
     checks.edited_title_is_searchable = rows().length === 1 && rows()[0] === key;
     search("");

@@ -92,6 +92,14 @@ _Avoid_: Synchronization, analysis with side effects, destructive label migratio
 A measure of topological position and influence, such as PageRank. It describes structure, not readiness, Unlock profile, or operational priority.
 _Avoid_: Operational priority, Unlock profile
 
+**Dependency impact**:
+An explanation of the open work that depends on an Issue, distinguishing its direct and transitive dependents from the work that would become Ready after its completion. Immediate completion outcomes apply only to Ready Issues, independently of ownership or Execution scope.
+_Avoid_: Business value, ranking score, Unlock profile
+
+**Downstream chain depth**:
+The largest number of Dependencies in an open chain leading from an Issue to its downstream dependents. It describes structural depth, excludes closed history, and is unavailable when a reachable cycle prevents a finite result.
+_Avoid_: Critical path, ETA, Critical distance, Dependency layer
+
 **Local replica**:
 A local, disposable, rebuildable representation of a Repository's Issues and Dependencies, used as analysis input. GitHub remains authoritative for every change, and the replica never acts as a source of truth.
 _Avoid_: Local backlog, authoritative copy, Issue database
