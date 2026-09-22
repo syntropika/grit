@@ -1,9 +1,14 @@
 # Changelog
 
+## 0.2.1
+
+- Name the source package `hyfa`, matching the executable and agent skill.
+- Add crates.io distribution so installation uses `cargo install hyfa --locked`.
+  GitHub binary archives remain available for Linux and macOS.
+
 ## 0.2.0
 
-- Rename the CLI to `hyfa`, the source package to `syntropika-hyfa`, and the
-  repository to [`syntropika/hyfa`](https://github.com/syntropika/hyfa).
+- Rename the CLI to `hyfa` and the repository to [`syntropika/hyfa`](https://github.com/syntropika/hyfa).
 - Ship `hyfa-v0.2.0-TARGET.tar.gz` archives containing the `hyfa` executable.
   Update the graph explorers, bundled agent skill, documentation, and workflows.
 - Use `HYFA_*` environment variables, `hyfa.*` JSON schema identifiers, a

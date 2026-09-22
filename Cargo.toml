@@ -1,6 +1,6 @@
 [package]
-name = "syntropika-hyfa"
-version = "0.2.0"
+name = "hyfa"
+version = "0.2.1"
 edition = "2024"
 description = "Graph-ranked Issues and Tasks for GitHub"
 license = "MIT"

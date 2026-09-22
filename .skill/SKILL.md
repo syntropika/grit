@@ -13,8 +13,8 @@ Use `hyfa --version` and `hyfa COMMAND --help` to check the installed interface.
 Use `--json` where supported and parse its versioned output. Pass an explicit
 `--repo OWNER/REPO`; quote Issue references such as `'OWNER/REPO#42'`.
 For additional options, consult the
-[usage guide](https://github.com/syntropika/hyfa/blob/v0.2.0/docs/usage.md) and
-[installation guide](https://github.com/syntropika/hyfa/blob/v0.2.0/docs/installation.md).
+[usage guide](https://github.com/syntropika/hyfa/blob/v0.2.1/docs/usage.md) and
+[installation guide](https://github.com/syntropika/hyfa/blob/v0.2.1/docs/installation.md).
 
 ## Authentication and first use
 

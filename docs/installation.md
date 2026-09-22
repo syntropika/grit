@@ -8,12 +8,12 @@ embedded, so the released binary does not need a separate web server or Node.js.
 Choose the archive for your operating system and CPU from
 [GitHub Releases](https://github.com/syntropika/hyfa/releases/latest).
 
-| Platform | v0.2.0 archive | System requirement |
+| Platform | v0.2.1 archive | System requirement |
 | --- | --- | --- |
-| Linux x86_64 | [x86_64-unknown-linux-gnu](https://github.com/syntropika/hyfa/releases/download/v0.2.0/hyfa-v0.2.0-x86_64-unknown-linux-gnu.tar.gz) | glibc 2.35 or newer |
-| Linux ARM64 | [aarch64-unknown-linux-gnu](https://github.com/syntropika/hyfa/releases/download/v0.2.0/hyfa-v0.2.0-aarch64-unknown-linux-gnu.tar.gz) | glibc 2.35 or newer |
-| macOS Apple silicon | [aarch64-apple-darwin](https://github.com/syntropika/hyfa/releases/download/v0.2.0/hyfa-v0.2.0-aarch64-apple-darwin.tar.gz) | macOS 13 or newer |
-| macOS Intel | [x86_64-apple-darwin](https://github.com/syntropika/hyfa/releases/download/v0.2.0/hyfa-v0.2.0-x86_64-apple-darwin.tar.gz) | macOS 13 or newer |
+| Linux x86_64 | [x86_64-unknown-linux-gnu](https://github.com/syntropika/hyfa/releases/download/v0.2.1/hyfa-v0.2.1-x86_64-unknown-linux-gnu.tar.gz) | glibc 2.35 or newer |
+| Linux ARM64 | [aarch64-unknown-linux-gnu](https://github.com/syntropika/hyfa/releases/download/v0.2.1/hyfa-v0.2.1-aarch64-unknown-linux-gnu.tar.gz) | glibc 2.35 or newer |
+| macOS Apple silicon | [aarch64-apple-darwin](https://github.com/syntropika/hyfa/releases/download/v0.2.1/hyfa-v0.2.1-aarch64-apple-darwin.tar.gz) | macOS 13 or newer |
+| macOS Intel | [x86_64-apple-darwin](https://github.com/syntropika/hyfa/releases/download/v0.2.1/hyfa-v0.2.1-x86_64-apple-darwin.tar.gz) | macOS 13 or newer |
 
 Use `uname -m` to check your CPU. On Linux, `aarch64` means ARM64; on macOS,
 `arm64` means Apple silicon. Windows binaries are not provided in this release.
@@ -23,10 +23,10 @@ download with `sha256sum`; on macOS use `shasum -a 256`:
 
 ```bash
 # Linux example; run from the directory containing both downloaded files.
-grep 'hyfa-v0.2.0-x86_64-unknown-linux-gnu.tar.gz$' SHA256SUMS | sha256sum --check -
-tar -xzf hyfa-v0.2.0-x86_64-unknown-linux-gnu.tar.gz
+grep 'hyfa-v0.2.1-x86_64-unknown-linux-gnu.tar.gz$' SHA256SUMS | sha256sum --check -
+tar -xzf hyfa-v0.2.1-x86_64-unknown-linux-gnu.tar.gz
 mkdir -p "$HOME/.local/bin"
-install -m 755 hyfa-v0.2.0-x86_64-unknown-linux-gnu/hyfa "$HOME/.local/bin/hyfa"
+install -m 755 hyfa-v0.2.1-x86_64-unknown-linux-gnu/hyfa "$HOME/.local/bin/hyfa"
 "$HOME/.local/bin/hyfa" --version
 ```
 
@@ -37,12 +37,24 @@ archive also contains the license, README, and build metadata.
 The macOS archives are not notarized. If your system's application policy
 requires notarization, use a local source build instead.
 
-## Install from source
+## Install from crates.io
+
+With Rust 1.94.0 or newer installed:
+
+```bash
+cargo install hyfa --locked --version 0.2.1
+hyfa --version
+```
+
+The package and executable are both named `hyfa`. Cargo installs into its
+binary directory, usually `$HOME/.cargo/bin`.
+
+## Install from the GitHub source
 
 With Rust 1.94.0 installed:
 
 ```bash
-cargo +1.94.0 install --locked --git https://github.com/syntropika/hyfa --tag v0.2.0
+cargo +1.94.0 install --locked --git https://github.com/syntropika/hyfa --tag v0.2.1
 hyfa --version
 ```
 

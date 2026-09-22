@@ -24,10 +24,10 @@ so work with another unresolved blocker stays blocked.
 Download a Linux or macOS binary for x86_64 or ARM64 from
 [GitHub Releases](https://github.com/syntropika/hyfa/releases/latest). See the
 [installation guide](docs/installation.md) for system requirements and checksum
-verification. With Rust 1.94.0 installed, you can also build v0.2.0 from source:
+verification. With Rust 1.94.0 or newer installed, you can also install from crates.io:
 
 ```bash
-cargo +1.94.0 install --locked --git https://github.com/syntropika/hyfa --tag v0.2.0
+cargo install hyfa --locked --version 0.2.1
 ```
 
 Sign in through your browser, then replace `OWNER/REPO` with the repository

@@ -966,6 +966,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyfa"
+version = "0.2.1"
+dependencies = [
+ "aho-corasick",
+ "chrono",
+ "clap",
+ "directories",
+ "fs2",
+ "hex",
+ "keyring",
+ "mockito",
+ "reqwest",
+ "rustix",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "skillinstaller",
+ "tempfile",
+ "thiserror",
+ "tungstenite",
+ "url",
+ "uuid",
+ "yaml-rust2",
+ "zeroize",
+]
+
+[[package]]
 name = "hyper"
 version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2165,34 +2193,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "syntropika-hyfa"
-version = "0.2.0"
-dependencies = [
- "aho-corasick",
- "chrono",
- "clap",
- "directories",
- "fs2",
- "hex",
- "keyring",
- "mockito",
- "reqwest",
- "rustix",
- "schemars",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "skillinstaller",
- "tempfile",
- "thiserror",
- "tungstenite",
- "url",
- "uuid",
- "yaml-rust2",
- "zeroize",
 ]
 
 [[package]]
