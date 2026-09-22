@@ -2,6 +2,7 @@ use chrono::{DateTime, Duration, FixedOffset, SecondsFormat, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -37,6 +38,15 @@ pub(crate) struct LocalReplica {
     pub(crate) sync: SyncMetadata,
     pub(crate) issues: Vec<Issue>,
     pub(crate) dependencies: Vec<Dependency>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) relationships: BTreeMap<String, IssueRelationships>,
+}
+
+/// A complete, explicitly fetched parent and direct-child inventory for one Issue.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct IssueRelationships {
+    pub(crate) parent: Option<String>,
+    pub(crate) children: Vec<String>,
 }
 
 impl LocalReplica {
@@ -53,6 +63,7 @@ impl LocalReplica {
             Some(&repository_labels),
             &issues,
             &dependencies,
+            &BTreeMap::new(),
         )?;
         Ok(Self {
             schema_version: REPLICA_SCHEMA_VERSION.to_owned(),
@@ -63,6 +74,7 @@ impl LocalReplica {
             sync,
             issues,
             dependencies,
+            relationships: BTreeMap::new(),
         })
     }
 
@@ -83,16 +95,83 @@ impl LocalReplica {
             self.repository_labels.as_deref(),
             &self.issues,
             &self.dependencies,
+            &self.relationships,
         )?;
         let legacy_hash = self
             .repository_labels
             .is_none()
-            .then(|| {
+            .then_some(())
+            .filter(|_| self.relationships.is_empty())
+            .map(|_| {
                 calculate_legacy_input_hash(&self.repository, &self.issues, &self.dependencies)
             })
             .transpose()?;
         if self.input_hash != expected_hash && legacy_hash.as_ref() != Some(&self.input_hash) {
             return Err(ReplicaError::HashMismatch);
+        }
+        self.validate_relationships()?;
+        Ok(())
+    }
+
+    pub(crate) fn with_relationships(
+        mut self,
+        relationships: BTreeMap<String, IssueRelationships>,
+    ) -> Result<Self, ReplicaError> {
+        self.relationships = relationships;
+        self.validate_relationships()?;
+        self.input_hash = calculate_input_hash(
+            &self.repository,
+            self.repository_labels.as_deref(),
+            &self.issues,
+            &self.dependencies,
+            &self.relationships,
+        )?;
+        Ok(self)
+    }
+
+    fn validate_relationships(&self) -> Result<(), ReplicaError> {
+        let issue_keys: std::collections::BTreeSet<_> = self
+            .issues
+            .iter()
+            .map(|issue| issue.display_key(&self.repository).to_ascii_lowercase())
+            .collect();
+        for (key, inventory) in &self.relationships {
+            if !issue_keys.contains(key)
+                || inventory.children.windows(2).any(|pair| pair[0] >= pair[1])
+            {
+                return Err(ReplicaError::InvalidRelationships);
+            }
+            for related in inventory.children.iter().chain(inventory.parent.iter()) {
+                let reference = IssueReference::parse(related)
+                    .map_err(|_| ReplicaError::InvalidRelationships)?;
+                if related == key
+                    || reference.stable_key().to_ascii_lowercase() != *related
+                    || (reference
+                        .repository()
+                        .full_name()
+                        .eq_ignore_ascii_case(&self.repository)
+                        && !issue_keys.contains(related))
+                {
+                    return Err(ReplicaError::InvalidRelationships);
+                }
+            }
+            for child in &inventory.children {
+                if self
+                    .relationships
+                    .get(child)
+                    .is_some_and(|child| child.parent.as_ref() != Some(key))
+                {
+                    return Err(ReplicaError::InvalidRelationships);
+                }
+            }
+            if let Some(parent) = &inventory.parent
+                && self
+                    .relationships
+                    .get(parent)
+                    .is_some_and(|parent| !parent.children.contains(key))
+            {
+                return Err(ReplicaError::InvalidRelationships);
+            }
         }
         Ok(())
     }
@@ -223,6 +302,7 @@ fn calculate_input_hash(
     repository_labels: Option<&[Label]>,
     issues: &[Issue],
     dependencies: &[Dependency],
+    relationships: &BTreeMap<String, IssueRelationships>,
 ) -> Result<String, ReplicaError> {
     let input = HashInput {
         schema_version: REPLICA_SCHEMA_VERSION,
@@ -230,6 +310,7 @@ fn calculate_input_hash(
         repository_labels,
         issues,
         dependencies,
+        relationships,
     };
     let canonical = serde_json::to_vec(&input).map_err(ReplicaError::EncodeHashInput)?;
     Ok(hex::encode(Sha256::digest(canonical)))
@@ -242,6 +323,8 @@ struct HashInput<'a> {
     repository_labels: Option<&'a [Label]>,
     issues: &'a [Issue],
     dependencies: &'a [Dependency],
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    relationships: &'a BTreeMap<String, IssueRelationships>,
 }
 
 fn calculate_legacy_input_hash(
@@ -269,6 +352,10 @@ struct LegacyHashInput<'a> {
 
 #[derive(Debug, Error)]
 pub(crate) enum ReplicaError {
+    #[error(
+        "Local replica contains an invalid or inconsistent parent/child relationship inventory"
+    )]
+    InvalidRelationships,
     #[error("could not encode normalized input for hashing: {0}")]
     EncodeHashInput(serde_json::Error),
     #[error("unsupported Local replica schema {0:?}")]

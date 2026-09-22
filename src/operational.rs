@@ -19,6 +19,10 @@ use scc::{cyclic_issue_numbers, strongly_connected_components};
 pub(crate) enum ExecutionScope<'a> {
     Available,
     Assignee(&'a str),
+    Selected {
+        assignee: Option<&'a str>,
+        selection: &'a crate::execution_scope::Selection,
+    },
 }
 
 impl ExecutionScope<'_> {
@@ -29,6 +33,16 @@ impl ExecutionScope<'_> {
                 .assignees
                 .iter()
                 .any(|actor| actor.login.eq_ignore_ascii_case(assignee)),
+            Self::Selected {
+                assignee,
+                selection,
+            } => {
+                assignee
+                    .map(Self::Assignee)
+                    .unwrap_or(Self::Available)
+                    .contains(issue)
+                    && selection.contains(issue)
+            }
         }
     }
 
@@ -36,6 +50,26 @@ impl ExecutionScope<'_> {
         match self {
             Self::Available => ("available", None),
             Self::Assignee(assignee) => ("assignee", Some(assignee.to_ascii_lowercase())),
+            Self::Selected { assignee, .. } => assignee
+                .map(Self::Assignee)
+                .unwrap_or(Self::Available)
+                .hash_key(),
+        }
+    }
+
+    pub(crate) fn description(self) -> crate::execution_scope::ScopeDescription {
+        use crate::execution_scope::{ScopeDescription, Selection};
+        let (_, assignee) = self.hash_key();
+        let selection = match self {
+            Self::Selected { selection, .. } => selection.clone(),
+            _ => Selection::default(),
+        };
+        match assignee {
+            Some(assignee) => ScopeDescription::Assignee {
+                assignee,
+                selection,
+            },
+            None => ScopeDescription::Available { selection },
         }
     }
 }

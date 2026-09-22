@@ -14,7 +14,7 @@ def smoke(binary: Path, version: str) -> None:
     binary = binary.resolve()
     assert subprocess.check_output([binary, "--version"], text=True).strip() == f"hyfa {version}"
     help_text = subprocess.check_output([binary, "--help"], text=True)
-    for command in ("auth", "skill", "create", "comment", "next", "plan", "ready", "graph", "reconcile"):
+    for command in ("auth", "skill", "create", "comment", "view", "next", "plan", "ready", "graph", "reconcile"):
         assert any(line.strip().startswith(f"{command} ") for line in help_text.splitlines()), command
 
     class Fixture(BaseHTTPRequestHandler):
@@ -80,6 +80,15 @@ def smoke(binary: Path, version: str) -> None:
         created = run("create", "--repo", "release/smoke", "--title", "Ship a verified release")
         assert created["pending"] is True
         draft = created["draft"]["key"]
+        priority = run("update", draft, "--priority", "p1")
+        assert priority["pending"] is True and "number" not in priority["issue"]
+        viewed = run("view", draft, "--offline")
+        assert viewed["issue"]["priority"]["value"] == "p1"
+        assert viewed["issue"]["relationships_complete"] is True
+        scoped = run("ready", "--repo", "release/smoke", "--label", "priority:p1")
+        assert [issue["key"] for issue in scoped["issues"]] == [draft]
+        excluded = run("next", "--repo", "release/smoke", "--exclude-label", "priority:p1")
+        assert excluded["recommendation"] is None
         ranked = run("next", "--repo", "release/smoke")
         assert ranked["source"] == "local_fallback"
         assert ranked["recommendation"]["first_issue"]["key"] == draft
@@ -91,4 +100,8 @@ def smoke(binary: Path, version: str) -> None:
         run("graph", "--repo", "release/smoke", "--output", str(site))
         assert (site / "index.html").is_file()
         assert (site / "graph.json").is_file()
-    print("Extracted binary passed version, command, bundled skill installation, local sync, offline Draft, next, plan, and graph checks.")
+        parent = run("create", "--repo", "release/smoke", "--title", "Release plan")["draft"]["key"]
+        run("sub-issue", parent, "--add", draft)
+        children = run("ready", "--repo", "release/smoke", "--children-of", parent)
+        assert [issue["key"] for issue in children["issues"]] == [draft]
+    print("Extracted binary passed version, bundled skill, local sync, scoped selection, Draft priority, Issue view, next, plan, and graph checks.")

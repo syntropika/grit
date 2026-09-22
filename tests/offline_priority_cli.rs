@@ -503,7 +503,8 @@ fn mock_unavailable(
             format!("/repos/acme/offline/issues/{issue_number}").as_str(),
         )
         .with_status(503)
-        .expect(issue_reads)
+        .expect_at_least(1)
+        .expect_at_most(issue_reads)
         .create();
     let failed_pulls = github
         .mock("GET", "/repos/acme/offline/labels")

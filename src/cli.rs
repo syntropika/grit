@@ -1,6 +1,6 @@
 use std::{env, path::PathBuf, time::Instant};
 
-use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use thiserror::Error;
 use url::Url;
@@ -31,8 +31,8 @@ use crate::{
     reconciliation::{self, ReconciliationError, ResolutionChoice},
     replica_sync::{self, ReplicaSyncError},
     repository::{
-        IssueReference, IssueReferenceError, PendingIssueReference, PendingIssueReferenceError,
-        Repository, RepositoryError,
+        IssueReferenceError, PendingIssueReference, PendingIssueReferenceError, Repository,
+        RepositoryError,
     },
     store::{ReplicaStore, StoreError},
     triage::{self, TriageReport},
@@ -60,8 +60,97 @@ struct Cli {
     command: Command,
 }
 
+#[derive(Args, Default)]
+struct ScopeArguments {
+    /// Select Ready work assigned to this GitHub login; otherwise require no assignee.
+    #[arg(long)]
+    assignee: Option<String>,
+    /// Require this label on every executable step. Repeat to require all labels.
+    #[arg(long = "label")]
+    labels: Vec<String>,
+    /// Exclude work carrying this label. Repeat to exclude any listed label.
+    #[arg(long = "exclude-label")]
+    exclude_labels: Vec<String>,
+    /// Select direct children of this OWNER/REPO#NUMBER or draft reference.
+    #[arg(long)]
+    children_of: Option<String>,
+}
+
+impl ScopeArguments {
+    fn has_selection(&self) -> bool {
+        !self.labels.is_empty() || !self.exclude_labels.is_empty() || self.children_of.is_some()
+    }
+
+    fn parent(&self, repository: &str) -> Result<Option<String>, CliError> {
+        self.children_of
+            .as_deref()
+            .map(|parent| {
+                crate::execution_scope::parent_key(parent, repository).map_err(Into::into)
+            })
+            .transpose()
+    }
+
+    fn selection(
+        &self,
+        working: &WorkingGraph<'_>,
+    ) -> Result<crate::execution_scope::Selection, CliError> {
+        crate::execution_scope::Selection::new(
+            &self.labels,
+            &self.exclude_labels,
+            self.parent(&working.replica().repository)?,
+            working,
+        )
+        .map_err(Into::into)
+    }
+
+    fn scope<'a>(&'a self, selection: &'a crate::execution_scope::Selection) -> ExecutionScope<'a> {
+        if selection.is_empty() {
+            self.assignee
+                .as_deref()
+                .map(ExecutionScope::Assignee)
+                .unwrap_or(ExecutionScope::Available)
+        } else {
+            ExecutionScope::Selected {
+                assignee: self.assignee.as_deref(),
+                selection,
+            }
+        }
+    }
+}
+
+fn refresh_for_scope(
+    repository: &Repository,
+    arguments: &ScopeArguments,
+) -> Result<(LocalReplica, ReplicaSource), CliError> {
+    let requested: Vec<_> = arguments
+        .parent(repository.full_name())?
+        .into_iter()
+        .collect();
+    refresh_for_relationships(repository, &requested)
+}
+
+fn refresh_for_relationships(
+    repository: &Repository,
+    requested: &[String],
+) -> Result<(LocalReplica, ReplicaSource), CliError> {
+    let refresh = github_client()
+        .and_then(|client| synchronize_with_relationships(repository, &client, requested));
+    refresh_or_local_after(repository, refresh)
+}
+
 #[derive(Subcommand)]
 enum Command {
+    /// Read an Issue's complete effective local content, comments, and relationships.
+    View {
+        /// Issue in OWNER/REPO#NUMBER or draft-reference form.
+        issue: String,
+        /// Read the last valid snapshot without attempting a GitHub refresh.
+        #[arg(long)]
+        offline: bool,
+        /// Emit versioned machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
     /// Install the bundled Hyfa usage skill for coding agents.
     Skill {
         #[command(subcommand)]
@@ -103,9 +192,8 @@ enum Command {
         /// Repository in OWNER/REPO form.
         #[arg(long)]
         repo: String,
-        /// Select Ready work assigned to this GitHub login.
-        #[arg(long)]
-        assignee: Option<String>,
+        #[command(flatten)]
+        scope: ScopeArguments,
         /// Number of completions to evaluate, from one through the default three.
         #[arg(long, default_value_t = ranking::DEFAULT_HORIZON)]
         horizon: u8,
@@ -121,9 +209,8 @@ enum Command {
         /// Repository in OWNER/REPO form.
         #[arg(long)]
         repo: String,
-        /// Select Ready work assigned to this GitHub login.
-        #[arg(long)]
-        assignee: Option<String>,
+        #[command(flatten)]
+        scope: ScopeArguments,
         /// Number of completions to evaluate, from one through the default three.
         #[arg(long, default_value_t = ranking::DEFAULT_HORIZON)]
         horizon: u8,
@@ -139,7 +226,7 @@ enum Command {
         /// Repository in OWNER/REPO form.
         #[arg(long)]
         repo: String,
-        /// Evaluate execution-scope membership for this GitHub login.
+        /// Select work assigned to this login instead of unassigned work.
         #[arg(long)]
         assignee: Option<String>,
         /// Emit versioned machine-readable output.
@@ -226,9 +313,8 @@ enum Command {
         /// Target directory for the complete static site.
         #[arg(long)]
         output: PathBuf,
-        /// Select Ready work assigned to this GitHub login.
-        #[arg(long)]
-        assignee: Option<String>,
+        #[command(flatten)]
+        scope: ScopeArguments,
         /// Ranking horizon embedded in the static analysis.
         #[arg(long, default_value_t = ranking::DEFAULT_HORIZON)]
         horizon: u8,
@@ -290,9 +376,8 @@ enum Command {
         /// Repository in OWNER/REPO form.
         #[arg(long)]
         repo: String,
-        /// Select Ready work assigned to this GitHub login.
-        #[arg(long)]
-        assignee: Option<String>,
+        #[command(flatten)]
+        scope: ScopeArguments,
         /// Emit versioned machine-readable output.
         #[arg(long)]
         json: bool,
@@ -352,6 +437,11 @@ impl From<IssueStateArgument> for IssueStateValue {
 pub(crate) fn execute() -> Result<(), CliError> {
     let cli = Cli::parse();
     match cli.command {
+        Command::View {
+            issue,
+            offline,
+            json,
+        } => view_issue(&issue, offline, json),
         Command::Auth { command } => crate::auth::execute(command).map_err(Into::into),
         Command::Skill { command } => crate::skill::execute(command).map_err(Into::into),
         Command::Create {
@@ -364,7 +454,7 @@ pub(crate) fn execute() -> Result<(), CliError> {
         Command::Graph {
             repo,
             output,
-            assignee,
+            scope,
             horizon,
             json,
             public,
@@ -373,7 +463,7 @@ pub(crate) fn execute() -> Result<(), CliError> {
         } => graph(
             &Repository::parse(&repo)?,
             &output,
-            assignee.as_deref(),
+            &scope,
             horizon,
             json,
             public.then_some(PublicGraphOptions {
@@ -383,30 +473,18 @@ pub(crate) fn execute() -> Result<(), CliError> {
         ),
         Command::Next {
             repo,
-            assignee,
+            scope,
             horizon,
             json,
             profile,
-        } => next(
-            &Repository::parse(&repo)?,
-            assignee.as_deref(),
-            horizon,
-            json,
-            profile,
-        ),
+        } => next(&Repository::parse(&repo)?, &scope, horizon, json, profile),
         Command::Plan {
             repo,
-            assignee,
+            scope,
             horizon,
             workers,
             json,
-        } => plan(
-            &Repository::parse(&repo)?,
-            assignee.as_deref(),
-            horizon,
-            workers,
-            json,
-        ),
+        } => plan(&Repository::parse(&repo)?, &scope, horizon, workers, json),
         Command::Triage {
             repo,
             assignee,
@@ -450,11 +528,7 @@ pub(crate) fn execute() -> Result<(), CliError> {
         }
         Command::Init { repo, json } => initialize(&Repository::parse(&repo)?, json),
         Command::Sync { repo, json } => sync(&Repository::parse(&repo)?, json),
-        Command::Ready {
-            repo,
-            assignee,
-            json,
-        } => ready(&Repository::parse(&repo)?, assignee.as_deref(), json),
+        Command::Ready { repo, scope, json } => ready(&Repository::parse(&repo)?, &scope, json),
         Command::Reconcile { repo, json } => reconcile(&Repository::parse(&repo)?, json),
         Command::Resolve {
             operation,
@@ -472,16 +546,97 @@ pub(crate) fn execute() -> Result<(), CliError> {
     }
 }
 
+fn view_issue(value: &str, offline: bool, json: bool) -> Result<(), CliError> {
+    let reference = PendingIssueReference::parse(value)?;
+    let resolved = crate::draft_identity::resolve_reference(&reference)?;
+    let repository = reference.repository();
+    let (replica, source) = if offline {
+        (
+            ReplicaStore::discover(repository)?.load(repository)?,
+            "local",
+        )
+    } else {
+        let requested = vec![resolved.stable_key().to_ascii_lowercase()];
+        let (replica, source) = refresh_for_relationships(repository, &requested)?;
+        (
+            replica,
+            if source.is_fallback() {
+                "local_fallback"
+            } else {
+                "live"
+            },
+        )
+    };
+    let outbox = OutboxStore::discover(repository)?.load(repository)?;
+    let working = WorkingGraph::project(&replica, &outbox)?;
+    let issue = crate::issue_read::read(&working, resolved.local_number())?;
+    if json {
+        let output = serde_json::json!({
+            "schema_version": "hyfa.issue-view/v1", "command": "view", "repository": replica.repository,
+            "source": source, "synced_at": replica.synced_at, "replica_snapshot_hash": replica.input_hash,
+            "input_hash": working.input_hash(), "pending": working.is_pending(), "pending_operation_ids": working.operation_ids(),
+            "issue": issue,
+        });
+        serde_json::to_writer(std::io::stdout().lock(), &output).map_err(CliError::EncodeOutput)?;
+        println!();
+    } else {
+        println!(
+            "{} {}\nState: {}\nSource: {} (synced_at {})",
+            issue.key, issue.title, issue.state, source, replica.synced_at
+        );
+        println!(
+            "Assignees: {}\nLabels: {}",
+            issue.assignees.join(", "),
+            issue.labels.join(", ")
+        );
+        if working.is_pending() {
+            println!(
+                "Pending local changes: {}",
+                working.operation_ids().join(", ")
+            );
+        }
+        if let Some(relationships) = &issue.relationships {
+            if let Some(parent) = &relationships.parent {
+                println!("Parent: {parent}");
+            }
+            println!("Direct children: {}", relationships.children.join(", "));
+        } else {
+            println!(
+                "Parent and child relationships: not synchronized; read this Issue online to fetch them."
+            );
+        }
+        for blocker in &issue.blocked_by {
+            println!("Blocked by: {} ({})", blocker.key, blocker.state);
+        }
+        if !issue.blocks.is_empty() {
+            println!("Blocks: {}", issue.blocks.join(", "));
+        }
+        println!("\n{}", issue.body);
+        for comment in &issue.comments {
+            println!(
+                "\nComment by {} at {}\n{}",
+                comment.author.as_deref().unwrap_or("unknown"),
+                comment.created_at,
+                comment.body
+            );
+        }
+    }
+    Ok(())
+}
+
 fn graph(
     repository: &Repository,
     output: &std::path::Path,
-    assignee: Option<&str>,
+    arguments: &ScopeArguments,
     horizon: u8,
     json: bool,
     public_options: Option<PublicGraphOptions>,
 ) -> Result<(), CliError> {
     if !(ranking::MIN_HORIZON..=ranking::MAX_HORIZON).contains(&horizon) {
         return Err(CliError::UnsupportedNextHorizon(horizon));
+    }
+    if public_options.is_some() && arguments.has_selection() {
+        return Err(CliError::PublicSelection);
     }
     let (replica, source, site) = if let Some(public_options) = public_options {
         let client = github_client()?;
@@ -492,12 +647,11 @@ fn graph(
             crate::graph::publish_public_site(&replica, &confirmed, &public_options, output)?;
         (replica, source, site)
     } else {
-        let (replica, source) = refresh_or_local(repository)?;
-        let scope = assignee
-            .map(ExecutionScope::Assignee)
-            .unwrap_or(ExecutionScope::Available);
+        let (replica, source) = refresh_for_scope(repository, arguments)?;
         let outbox = OutboxStore::discover(repository)?.load(repository)?;
         let working = WorkingGraph::project(&replica, &outbox)?;
+        let selection = arguments.selection(&working)?;
+        let scope = arguments.scope(&selection);
         let site = publish_site(&working, scope, horizon, output)?;
         (replica, source, site)
     };
@@ -537,7 +691,7 @@ fn graph(
 
 fn plan(
     repository: &Repository,
-    assignee: Option<&str>,
+    arguments: &ScopeArguments,
     horizon: u8,
     workers: Option<usize>,
     json: bool,
@@ -548,12 +702,11 @@ fn plan(
     if !(ranking::MIN_HORIZON..=ranking::MAX_HORIZON).contains(&horizon) {
         return Err(CliError::UnsupportedNextHorizon(horizon));
     }
-    let (replica, source) = refresh_or_local(repository)?;
-    let scope = assignee
-        .map(ExecutionScope::Assignee)
-        .unwrap_or(ExecutionScope::Available);
+    let (replica, source) = refresh_for_scope(repository, arguments)?;
     let outbox = OutboxStore::discover(repository)?.load(repository)?;
     let working = WorkingGraph::project(&replica, &outbox)?;
+    let selection = arguments.selection(&working)?;
+    let scope = arguments.scope(&selection);
     let prepared = PreparedRepository::prepare(&working);
     let store = ReplicaStore::discover(repository)?;
     let mut cache = ranking::RankingCache::at(store.repository_directory());
@@ -573,7 +726,7 @@ fn plan(
             source,
             synced_at: &replica.synced_at,
             replica_snapshot_hash: &replica.input_hash,
-            execution_scope: execution_scope_output(assignee),
+            execution_scope: scope.description(),
             decision,
             parallel_now,
             dependency_layers,
@@ -1181,7 +1334,7 @@ fn triage_command(
     assignee: Option<&str>,
     json: bool,
 ) -> Result<(), CliError> {
-    let (replica, source) = refresh_or_local(repository)?;
+    let (replica, source) = refresh_for_relationships(repository, &[])?;
     let scope = assignee
         .map(ExecutionScope::Assignee)
         .unwrap_or(ExecutionScope::Available);
@@ -1195,7 +1348,7 @@ fn triage_command(
             source,
             synced_at: &replica.synced_at,
             input_hash: &replica.input_hash,
-            execution_scope: execution_scope_output(assignee),
+            execution_scope: scope.description(),
             report,
             warnings,
         };
@@ -1224,18 +1377,39 @@ fn triage_command(
 }
 
 fn update_priority(issue: &str, requested: PrioritySelection, json: bool) -> Result<(), CliError> {
-    let issue = IssueReference::parse(issue)?;
+    let reference = PendingIssueReference::parse(issue)?;
+    let resolved = crate::draft_identity::resolve_reference(&reference)?;
+    let Some(issue) = resolved.as_github() else {
+        return queue_priority_update(
+            &reference,
+            requested,
+            "Draft Issue requires reconciliation".to_owned(),
+            json,
+        );
+    };
+    if OutboxStore::discover(issue.repository())?
+        .load(issue.repository())?
+        .latest_priority_operation_for_issue(issue.number())
+        .is_some()
+    {
+        return queue_priority_update(
+            &reference,
+            requested,
+            "Earlier Priority intent is pending".to_owned(),
+            json,
+        );
+    }
     let client = match github_client() {
         Ok(client) => client,
         Err(CliError::Auth(source)) => {
-            return queue_priority_update(&issue, requested, source.to_string(), json);
+            return queue_priority_update(&reference, requested, source.to_string(), json);
         }
         Err(error) => return Err(error),
     };
-    let result = match priority_update::update(&client, &issue, requested) {
+    let result = match priority_update::update(&client, issue, requested) {
         Ok(result) => result,
         Err(source) if source.permits_offline_queue() => {
-            return queue_priority_update(&issue, requested, source.to_string(), json);
+            return queue_priority_update(&reference, requested, source.to_string(), json);
         }
         Err(source) => return Err(source.into()),
     };
@@ -1247,7 +1421,8 @@ fn update_priority(issue: &str, requested: PrioritySelection, json: bool) -> Res
         repository: &result.replica.repository,
         issue: PriorityIssueOutput {
             key: &result.issue_key,
-            number: result.issue_number,
+            number: Some(result.issue_number),
+            temporary_id: reference.temporary_id(),
             url: &result.issue_url,
         },
         previous_priority: result.previous_priority,
@@ -1260,7 +1435,7 @@ fn update_priority(issue: &str, requested: PrioritySelection, json: bool) -> Res
 }
 
 fn queue_priority_update(
-    issue: &IssueReference,
+    issue: &PendingIssueReference,
     requested: PrioritySelection,
     online_failure: String,
     json: bool,
@@ -1280,6 +1455,7 @@ fn queue_priority_update(
         issue: PriorityIssueOutput {
             key: &result.issue_key,
             number: result.issue_number,
+            temporary_id: result.temporary_id,
             url: &result.issue_url,
         },
         previous_priority: result.previous_priority,
@@ -1328,7 +1504,7 @@ fn sync(repository: &Repository, json: bool) -> Result<(), CliError> {
 
 fn next(
     repository: &Repository,
-    assignee: Option<&str>,
+    arguments: &ScopeArguments,
     horizon: u8,
     json: bool,
     profile: bool,
@@ -1336,12 +1512,11 @@ fn next(
     if !(ranking::MIN_HORIZON..=ranking::MAX_HORIZON).contains(&horizon) {
         return Err(CliError::UnsupportedNextHorizon(horizon));
     }
-    let (replica, source) = refresh_or_local(repository)?;
+    let (replica, source) = refresh_for_scope(repository, arguments)?;
     let outbox = OutboxStore::discover(repository)?.load(repository)?;
     let working = WorkingGraph::project(&replica, &outbox)?;
-    let scope = assignee
-        .map(ExecutionScope::Assignee)
-        .unwrap_or(ExecutionScope::Available);
+    let selection = arguments.selection(&working)?;
+    let scope = arguments.scope(&selection);
     let store = ReplicaStore::discover(repository)?;
     let mut cache = ranking::RankingCache::at(store.repository_directory());
     let run = ranking::analyze_profiled(&working, scope, horizon, &mut cache);
@@ -1363,7 +1538,7 @@ fn next(
             source,
             synced_at: &replica.synced_at,
             replica_snapshot_hash: &replica.input_hash,
-            execution_scope: execution_scope_output(assignee),
+            execution_scope: scope.description(),
             analysis,
             warnings,
             performance,
@@ -1401,6 +1576,14 @@ fn synchronize_with_client(
     repository: &Repository,
     client: &GitHubClient,
 ) -> Result<LocalReplica, CliError> {
+    synchronize_with_relationships(repository, client, &[])
+}
+
+fn synchronize_with_relationships(
+    repository: &Repository,
+    client: &GitHubClient,
+    requested: &[String],
+) -> Result<LocalReplica, CliError> {
     let store = ReplicaStore::discover(repository)?;
     let previous = match store.load(repository) {
         Ok(replica) => Some(replica),
@@ -1409,7 +1592,8 @@ fn synchronize_with_client(
         }
         Err(error) => return Err(error.into()),
     };
-    let replica = replica_sync::refresh(client, repository, previous.as_ref())?;
+    let replica =
+        replica_sync::refresh_with_relationships(client, repository, previous.as_ref(), requested)?;
     store.publish(&replica)?;
     Ok(replica)
 }
@@ -1586,13 +1770,12 @@ fn snapshot_summary(replica: &LocalReplica) -> SnapshotSummary<'_> {
     }
 }
 
-fn ready(repository: &Repository, assignee: Option<&str>, json: bool) -> Result<(), CliError> {
-    let (replica, source) = refresh_or_local(repository)?;
+fn ready(repository: &Repository, arguments: &ScopeArguments, json: bool) -> Result<(), CliError> {
+    let (replica, source) = refresh_for_scope(repository, arguments)?;
     let outbox = OutboxStore::discover(repository)?.load(repository)?;
     let working = WorkingGraph::project(&replica, &outbox)?;
-    let scope = assignee
-        .map(ExecutionScope::Assignee)
-        .unwrap_or(ExecutionScope::Available);
+    let selection = arguments.selection(&working)?;
+    let scope = arguments.scope(&selection);
     let analysis = analyze_ready(working.replica(), scope);
     let warnings = analysis_warnings(&working, source);
     let issues: Vec<_> = analysis
@@ -1620,6 +1803,7 @@ fn ready(repository: &Repository, assignee: Option<&str>, json: bool) -> Result<
                 .collect(),
         })
         .collect();
+    let input_hash = ranking::effective_input_hash(&working, scope);
     let output = ReadyOutput {
         schema_version: READY_SCHEMA_VERSION,
         command: "ready",
@@ -1627,12 +1811,13 @@ fn ready(repository: &Repository, assignee: Option<&str>, json: bool) -> Result<
         source,
         synced_at: &replica.synced_at,
         replica_snapshot_hash: &replica.input_hash,
-        input_hash: working.input_hash(),
+        input_hash: &input_hash,
         pending: working.is_pending(),
         pending_operation_ids: working.operation_ids(),
-        execution_scope: execution_scope_output(assignee),
+        execution_scope: scope.description(),
         issues,
         summary: ReadySummary {
+            empty_reason: crate::execution_scope::empty_reason(&analysis),
             operational_issue_count: analysis.operational_issue_count,
             ready_count: analysis.ready_count,
             executable_count: analysis.executable.len(),
@@ -1662,11 +1847,6 @@ fn ready(repository: &Repository, assignee: Option<&str>, json: bool) -> Result<
         }
     }
     Ok(())
-}
-
-fn refresh_or_local(repository: &Repository) -> Result<(LocalReplica, ReplicaSource), CliError> {
-    let refresh = github_client().and_then(|client| synchronize_with_client(repository, &client));
-    refresh_or_local_after(repository, refresh)
 }
 
 fn refresh_or_local_with_client(
@@ -1735,19 +1915,6 @@ fn analysis_warnings(working: &WorkingGraph<'_>, source: ReplicaSource) -> Vec<R
         warnings.push(warning);
     }
     warnings
-}
-
-fn execution_scope_output(assignee: Option<&str>) -> ExecutionScopeOutput<'_> {
-    match assignee {
-        Some(assignee) => ExecutionScopeOutput {
-            mode: "assignee",
-            assignee: Some(assignee),
-        },
-        None => ExecutionScopeOutput {
-            mode: "available",
-            assignee: None,
-        },
-    }
 }
 
 fn print_warning(warning: &ReadyWarning) {
@@ -1916,7 +2083,7 @@ struct TriageOutput<'a> {
     source: ReplicaSource,
     synced_at: &'a str,
     input_hash: &'a str,
-    execution_scope: ExecutionScopeOutput<'a>,
+    execution_scope: crate::execution_scope::ScopeDescription,
     #[serde(flatten)]
     report: TriageReport,
     warnings: Vec<ReadyWarning>,
@@ -1931,7 +2098,7 @@ struct NextOutput<'a> {
     source: ReplicaSource,
     synced_at: &'a str,
     replica_snapshot_hash: &'a str,
-    execution_scope: ExecutionScopeOutput<'a>,
+    execution_scope: crate::execution_scope::ScopeDescription,
     #[serde(flatten)]
     analysis: NextAnalysis,
     warnings: Vec<ReadyWarning>,
@@ -2005,7 +2172,7 @@ struct PlanOutput<'a> {
     source: ReplicaSource,
     synced_at: &'a str,
     replica_snapshot_hash: &'a str,
-    execution_scope: ExecutionScopeOutput<'a>,
+    execution_scope: crate::execution_scope::ScopeDescription,
     decision: PlanDecision,
     parallel_now: Vec<PlanIssue>,
     dependency_layers: DependencyLayers,
@@ -2191,7 +2358,10 @@ struct CommentCreateOperationOutput<'a> {
 #[derive(Serialize)]
 struct PriorityIssueOutput<'a> {
     key: &'a str,
-    number: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    number: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temporary_id: Option<TemporaryIssueId>,
     url: &'a str,
 }
 
@@ -2217,17 +2387,10 @@ struct ReadyOutput<'a> {
     pending: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pending_operation_ids: Vec<String>,
-    execution_scope: ExecutionScopeOutput<'a>,
+    execution_scope: crate::execution_scope::ScopeDescription,
     issues: Vec<ReadyIssue<'a>>,
     summary: ReadySummary,
     warnings: Vec<ReadyWarning>,
-}
-
-#[derive(Serialize)]
-struct ExecutionScopeOutput<'a> {
-    mode: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    assignee: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -2250,6 +2413,8 @@ struct ReadyIssue<'a> {
 
 #[derive(Serialize)]
 struct ReadySummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    empty_reason: Option<crate::execution_scope::EmptyReason>,
     operational_issue_count: usize,
     ready_count: usize,
     executable_count: usize,
@@ -2344,6 +2509,16 @@ impl ReplicaSource {
 
 #[derive(Debug, Error)]
 pub(crate) enum CliError {
+    #[error(transparent)]
+    IssueRead(#[from] crate::issue_read::IssueReadError),
+    #[error(transparent)]
+    DraftIdentity(#[from] crate::draft_identity::DraftIdentityError),
+    #[error(transparent)]
+    Selection(#[from] crate::execution_scope::SelectionError),
+    #[error(
+        "selection filters apply to the full graph explorer; the sealed public export has its own allowlisted analysis"
+    )]
+    PublicSelection,
     #[error(transparent)]
     Skill(#[from] crate::skill::SkillError),
     #[error(transparent)]

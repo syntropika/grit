@@ -473,6 +473,8 @@ enum RunnerUpScope {
 #[derive(Clone, Deserialize, JsonSchema, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct NextSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    empty_reason: Option<crate::execution_scope::EmptyReason>,
     operational_issue_count: usize,
     ready_count: usize,
     executable_count: usize,
@@ -491,6 +493,7 @@ impl NextSummary {
     ) -> Self {
         Self {
             operational_issue_count: ready.operational_issue_count,
+            empty_reason: crate::execution_scope::empty_reason(ready),
             ready_count: ready.ready_count,
             executable_count: ready.executable.len(),
             candidate_count,
@@ -503,7 +506,7 @@ impl NextSummary {
 
     pub(crate) fn human_empty_summary(&self) -> String {
         format!(
-            "No executable candidate: {} blocked, {} assigned Ready, {} cyclic, {} with an unknown blocker",
+            "No executable candidate in the selected scope: {} blocked, {} assigned Ready, {} cyclic, {} with an unknown blocker",
             self.blocked_count,
             self.assigned_ready_count,
             self.cyclic_issue_count,

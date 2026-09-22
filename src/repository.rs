@@ -17,6 +17,7 @@ pub(crate) struct IssueReference {
     number: u64,
 }
 
+#[derive(Clone)]
 pub(crate) enum PendingIssueReference {
     GitHub(IssueReference),
     Draft {

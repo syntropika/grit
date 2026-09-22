@@ -29,7 +29,7 @@ A Ready Issue with no assignee and therefore available as new work. Assignment a
 _Avoid_: Ready Issue, unblocked Issue
 
 **Execution scope**:
-The rule that determines which Ready Issues Hyfa may propose as steps in a calculation. By default it includes Available Issues; an explicit assignee filter changes it to the Issues assigned to that person.
+The rule that determines which Ready Issues Hyfa may propose as steps in a calculation. It combines availability or an explicit assignee with optional required labels, excluded labels, and direct children of a Parent Issue; it does not remove blockers or limit which unlocked outcomes count.
 _Avoid_: Graph scope, readiness, global availability
 
 **Executable Issue**:
@@ -151,6 +151,10 @@ _Avoid_: Project, workspace, organization
 **Graph scope**:
 The Issues belonging to an analysis's Repository, regardless of how they are later filtered for a particular calculation.
 _Avoid_: Project membership, organization backlog
+
+**Parent relationship**:
+A GitHub relationship that groups a child Issue under a Parent Issue for decomposition. Direct-child membership can constrain the Execution scope, but is not a Dependency and does not change readiness.
+_Avoid_: Dependency, implicit blocker, recursive membership
 
 **External blocker**:
 An Issue from another Repository that blocks an Issue in the Graph scope; it affects readiness but does not enter the scope or receive a ranking.

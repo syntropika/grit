@@ -116,6 +116,15 @@ impl PendingMutationOutbox {
             {
                 return Err(OutboxError::InvalidDesiredPriority);
             }
+            if operation.priority_values().is_some()
+                && crate::metadata::PendingIssueOperand::new(
+                    operation.issue_number(),
+                    operation.priority_temporary_id(),
+                )
+                .is_err()
+            {
+                return Err(OutboxError::InvalidIssueNumber);
+            }
             if let Some((edge, _)) = operation.dependency_values() {
                 let repositories_valid = Repository::parse(edge.blocked_repository()).is_ok()
                     && Repository::parse(edge.blocker_repository()).is_ok();
@@ -240,6 +249,8 @@ enum MutationPayload {
     },
     PriorityUpdate {
         issue_number: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        temporary_id: Option<TemporaryIssueId>,
         base: LogicalPriority,
         desired: LogicalPriority,
         #[serde(default, skip_serializing_if = "PriorityMutationState::is_pending")]
@@ -373,6 +384,11 @@ impl MutationPayload {
                 edge.resolve_temporary_id(identity.temporary_id, identity.issue_number);
             }
             Self::IssueFieldUpdate {
+                issue_number,
+                temporary_id,
+                ..
+            }
+            | Self::PriorityUpdate {
                 issue_number,
                 temporary_id,
                 ..
@@ -758,10 +774,32 @@ impl PendingMutation {
             },
             payload: MutationPayload::PriorityUpdate {
                 issue_number,
+                temporary_id: None,
                 base,
                 desired,
                 state: PriorityMutationState::Pending,
             },
+        }
+    }
+
+    pub(crate) fn with_priority_temporary_id(
+        mut self,
+        temporary_id: Option<TemporaryIssueId>,
+    ) -> Self {
+        if let MutationPayload::PriorityUpdate {
+            temporary_id: alias,
+            ..
+        } = &mut self.payload
+        {
+            *alias = temporary_id;
+        }
+        self
+    }
+
+    pub(crate) fn priority_temporary_id(&self) -> Option<TemporaryIssueId> {
+        match self.payload {
+            MutationPayload::PriorityUpdate { temporary_id, .. } => temporary_id,
+            _ => None,
         }
     }
 

@@ -209,7 +209,7 @@ fn graph_generates_a_deterministic_valid_offline_site_without_raw_records() {
     let javascript_bytes = fs::read(output_directory.join("app.js")).expect("graph JavaScript");
     let schema_bytes = fs::read(output_directory.join("graph.schema.json")).expect("graph schema");
     let graph: Value = serde_json::from_slice(&graph_bytes).expect("artifact JSON");
-    assert_eq!(graph["schema_version"], "hyfa.graph-artifact/v2");
+    assert_eq!(graph["schema_version"], "hyfa.graph-artifact/v3");
     assert_eq!(graph["schema_url"], "./graph.schema.json");
     assert_eq!(graph["repository"], "acme/widgets");
     assert!(graph["synced_at"].as_str().is_some());
@@ -340,7 +340,7 @@ fn graph_generates_a_deterministic_valid_offline_site_without_raw_records() {
                 && variant["properties"].get("state").is_none()
                 && variant["properties"].get("readiness").is_none())
     );
-    let scope_variants = schema["$defs"]["ArtifactExecutionScope"]["oneOf"]
+    let scope_variants = schema["$defs"]["ScopeDescription"]["oneOf"]
         .as_array()
         .expect("execution-scope variants");
     assert_eq!(scope_variants.len(), 2);

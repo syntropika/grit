@@ -400,8 +400,9 @@ fn result_for(
         .expect("Priority result is built from a Priority mutation");
     OperationResult {
         id: operation.id().to_owned(),
-        issue_number: Some(operation.issue_number()),
-        temporary_id: None,
+        issue_number: (operation.issue_number() < (1_u64 << 63))
+            .then_some(operation.issue_number()),
+        temporary_id: operation.priority_temporary_id(),
         depends_on: operation.depends_on().to_vec(),
         classification,
         outcome,

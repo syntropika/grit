@@ -78,6 +78,72 @@ The replica file format and location below `HYFA_STATE_DIR` are implementation
 details. Consumers should use Hyfa's versioned command output rather than read
 the replica directly.
 
+## Select an execution scope
+
+`ready`, `next`, `plan`, and the full `graph` explorer accept the same
+optional selectors in addition to `--assignee`:
+
+```bash
+hyfa next --repo OWNER/REPO --label area:backend --exclude-label deferred
+hyfa plan --repo OWNER/REPO --children-of 'OWNER/REPO#10' --label ready-for-agent
+hyfa graph --repo OWNER/REPO --children-of 'OWNER/REPO#10' --output site/
+```
+
+Repeat `--label` to require every label. Repeat `--exclude-label` to reject any
+match; exclusion wins if a label appears in both lists. Label comparison is
+ASCII case-insensitive, and argument order and duplicate labels do not change
+cache identity. Labels have no built-in workflow meaning: filtering by
+`ready-for-agent`, `needs-info`, or a phase is an explicit caller choice.
+
+`--children-of` accepts a numbered Issue or a Draft key in the selected
+Repository. It selects direct children only, excluding the parent itself and
+grandchildren. Children in other repositories remain outside the Graph scope.
+All selectors intersect with ownership: unassigned work by default, or the
+requested assignee's work. An Issue must still be open and dependency-ready.
+
+Selection applies before ranking and to every simulated step. Outside blockers
+remain in the graph and still block selected work; Hyfa never inserts an
+out-of-scope prerequisite into a plan. Unlocked-outcome scoring, downstream
+Priority, and structural centrality retain their repository-wide meaning.
+There is no automatic return to repository-wide selection when a scope is empty.
+JSON records the normalized `execution_scope`; empty results include a summary
+`empty_reason`. `ready`, `next`, `plan`, and the full explorer share the same
+effective input hash for the same Working graph and scope.
+
+The first online parent selection fetches its complete parent/direct-child
+inventory before publishing the Local replica. Subsequent synchronization,
+including mutation readback, refreshes known inventories even when Issue
+timestamps have not changed. A failed refresh preserves the previous snapshot
+and `synced_at`. Offline parent selection uses that inventory and pending
+relationships; missing inventory is an explicit error, not an empty child list.
+Draft parents have a known initially empty inventory. After Draft publication,
+fetch the permanent parent's inventory online before relying on it offline.
+
+These selectors affect the full private explorer. `graph --public` rejects them
+and continues to use its independent sealed, allowlisted export contract.
+
+## Read a complete Issue
+
+```bash
+hyfa view 'OWNER/REPO#42'
+hyfa view 'OWNER/REPO#42' --json
+hyfa view 'OWNER/REPO#draft:TEMPORARY_ID' --offline --json
+```
+
+`view` reads the effective body, comments, labels, assignments, Priority,
+Dependencies, and parent/direct-child relationships. It projects pending edits,
+comments, priorities, and relationships without replaying writes. Operation
+markers and internal synthetic Issue numbers never appear in its output.
+Temporary aliases remain readable after reconciliation.
+
+Normal reading attempts synchronization, including the requested Issue's
+relationship inventory, and falls back to the last valid replica. `--offline`
+skips network access explicitly. JSON uses `hyfa.issue-view/v1`, reports
+`source`, `synced_at`, the replica and Working-graph hashes, and ordered pending
+provenance. On an older offline snapshot, bodies and comments remain readable
+while `relationships_complete: false` and `relationships: null` identify missing
+parent/child inventory. Dependency data remains separate from that inventory.
+
 ## Initialize Declared priority
 
 Hyfa v1 reads Declared priority only from `priority:p0` through `priority:p4`
@@ -227,6 +293,12 @@ Creation returns a stable Temporary Issue ID and a key such as
 GitHub assigns an Issue number. `hyfa reconcile` creates referenced Drafts
 before their dependent operations, stores the permanent number and node ID,
 and retains the temporary alias.
+
+Draft keys also work with `view` and `update --priority p0|p1|p2|p3|p4|none`.
+Priority changes are durable intents that depend on Draft creation and any
+earlier Priority intent for the same Issue. They affect local labels, scoped
+selection, and ranking immediately, and retain normal optimistic conflict
+handling after the Draft receives its permanent GitHub identity.
 
 Every non-idempotent create has a random, non-secret Operation marker persisted
 before the request. Hyfa embeds it in an invisible Markdown comment, removes it
@@ -400,7 +472,7 @@ Older artifacts without a closure reason remain readable and are treated as
 other closed work. Outcome presentation never changes operational readiness
 or ranking: closed Issues are not candidates for the next recommendation.
 
-The `hyfa.graph-artifact/v2` artifact also carries the exact precomputed `next/v1` analysis and the
+The `hyfa.graph-artifact/v3` artifact also carries the exact precomputed `next/v1` analysis and the
 matching structural `plan` for its Execution scope and horizon. Its summary
 shows the recommendation, decisive reason, distinct runner-up, search
 completeness, immediate parallel work, unresolved cycles, and unknown External

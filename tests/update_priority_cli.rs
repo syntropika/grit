@@ -166,12 +166,13 @@ fn update_reports_when_github_changed_but_replica_publication_failed() {
     let mut github = Server::new();
     let workspace = TempDir::new().expect("temporary workspace");
     let invalid_state = workspace.path().join("state-file");
-    fs::write(&invalid_state, "not a directory").expect("invalid state path");
+    fs::create_dir(&invalid_state).expect("initial state directory");
     let before = issue(7, vec![label(10, "area:core")]);
     let after = issue(7, vec![label(10, "area:core"), label(23, "priority:p3")]);
     let current = mock_current_issue(&mut github, before);
     let addition = mock_priority_addition(&mut github, "priority:p3", 200);
-    let synchronization = mock_synchronization(&mut github, after);
+    let synchronization =
+        mock_synchronization_with_failure(&mut github, after, Some(invalid_state.clone()));
 
     let output = update_command_at(&invalid_state, &github.url(), "p3", true)
         .output()
@@ -263,6 +264,14 @@ fn mock_priority_removal(github: &mut Server, label: &str, status: usize) -> Moc
 }
 
 fn mock_synchronization(github: &mut Server, issue: Value) -> SynchronizationMocks {
+    mock_synchronization_with_failure(github, issue, None)
+}
+
+fn mock_synchronization_with_failure(
+    github: &mut Server,
+    issue: Value,
+    fail_publication: Option<std::path::PathBuf>,
+) -> SynchronizationMocks {
     let events = github
         .mock("GET", "/repos/acme/widgets/issues/events")
         .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
@@ -317,7 +326,13 @@ fn mock_synchronization(github: &mut Server, issue: Value) -> SynchronizationMoc
         .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
         .with_status(200)
         .with_header("content-type", "application/json")
-        .with_body("[]")
+        .with_body_from_request(move |_| {
+            if let Some(path) = &fail_publication {
+                fs::remove_dir(path).expect("remove empty fixture directory");
+                fs::write(path, "not a directory").expect("make final publication fail");
+            }
+            b"[]".to_vec()
+        })
         .create();
     SynchronizationMocks {
         events,

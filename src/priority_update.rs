@@ -6,7 +6,7 @@ use crate::{
     outbox::{OutboxError, OutboxStore, PendingMutation},
     priority::{DeclaredPriority, LogicalPriority, PrioritySelection, PriorityState},
     replica_sync::{self, ReplicaSyncError},
-    repository::IssueReference,
+    repository::{IssueReference, PendingIssueReference},
     store::{ReplicaStore, StoreError},
     working_graph::{WorkingGraph, WorkingGraphError},
 };
@@ -22,7 +22,8 @@ pub(crate) struct PriorityUpdateResult {
 
 pub(crate) struct PendingPriorityUpdateResult {
     pub(crate) issue_key: String,
-    pub(crate) issue_number: u64,
+    pub(crate) issue_number: Option<u64>,
+    pub(crate) temporary_id: Option<crate::model::TemporaryIssueId>,
     pub(crate) issue_url: String,
     pub(crate) previous_priority: PriorityState,
     pub(crate) resulting_priority: PriorityState,
@@ -125,39 +126,62 @@ pub(crate) fn update(
 }
 
 pub(crate) fn queue(
-    issue: &IssueReference,
+    issue: &PendingIssueReference,
     selection: PrioritySelection,
 ) -> Result<PendingPriorityUpdateResult, PendingPriorityUpdateError> {
     let outbox_store = OutboxStore::discover(issue.repository())?;
     let transaction = outbox_store.begin_transaction(issue.repository())?;
+    let resolved = crate::draft_identity::resolve_reference(issue)?;
+    let number = resolved.local_number();
     let replica = ReplicaStore::discover(issue.repository())?.load(issue.repository())?;
     let current_working = WorkingGraph::project(&replica, transaction.outbox())?;
-    let local_issue = replica
+    let local_issue = current_working
+        .replica()
         .issues
         .iter()
-        .find(|candidate| candidate.number == issue.number())
+        .find(|candidate| candidate.number == number)
         .ok_or_else(|| PendingPriorityUpdateError::MissingIssue(issue.stable_key()))?;
     let previous_priority = current_working.priority(local_issue);
     let desired = LogicalPriority::from_selection(selection);
-    let depends_on = transaction
+    let mut depends_on = transaction
         .outbox()
-        .latest_priority_operation_for_issue(issue.number())
+        .latest_priority_operation_for_issue(number)
         .map(|operation| vec![operation.to_owned()])
         .unwrap_or_default();
+    if let Some(temporary_id) = resolved.temporary_id() {
+        let create = transaction
+            .outbox()
+            .operations()
+            .iter()
+            .find(|operation| {
+                operation
+                    .issue_create_view()
+                    .is_some_and(|create| create.temporary_id == temporary_id)
+            })
+            .ok_or_else(|| PendingPriorityUpdateError::MissingIssue(issue.stable_key()))?;
+        depends_on.push(create.id().to_owned());
+    }
+    depends_on.sort();
+    depends_on.dedup();
     let operation = PendingMutation::priority_update(
         issue.repository(),
-        issue.number(),
+        number,
         LogicalPriority::from_state(&previous_priority),
         desired.clone(),
         depends_on,
-    );
+    )
+    .with_priority_temporary_id(issue.temporary_id());
+    let issue_number = (!local_issue.is_draft()).then_some(local_issue.number);
+    let issue_url = local_issue.url.clone();
+    drop(current_working);
     let next_outbox = transaction.append(issue.repository(), operation.clone())?;
     let next_working = WorkingGraph::project(&replica, &next_outbox)?;
 
     Ok(PendingPriorityUpdateResult {
         issue_key: issue.stable_key(),
-        issue_number: local_issue.number,
-        issue_url: local_issue.url.clone(),
+        issue_number,
+        temporary_id: issue.temporary_id(),
+        issue_url,
         previous_priority,
         resulting_priority: desired.to_state(),
         operation,
@@ -249,6 +273,8 @@ impl PriorityUpdateError {
 
 #[derive(Debug, Error)]
 pub(crate) enum PendingPriorityUpdateError {
+    #[error(transparent)]
+    DraftIdentity(#[from] crate::draft_identity::DraftIdentityError),
     #[error(transparent)]
     Store(#[from] StoreError),
     #[error(transparent)]
