@@ -13,8 +13,8 @@ Use `hyfa --version` and `hyfa COMMAND --help` to check the installed interface.
 Use `--json` where supported and parse its versioned output. Pass an explicit
 `--repo OWNER/REPO`; quote Issue references such as `'OWNER/REPO#42'`.
 For additional options, consult the
-[usage guide](https://github.com/syntropika/hyfa/blob/v0.3.0/docs/usage.md) and
-[installation guide](https://github.com/syntropika/hyfa/blob/v0.3.0/docs/installation.md).
+[usage guide](https://github.com/syntropika/hyfa/blob/v0.4.0/docs/usage.md) and
+[installation guide](https://github.com/syntropika/hyfa/blob/v0.4.0/docs/installation.md).
 
 ## Authentication and first use
 
@@ -76,6 +76,13 @@ Read the Issue's actual specification before implementation with `hyfa view
 assignments, and relationships, including pending local changes. `--offline`
 skips the refresh; check `synced_at`, `pending`, and `relationships_complete`.
 The generated explorer still excludes body and comment text.
+
+`view` and the private explorer also explain Dependency impact: direct and
+transitive open dependents, immediate Ready outcomes, remaining-blocker examples,
+and downstream chain depth. Check completeness flags before treating downstream
+counts as exact. Blocked subjects have no immediate-outcome claim, and chain
+depth is unavailable for reachable cycles. These are structural diagnostics,
+not business value, delivery estimates, or additional ranking weights.
 
 ## Make authorized changes
 

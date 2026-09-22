@@ -3,6 +3,10 @@ use thiserror::Error;
 
 use crate::{
     model::{IssueRelationships, TemporaryIssueId, strip_operation_markers},
+    operational::{
+        PreparedRepository,
+        impact::{DependencyImpact, ImpactAnalysis},
+    },
     priority::PriorityState,
     working_graph::{PendingProvenance, WorkingGraph},
 };
@@ -33,6 +37,7 @@ pub(crate) struct IssueView {
     pub(crate) relationships: Option<IssueRelationships>,
     pub(crate) blocked_by: Vec<BlockerView>,
     pub(crate) blocks: Vec<String>,
+    pub(crate) impact: Option<DependencyImpact>,
 }
 
 #[derive(Serialize)]
@@ -122,6 +127,8 @@ pub(crate) fn read(working: &WorkingGraph<'_>, number: u64) -> Result<IssueView,
         .relationships
         .get(&key.to_ascii_lowercase())
         .cloned();
+    let prepared = PreparedRepository::prepare(working);
+    let impact = ImpactAnalysis::prepare(&prepared).for_issue(number);
     Ok(IssueView {
         key,
         number: (!issue.is_draft()).then_some(issue.number),
@@ -169,6 +176,7 @@ pub(crate) fn read(working: &WorkingGraph<'_>, number: u64) -> Result<IssueView,
         relationships,
         blocked_by,
         blocks,
+        impact,
     })
 }
 

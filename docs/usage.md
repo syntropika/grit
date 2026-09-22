@@ -144,6 +144,38 @@ provenance. On an older offline snapshot, bodies and comments remain readable
 while `relationships_complete: false` and `relationships: null` identify missing
 parent/child inventory. Dependency data remains separate from that inventory.
 
+### Explain Dependency impact
+
+The reader includes `issue.impact` for open Issues. The private explorer presents
+the same precomputed report when an Issue is selected. Closed and unknown-state
+Issues have `impact: null`; the public graph does not include this report.
+
+- `direct_dependents` counts distinct directly dependent open Issues.
+- `downstream.count` counts distinct open descendants across the entire Repository,
+  excluding the subject itself. Diamonds count once, and closed Issues stop traversal.
+- `immediate_unlocks` identifies work that becomes Ready after completing the
+  subject alone. Every other open or unknown blocker must still be satisfied;
+  assignment and execution filters do not change readiness. For a blocked subject,
+  this field and `still_blocked` are `null`, rather than a claim of executable work.
+- `still_blocked` separates downstream work that needs more completions, with
+  examples of the remaining open or unknown blockers after that single completion.
+- `chain_depth` reports the maximum number of open internal Dependency edges
+  along a downstream chain. A reachable cycle makes depth unavailable. This is
+  structural depth, not a duration, completion estimate, or guarantee that every
+  prerequisite is known; external blockers remain explicit in the explanations.
+
+Traversal has a deterministic limit of 50,000 node/edge visits per subject.
+When it stops early, `downstream.complete` and `still_blocked.total.complete` are
+false and their counts are lower bounds. Direct counts, immediate outcomes, and
+finite chain depth remain exact. Each outcome list and remaining-blocker list
+shows at most five examples; counts describe the complete or explicitly partial
+set. Outcome examples follow Stable node key order. Results disclose both limits.
+
+`impact.pending` conservatively identifies analysis over a Working graph with
+pending changes; the enclosing command or artifact carries their provenance.
+The browser displays the report without calculating impact. These diagnostics
+do not change `next/v1`, Priority, PageRank, or the selected execution scope.
+
 ## Initialize Declared priority
 
 Hyfa v1 reads Declared priority only from `priority:p0` through `priority:p4`
@@ -472,7 +504,7 @@ Older artifacts without a closure reason remain readable and are treated as
 other closed work. Outcome presentation never changes operational readiness
 or ranking: closed Issues are not candidates for the next recommendation.
 
-The `hyfa.graph-artifact/v3` artifact also carries the exact precomputed `next/v1` analysis and the
+The `hyfa.graph-artifact/v4` artifact also carries the exact precomputed `next/v1` analysis and the
 matching structural `plan` for its Execution scope and horizon. Its summary
 shows the recommendation, decisive reason, distinct runner-up, search
 completeness, immediate parallel work, unresolved cycles, and unknown External

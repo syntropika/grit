@@ -11,19 +11,22 @@ use super::{
 };
 use crate::{
     model::{BlockerScope, DependencyEdgeKey, TemporaryIssueId, strip_operation_markers},
-    operational::{ExecutionScope, PreparedRepository},
+    operational::{
+        ExecutionScope, PreparedRepository,
+        impact::{DependencyImpact, ImpactAnalysis},
+    },
     plan::{DependencyLayers, PlanIssue},
     priority::PriorityState,
     ranking::{self, NextAnalysis, PlanDecision},
     working_graph::{PendingProvenance, WorkingGraph},
 };
 
-pub(crate) const ARTIFACT_SCHEMA_VERSION: &str = "hyfa.graph-artifact/v3";
+pub(crate) const ARTIFACT_SCHEMA_VERSION: &str = "hyfa.graph-artifact/v4";
 
 #[derive(Clone, Copy, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 enum ArtifactSchemaVersion {
-    #[serde(rename = "hyfa.graph-artifact/v3")]
-    V3,
+    #[serde(rename = "hyfa.graph-artifact/v4")]
+    V4,
 }
 
 #[derive(Clone, Copy, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -141,6 +144,7 @@ pub(super) enum ArtifactNode {
         pagerank_bucket: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         unlock_count: Option<usize>,
+        impact: Option<Box<DependencyImpact>>,
     },
     ExternalBlocker {
         common: NodeCommon,
@@ -413,6 +417,7 @@ pub(super) fn build_working(
     };
     let mut nodes = Vec::new();
     let mut node_keys = BTreeSet::new();
+    let impacts = ImpactAnalysis::prepare(&prepared);
 
     for issue in &replica.issues {
         let key = NodeKey::for_issue(&replica.repository, issue);
@@ -466,6 +471,7 @@ pub(super) fn build_working(
             priority: working.priority(issue),
             pagerank_bucket: pagerank_buckets.get(&issue.number).copied(),
             unlock_count,
+            impact: impacts.for_issue(issue.number).map(Box::new),
             projects: None,
         });
     }
@@ -601,7 +607,7 @@ pub(super) fn build_working(
         blocked_count: ready.blocked_count,
     };
     let mut artifact = GraphArtifact {
-        schema_version: ArtifactSchemaVersion::V3,
+        schema_version: ArtifactSchemaVersion::V4,
         schema_url: SchemaLocation::Local,
         repository: replica.repository.clone(),
         synced_at: replica.synced_at.clone(),
@@ -626,7 +632,7 @@ pub(super) fn validate_serialized(bytes: &[u8]) -> Result<(), GraphError> {
 }
 
 fn validate(artifact: &GraphArtifact) -> Result<(), GraphError> {
-    if artifact.schema_version != ArtifactSchemaVersion::V3
+    if artifact.schema_version != ArtifactSchemaVersion::V4
         || artifact.schema_url != SchemaLocation::Local
     {
         return Err(GraphError::InvalidSchemaIdentity);

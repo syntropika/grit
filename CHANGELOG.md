@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.0
+
+- Explain Dependency impact in `hyfa view` and the private graph's Issue details:
+  direct dependents, distinct open downstream work, immediate Ready outcomes,
+  and examples of work that still needs other blockers resolved.
+- Show the longest downstream chain in dependency steps, with an unavailable
+  result for reachable cycles. Closed history and parent relationships do not
+  inflate impact; ownership and execution filters do not hide downstream work.
+- Share precomputed impact between offline reading and the explorer, including
+  pending Draft identities and effective changes. Bounded traversal reports
+  lower bounds explicitly, and examples have declared limits.
+- Advance the strict private graph contract to `hyfa.graph-artifact/v4` and add
+  `issue.impact` to Issue-view JSON. Ranking and the sealed public graph retain
+  their existing contracts.
+
 ## 0.3.0
 
 - Select executable work with repeatable `--label` and `--exclude-label` filters

@@ -21,6 +21,7 @@ pub struct Remote {
     pub children: BTreeMap<u64, Vec<u64>>,
     pub external_children: BTreeMap<u64, Vec<Value>>,
     pub blockers: BTreeMap<u64, Vec<u64>>,
+    pub external_blockers: BTreeMap<u64, Vec<Value>>,
     pub writes: Vec<String>,
     pub invalid_relationship_inventory: bool,
     pub lose_create_response: bool,
@@ -114,16 +115,15 @@ impl Fixture {
                     .with_status(200)
                     .with_body_from_request(move |_| {
                         let data = data.lock().unwrap();
-                        json!(
-                            data.blockers
-                                .get(&number)
-                                .into_iter()
-                                .flatten()
-                                .map(|n| &data.issues[n])
-                                .collect::<Vec<_>>()
-                        )
-                        .to_string()
-                        .into_bytes()
+                        let mut blockers = data
+                            .blockers
+                            .get(&number)
+                            .into_iter()
+                            .flatten()
+                            .map(|n| &data.issues[n])
+                            .collect::<Vec<_>>();
+                        blockers.extend(data.external_blockers.get(&number).into_iter().flatten());
+                        json!(blockers).to_string().into_bytes()
                     })
                     .create(),
             );
