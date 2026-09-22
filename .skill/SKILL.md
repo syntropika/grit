@@ -58,7 +58,7 @@ hyfa triage --repo OWNER/REPO --json
 - `--label` requires every listed label; `--exclude-label` excludes any match.
   `--children-of` selects direct children, excludes the parent itself, and needs
   a synchronized relationship inventory for offline use. These combine with
-  assignment scope on `ready`, `next`, `plan`, `triage`, and the full graph.
+  assignment scope on `ready`, `next`, `plan`, and the full graph.
   Labels have no implicit workflow meaning: choose filters from the task's
   instructions. Excluded blockers still block; unlocked outcomes count globally.
 - Horizons are 1, 2, or 3; the default is 3. Report search restrictions from

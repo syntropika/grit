@@ -73,7 +73,14 @@ impl<'a> WorkingGraph<'a> {
                 desired,
             )) = operation.metadata_set_values()
             {
-                parent_updates.push((parent.number(), child.number(), desired));
+                parent_updates.push(ParentRelationshipUpdate {
+                    parent: parent.number(),
+                    child: child.number(),
+                    desired,
+                    provenance: operation
+                        .is_pending_intent()
+                        .then(|| (index, operation.id().to_owned())),
+                });
             }
             if let Some(comment) = operation.comment_create_view()
                 && operation.is_pending_intent()
@@ -162,7 +169,11 @@ impl<'a> WorkingGraph<'a> {
             }
         }
         if effective_replica.issues.iter().any(Issue::is_draft) || !parent_updates.is_empty() {
-            project_parent_relationships(effective_replica.to_mut(), parent_updates)?;
+            project_parent_relationships(
+                effective_replica.to_mut(),
+                parent_updates,
+                &mut operation_ids_by_issue,
+            )?;
         }
         if !comment_creates.is_empty() {
             apply_comment_creates(&mut effective_replica.to_mut().issues, comment_creates)?;
@@ -225,13 +236,11 @@ impl<'a> WorkingGraph<'a> {
     }
 
     pub(crate) fn provenance_for_issue(&self, issue_number: u64) -> PendingProvenance {
-        PendingProvenance::new(
+        PendingProvenance::from_indexed(
             self.operation_ids_by_issue
                 .get(&issue_number)
-                .into_iter()
-                .flatten()
-                .map(|(_, operation_id)| operation_id.clone())
-                .collect(),
+                .cloned()
+                .unwrap_or_default(),
         )
     }
 
@@ -269,9 +278,17 @@ impl<'a> WorkingGraph<'a> {
     }
 }
 
+struct ParentRelationshipUpdate {
+    parent: u64,
+    child: u64,
+    desired: SetPresence,
+    provenance: Option<(usize, String)>,
+}
+
 fn project_parent_relationships(
     replica: &mut LocalReplica,
-    updates: Vec<(u64, u64, SetPresence)>,
+    updates: Vec<ParentRelationshipUpdate>,
+    operation_ids_by_issue: &mut BTreeMap<u64, Vec<(usize, String)>>,
 ) -> Result<(), WorkingGraphError> {
     let keys: BTreeMap<_, _> = replica
         .issues
@@ -289,7 +306,14 @@ fn project_parent_relationships(
             .entry(keys[&issue.number].clone())
             .or_default();
     }
-    for (parent, child, desired) in updates {
+    let numbers: BTreeMap<_, _> = keys.iter().map(|(number, key)| (key, *number)).collect();
+    for ParentRelationshipUpdate {
+        parent,
+        child,
+        desired,
+        provenance,
+    } in updates
+    {
         let parent = keys
             .get(&parent)
             .ok_or(WorkingGraphError::MissingIssue(parent))?;
@@ -298,8 +322,14 @@ fn project_parent_relationships(
             .ok_or(WorkingGraphError::MissingIssue(child))?;
         if desired == SetPresence::Present {
             for (key, inventory) in &mut replica.relationships {
-                if key != parent {
+                if key != parent && inventory.children.contains(child) {
                     inventory.children.retain(|key| key != child);
+                    if let Some(provenance) = &provenance {
+                        operation_ids_by_issue
+                            .entry(numbers[key])
+                            .or_default()
+                            .push(provenance.clone());
+                    }
                 }
             }
         }

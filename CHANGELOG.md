@@ -3,7 +3,7 @@
 ## 0.3.0
 
 - Select executable work with repeatable `--label` and `--exclude-label` filters
-  and `--children-of OWNER/REPO#NUMBER` across `ready`, `next`, `plan`, `triage`,
+  and `--children-of OWNER/REPO#NUMBER` across `ready`, `next`, `plan`,
   and the full graph explorer. Every simulated step respects the same scope.
 - Preserve all Dependencies and global unlocked-outcome scoring. Synchronize
   requested parent/child inventories for offline selection; unknown membership
@@ -13,8 +13,9 @@
   local view without contacting GitHub. Pending changes and snapshot time remain visible.
 - Set and clear Draft Issue priorities before publication. Reconciliation applies
   their ordered intents after creation and retains the temporary identity alias.
-- Extend versioned JSON and graph schemas with optional scope and empty-result
-  details. Existing unfiltered commands, replicas, and outboxes remain readable.
+- Add optional scope and empty-result details to CLI JSON. The strict private
+  graph contract advances to `hyfa.graph-artifact/v3`; consumers must use the
+  accompanying schema. Existing replicas and outboxes remain readable.
   The sealed public export keeps its separate allowlisted contract.
 
 ## 0.2.1

@@ -18,12 +18,12 @@ use crate::{
     working_graph::{PendingProvenance, WorkingGraph},
 };
 
-pub(crate) const ARTIFACT_SCHEMA_VERSION: &str = "hyfa.graph-artifact/v2";
+pub(crate) const ARTIFACT_SCHEMA_VERSION: &str = "hyfa.graph-artifact/v3";
 
 #[derive(Clone, Copy, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 enum ArtifactSchemaVersion {
-    #[serde(rename = "hyfa.graph-artifact/v2")]
-    V2,
+    #[serde(rename = "hyfa.graph-artifact/v3")]
+    V3,
 }
 
 #[derive(Clone, Copy, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -601,7 +601,7 @@ pub(super) fn build_working(
         blocked_count: ready.blocked_count,
     };
     let mut artifact = GraphArtifact {
-        schema_version: ArtifactSchemaVersion::V2,
+        schema_version: ArtifactSchemaVersion::V3,
         schema_url: SchemaLocation::Local,
         repository: replica.repository.clone(),
         synced_at: replica.synced_at.clone(),
@@ -626,7 +626,7 @@ pub(super) fn validate_serialized(bytes: &[u8]) -> Result<(), GraphError> {
 }
 
 fn validate(artifact: &GraphArtifact) -> Result<(), GraphError> {
-    if artifact.schema_version != ArtifactSchemaVersion::V2
+    if artifact.schema_version != ArtifactSchemaVersion::V3
         || artifact.schema_url != SchemaLocation::Local
     {
         return Err(GraphError::InvalidSchemaIdentity);

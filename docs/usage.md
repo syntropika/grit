@@ -80,7 +80,7 @@ the replica directly.
 
 ## Select an execution scope
 
-`ready`, `next`, `plan`, `triage`, and the full `graph` explorer accept the same
+`ready`, `next`, `plan`, and the full `graph` explorer accept the same
 optional selectors in addition to `--assignee`:
 
 ```bash
@@ -472,7 +472,7 @@ Older artifacts without a closure reason remain readable and are treated as
 other closed work. Outcome presentation never changes operational readiness
 or ranking: closed Issues are not candidates for the next recommendation.
 
-The `hyfa.graph-artifact/v2` artifact also carries the exact precomputed `next/v1` analysis and the
+The `hyfa.graph-artifact/v3` artifact also carries the exact precomputed `next/v1` analysis and the
 matching structural `plan` for its Execution scope and horizon. Its summary
 shows the recommendation, decisive reason, distinct runner-up, search
 completeness, immediate parallel work, unresolved cycles, and unknown External

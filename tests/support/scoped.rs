@@ -19,6 +19,7 @@ pub struct Fixture {
 pub struct Remote {
     pub issues: BTreeMap<u64, Value>,
     pub children: BTreeMap<u64, Vec<u64>>,
+    pub external_children: BTreeMap<u64, Vec<Value>>,
     pub blockers: BTreeMap<u64, Vec<u64>>,
     pub writes: Vec<String>,
     pub invalid_relationship_inventory: bool,
@@ -54,6 +55,7 @@ impl Fixture {
         data.blockers.insert(2, vec![8]);
         data.blockers.insert(3, vec![2]);
         data.blockers.insert(6, vec![4]);
+        data.blockers.insert(7, vec![3]);
         let remote = Arc::new(Mutex::new(data));
         let mut mocks = Vec::new();
         for path in ["labels", "issues/events"] {
@@ -136,16 +138,15 @@ impl Fixture {
                         if data.invalid_relationship_inventory {
                             return b"{}".to_vec();
                         }
-                        json!(
-                            data.children
-                                .get(&number)
-                                .into_iter()
-                                .flatten()
-                                .map(|n| &data.issues[n])
-                                .collect::<Vec<_>>()
-                        )
-                        .to_string()
-                        .into_bytes()
+                        let mut children = data
+                            .children
+                            .get(&number)
+                            .into_iter()
+                            .flatten()
+                            .map(|n| &data.issues[n])
+                            .collect::<Vec<_>>();
+                        children.extend(data.external_children.get(&number).into_iter().flatten());
+                        json!(children).to_string().into_bytes()
                     })
                     .create(),
             );

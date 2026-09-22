@@ -209,7 +209,7 @@ fn graph_generates_a_deterministic_valid_offline_site_without_raw_records() {
     let javascript_bytes = fs::read(output_directory.join("app.js")).expect("graph JavaScript");
     let schema_bytes = fs::read(output_directory.join("graph.schema.json")).expect("graph schema");
     let graph: Value = serde_json::from_slice(&graph_bytes).expect("artifact JSON");
-    assert_eq!(graph["schema_version"], "hyfa.graph-artifact/v2");
+    assert_eq!(graph["schema_version"], "hyfa.graph-artifact/v3");
     assert_eq!(graph["schema_url"], "./graph.schema.json");
     assert_eq!(graph["repository"], "acme/widgets");
     assert!(graph["synced_at"].as_str().is_some());

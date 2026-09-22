@@ -226,8 +226,9 @@ enum Command {
         /// Repository in OWNER/REPO form.
         #[arg(long)]
         repo: String,
-        #[command(flatten)]
-        scope: ScopeArguments,
+        /// Select work assigned to this login instead of unassigned work.
+        #[arg(long)]
+        assignee: Option<String>,
         /// Emit versioned machine-readable output.
         #[arg(long)]
         json: bool,
@@ -484,9 +485,11 @@ pub(crate) fn execute() -> Result<(), CliError> {
             workers,
             json,
         } => plan(&Repository::parse(&repo)?, &scope, horizon, workers, json),
-        Command::Triage { repo, scope, json } => {
-            triage_command(&Repository::parse(&repo)?, &scope, json)
-        }
+        Command::Triage {
+            repo,
+            assignee,
+            json,
+        } => triage_command(&Repository::parse(&repo)?, assignee.as_deref(), json),
         Command::Update {
             issue,
             priority,
@@ -1328,15 +1331,14 @@ fn print_issue_field_update(
 
 fn triage_command(
     repository: &Repository,
-    arguments: &ScopeArguments,
+    assignee: Option<&str>,
     json: bool,
 ) -> Result<(), CliError> {
-    let (replica, source) = refresh_for_scope(repository, arguments)?;
-    let outbox = OutboxStore::discover(repository)?.load(repository)?;
-    let working = WorkingGraph::project(&replica, &outbox)?;
-    let selection = arguments.selection(&working)?;
-    let scope = arguments.scope(&selection);
-    let report = triage::analyze(working.replica(), scope);
+    let (replica, source) = refresh_for_relationships(repository, &[])?;
+    let scope = assignee
+        .map(ExecutionScope::Assignee)
+        .unwrap_or(ExecutionScope::Available);
+    let report = triage::analyze(&replica, scope);
     let warnings: Vec<_> = source.warning().into_iter().collect();
     if json {
         let output = TriageOutput {
@@ -1356,7 +1358,7 @@ fn triage_command(
         println!(
             "Triage diagnostics in {} (scope {}, synced_at {}):",
             replica.repository,
-            execution_scope_name(arguments.assignee.as_deref()),
+            execution_scope_name(assignee),
             replica.synced_at
         );
         let lines = report.human_lines();
@@ -1404,7 +1406,7 @@ fn update_priority(issue: &str, requested: PrioritySelection, json: bool) -> Res
         }
         Err(error) => return Err(error),
     };
-    let result = match priority_update::update(&client, &issue, requested) {
+    let result = match priority_update::update(&client, issue, requested) {
         Ok(result) => result,
         Err(source) if source.permits_offline_queue() => {
             return queue_priority_update(&reference, requested, source.to_string(), json);

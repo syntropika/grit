@@ -32,7 +32,7 @@ fn scope_applies_to_every_step_without_hiding_outside_blockers() {
     let next = fixture.run(&[&["next"][..], &scope].concat(), false);
     assert_eq!(next["recommendation"]["first_issue"]["number"], 2);
     assert_eq!(
-        next["recommendation"]["steps"]
+        next["recommendation"]["rollout"]["steps"]
             .as_array()
             .unwrap()
             .iter()
@@ -233,6 +233,128 @@ fn view_reads_full_content_and_pending_changes_without_replaying_writes() {
     assert_eq!(snapshot, fixture.snapshot("replica.json"));
     assert_eq!(outbox, fixture.snapshot("outbox.json"));
     assert!(fixture.remote.lock().unwrap().writes.is_empty());
+}
+
+#[test]
+fn cached_external_relationships_do_not_change_or_leak_into_public_export() {
+    let mut fixture = Fixture::new();
+    let _metadata = fixture
+        .server
+        .mock("GET", "/repos/acme/widgets")
+        .with_status(200)
+        .with_body(
+            json!({"id": 99, "node_id": "REPOSITORY_PRIVATE_ID", "full_name": REPO,
+            "html_url": "https://github.com/acme/widgets", "visibility": "public", "private": false,
+            "owner": {"id": 88, "node_id": "OWNER_PRIVATE_ID", "login": "acme"}})
+            .to_string(),
+        )
+        .create();
+    let site = fixture.state.path().join("public-graph");
+    let arguments = [
+        "graph",
+        "--repo",
+        REPO,
+        "--public",
+        "--output",
+        site.to_str().unwrap(),
+    ];
+    fixture.run(&arguments, false);
+    let before: Value =
+        serde_json::from_slice(&fs::read(site.join("graph.json")).unwrap()).unwrap();
+    fixture.remote.lock().unwrap().external_children.insert(
+        1,
+        vec![json!({"number": 444,
+        "repository_url": "https://api.github.com/repos/private-org/secret-roadmap"})],
+    );
+    fixture.run(&["view", PARENT], false);
+    fixture.run(&arguments, false);
+    let after: Value = serde_json::from_slice(&fs::read(site.join("graph.json")).unwrap()).unwrap();
+    assert_eq!(before["public_input_hash"], after["public_input_hash"]);
+    assert_eq!(before["artifact_hash"], after["artifact_hash"]);
+    assert_eq!(before["nodes"], after["nodes"]);
+    for name in ["graph.json", "graph.schema.json", "index.html"] {
+        assert!(
+            !fs::read_to_string(site.join(name))
+                .unwrap()
+                .contains("private-org")
+        );
+        assert!(
+            !fs::read_to_string(site.join(name))
+                .unwrap()
+                .contains("secret-roadmap")
+        );
+    }
+}
+
+#[test]
+fn offline_view_distinguishes_unknown_relationships_from_a_known_empty_inventory() {
+    let fixture = Fixture::new();
+    fixture.run(&["sync", "--repo", REPO], false);
+    let unknown = fixture.run(&["view", "acme/widgets#5", "--offline"], true);
+    assert_eq!(unknown["issue"]["relationships_complete"], false);
+    assert!(unknown["issue"]["relationships"].is_null());
+    fixture.run(&["view", "acme/widgets#5"], false);
+    let known = fixture.run(&["view", "acme/widgets#5", "--offline"], true);
+    assert_eq!(known["issue"]["relationships_complete"], true);
+    assert_eq!(known["issue"]["relationships"]["children"], json!([]));
+    assert!(known["issue"]["relationships"]["parent"].is_null());
+}
+
+#[test]
+fn reparenting_discloses_pending_provenance_on_the_previous_parent() {
+    let fixture = Fixture::new();
+    fixture.run(&["view", PARENT], false);
+    fixture.run(&["view", "acme/widgets#2"], false);
+    fixture.run(
+        &["sub-issue", "acme/widgets#2", "--add", "acme/widgets#3"],
+        true,
+    );
+    let previous = fixture.run(&["view", PARENT, "--offline"], true);
+    let next = fixture.run(&["view", "acme/widgets#2", "--offline"], true);
+    assert_eq!(
+        previous["issue"]["relationships"]["children"],
+        json!(["acme/widgets#2", "acme/widgets#6"])
+    );
+    assert_eq!(
+        next["issue"]["relationships"]["children"],
+        json!(["acme/widgets#3"])
+    );
+    assert_eq!(previous["issue"]["pending"], true);
+    assert_eq!(
+        previous["issue"]["operation_ids"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(
+        previous["issue"]["operation_ids"],
+        next["issue"]["operation_ids"]
+    );
+    let edited = fixture.run(
+        &["update", PARENT, "--title", "Updated previous parent"],
+        true,
+    );
+    let previous = fixture.run(&["view", PARENT, "--offline"], true);
+    assert_eq!(
+        previous["issue"]["operation_ids"],
+        json!([next["issue"]["operation_ids"][0], edited["operation"]["id"]])
+    );
+    assert!(fixture.remote.lock().unwrap().writes.is_empty());
+}
+
+#[test]
+fn triage_preserves_its_synchronized_snapshot_contract_with_pending_drafts() {
+    let fixture = Fixture::new();
+    let before = fixture.run(&["triage", "--repo", REPO], false);
+    let draft = fixture.run(
+        &["create", "--repo", REPO, "--title", "Pending draft"],
+        true,
+    );
+    let key = draft["draft"]["key"].as_str().unwrap();
+    fixture.run(&["update", key, "--assignee", "alice"], true);
+    let after = fixture.run(&["triage", "--repo", REPO], true);
+    assert_eq!(before["input_hash"], after["input_hash"]);
+    assert_eq!(before["diagnostics"], after["diagnostics"]);
+    assert_eq!(before["summary"], after["summary"]);
+    assert!(!after.to_string().contains("Pending draft"));
 }
 
 #[test]
